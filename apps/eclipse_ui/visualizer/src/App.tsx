@@ -106,6 +106,7 @@ interface GameState {
 interface StagedPlayerConfig {
   species: string | null;
   is_ai: boolean;
+  starting_sector?: number;
 }
 
 interface SetupConfig {
@@ -131,11 +132,17 @@ function App({ initialMetadata }: { initialMetadata: any }) {
   const [error, setError] = useState<string | null>(null);
   const [jsonExpanded, setJsonExpanded] = useState<boolean>(false);
   const [hoveredSector, setHoveredSector] = useState<Sector | null>(null);
+  const [setupFinalized, setSetupFinalized] = useState<boolean>(false);
+  const [playerStartingSectors, setPlayerStartingSectors] = useState<Record<number, number>>({});
 
   const speciesList: string[] = gameMetadata.species ?? Object.keys(SPECIES_THEME);
-  const [speciesChoices, setSpeciesChoices] = useState<Record<number, string>>(
-    Object.fromEntries(Array.from({ length: 6 }, (_, i) => [i, speciesList[i % speciesList.length]]))
-  );
+  const [speciesChoices, setSpeciesChoices] = useState<Record<number, string>>(() => {
+    const choices: Record<number, string> = {};
+    for (let i = 0; i < 6; i++) {
+      choices[i] = speciesList[i % speciesList.length];
+    }
+    return choices;
+  });
   const [aiChoices, setAiChoices] = useState<Record<number, boolean>>(
     Object.fromEntries(Array.from({ length: 6 }, (_, i) => [i, i !== 0]))
   );
@@ -144,10 +151,22 @@ function App({ initialMetadata }: { initialMetadata: any }) {
 
   const gameState = snapshot?.state ?? null;
 
-  const speciesOptions = speciesList.map((name: string) => ({
-    value: name,
-    label: SPECIES_THEME[name]?.displayLabel ?? name,
-  }));
+  const getSpeciesOptions = (playerId: number) => {
+    const selectedSpecies = Array.from({ length: numPlayers }, (_, i) => i)
+      .filter(id => id !== playerId)
+      .map(id => speciesChoices[id]);
+    
+    return speciesList.map((name: string) => {
+      const isTerran = SPECIES_THEME[name]?.isTerran;
+      const isAlienAndTaken = !isTerran && selectedSpecies.includes(name);
+      
+      return {
+        value: name,
+        label: SPECIES_THEME[name]?.displayLabel ?? name,
+        disabled: isAlienAndTaken,
+      };
+    });
+  };
 
   const stagedPlayers = useMemo(
     () =>
@@ -209,6 +228,7 @@ function App({ initialMetadata }: { initialMetadata: any }) {
       }
       const data = await response.json();
       setSnapshot(data);
+      setSetupFinalized(true);
     } catch (err: any) {
       setError(err.message || 'An unexpected error occurred');
     } finally {
@@ -218,6 +238,24 @@ function App({ initialMetadata }: { initialMetadata: any }) {
 
   const handleSpeciesChange = (playerId: number, species: string) => {
     setSpeciesChoices((prev) => ({ ...prev, [playerId]: species }));
+    
+    // Assign random starting sector for terran players
+    if (SPECIES_THEME[species]?.isTerran) {
+      const terranSectors = [221, 223, 225, 227, 229, 231];
+      const takenSectors = Object.values(playerStartingSectors);
+      const availableSectors = terranSectors.filter(s => !takenSectors.includes(s));
+      if (availableSectors.length > 0) {
+        const randomSector = availableSectors[Math.floor(Math.random() * availableSectors.length)];
+        setPlayerStartingSectors(prev => ({ ...prev, [playerId]: randomSector }));
+      }
+    } else {
+      // Remove starting sector assignment for non-terran
+      setPlayerStartingSectors(prev => {
+        const newSectors = { ...prev };
+        delete newSectors[playerId];
+        return newSectors;
+      });
+    }
   };
 
   const handleAiChange = (playerId: number, isAi: boolean) => {
@@ -275,23 +313,24 @@ function App({ initialMetadata }: { initialMetadata: any }) {
   const playerIds = Array.from({ length: numPlayers }, (_, playerId) => playerId);
 
   return (
-    <div className="app-container">
+    <div className="w-[95%] mx-auto app-container">
       <header className="header">
         <h1>Eclipse setup & map visualizer</h1>
         <p>Interactive staged setup backed by the shared OpenSpiel Eclipse core</p>
       </header>
 
       {error && (
-        <div style={{ backgroundColor: '#7f1d1d', border: '1px solid #f87171', padding: '12px', borderRadius: '8px', marginBottom: '16px', fontSize: '14px' }}>
+        <div className="bg-[#7f1d1d] border border-[#f87171] p-3 rounded-lg mb-4 text-sm">
           <strong>Error connecting to backend:</strong> {error}
         </div>
       )}
 
-      <div className="main-layout">
+      <div className={`main-layout ${setupFinalized ? '!grid-cols-1' : ''}`}>
+        {!setupFinalized && (
         <div className="panel">
           <div>
             <h3 className="panel-title">Setup Config</h3>
-            <span style={{ fontSize: '12px', color: '#94a3b8' }}>
+            <span className="text-xs text-[#94a3b8]">
               Stage 1 resolves initial randomness from this UI-driven configuration
             </span>
           </div>
@@ -315,15 +354,15 @@ function App({ initialMetadata }: { initialMetadata: any }) {
             </select>
           </div>
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', borderTop: '1px solid #2d313f', paddingTop: '16px', marginTop: '8px' }}>
+          <div className="flex flex-col gap-4 border-t border-[#2d313f] pt-4 mt-2">
             <div>
               <h3 className="panel-title">Player Choices</h3>
-              <span style={{ fontSize: '12px', color: '#94a3b8' }}>
+              <span className="text-xs text-[#94a3b8]">
                 Species and control flags are UI-owned and sent into the setup pipeline
               </span>
             </div>
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            <div className="flex flex-col gap-2.5">
               {playerIds.map((playerId) => {
                 const currentTurnIdx = gameState?.turn_order.indexOf(playerId) ?? -1;
                 const isFirstPicker = gameState
@@ -332,7 +371,7 @@ function App({ initialMetadata }: { initialMetadata: any }) {
                 return (
                   <div key={playerId} className={`player-choice-card ${isFirstPicker ? 'active' : ''}`}>
                     <div className="player-card-header">
-                      <span style={{ fontSize: '13px', fontWeight: 'bold' }}>Player {playerId}</span>
+                      <span className="text-[13px] font-bold">Player {playerId}</span>
                       <span className="player-badge">
                         {gameState
                           ? isFirstPicker
@@ -342,25 +381,30 @@ function App({ initialMetadata }: { initialMetadata: any }) {
                       </span>
                     </div>
 
-                    <div className="form-group" style={{ gap: '4px' }}>
+                    <div className="form-group gap-1">
                       <select
                         value={speciesChoices[playerId] || speciesList[playerId % speciesList.length]}
                         onChange={(e) => handleSpeciesChange(playerId, e.target.value)}
                       >
-                        {speciesOptions.map((opt: { value: string; label: string }) => (
-                          <option key={opt.value} value={opt.value}>{opt.label}</option>
+                        {getSpeciesOptions(playerId).map((opt: { value: string; label: string; disabled?: boolean }) => (
+                          <option key={opt.value} value={opt.value} disabled={opt.disabled}>{opt.label}</option>
                         ))}
                       </select>
+                      {SPECIES_THEME[speciesChoices[playerId]]?.isTerran && playerStartingSectors[playerId] && (
+                        <span className="text-xs text-[#94a3b8] mt-1">
+                          Starting Sector: {playerStartingSectors[playerId]}
+                        </span>
+                      )}
                     </div>
 
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px' }}>
+                    <div className="flex items-center gap-2 text-xs">
                       <input
                         type="checkbox"
                         id={`ai-${playerId}`}
                         checked={getAiDefault(playerId)}
                         onChange={(e) => handleAiChange(playerId, e.target.checked)}
                       />
-                      <label htmlFor={`ai-${playerId}`} style={{ color: '#cbd5e1', cursor: 'pointer' }}>
+                      <label htmlFor={`ai-${playerId}`} className="text-[#cbd5e1] cursor-pointer">
                         Control as AI Agent
                       </label>
                     </div>
@@ -375,10 +419,10 @@ function App({ initialMetadata }: { initialMetadata: any }) {
           </button>
 
           {snapshot && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', borderTop: '1px solid #2d313f', paddingTop: '16px', marginTop: '16px' }}>
+            <div className="flex flex-col gap-4 border-t border-[#2d313f] pt-4 mt-4">
               <div>
                 <h3 className="panel-title">Stage 2: Finalize Setup</h3>
-                <span style={{ fontSize: '12px', color: '#94a3b8' }}>
+                <span className="text-xs text-[#94a3b8]">
                   Applies current player choices to the deterministic Stage 1 snapshot
                 </span>
               </div>
@@ -388,11 +432,12 @@ function App({ initialMetadata }: { initialMetadata: any }) {
             </div>
           )}
         </div>
+        )}
 
         <div className="board-container">
           {gameState && (
             <div className="turn-order-bar">
-              <span style={{ fontSize: '12px', textTransform: 'uppercase', color: '#94a3b8', fontWeight: 'bold', marginRight: '8px' }}>Active Turn Order:</span>
+              <span className="text-xs uppercase text-[#94a3b8] font-bold mr-2">Active Turn Order:</span>
               {gameState.turn_order.map((playerId, idx) => {
                 if (playerId === 255) return null;
                 const player = gameState.players[playerId];
@@ -401,7 +446,7 @@ function App({ initialMetadata }: { initialMetadata: any }) {
                   <div key={playerId} className={`turn-badge ${isActive ? 'active' : ''}`}>
                     <span className="turn-num">{idx + 1}</span>
                     <span className={SPECIES_THEME[player?.species_id ?? '']?.cssClass ?? ''}>P{playerId} ({player?.species_id || 'Choosing...'})</span>
-                    {player?.is_ai && <span style={{ fontSize: '9px', backgroundColor: '#334155', color: '#93c5fd', padding: '1px 4px', borderRadius: '4px' }}>AI</span>}
+                    {player?.is_ai && <span className="text-[9px] bg-[#334155] text-[#93c5fd] px-1 py-0.5 rounded">AI</span>}
                   </div>
                 );
               })}
@@ -466,12 +511,12 @@ function App({ initialMetadata }: { initialMetadata: any }) {
                 })}
               </svg>
             ) : (
-              <div style={{ textAlign: 'center', color: '#64748b' }}>
-                <svg style={{ width: '64px', height: '64px', marginBottom: '16px', color: '#334155' }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <div className="text-center text-[#64748b]">
+                <svg className="w-16 h-16 mb-4 text-[#334155]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M14 10l-2 1m0 0l-2-1m2 1v2.5M20 7l-2 1m2-1l-2-1m2 1v2.5M14 4l-2-1-2 1M4 7l2-1M4 7l2 1M4 7v2.5M12 21l-2-1m2 1l2-1m-2 1v-2.5M6 18l-2-1v-2.5M18 18l2-1v-2.5" />
                 </svg>
                 <h3>Galaxy Map Uninitialized</h3>
-                <p style={{ fontSize: '14px' }}>Send a Stage 1 setup config to spin up the shared C++ core</p>
+                <p className="text-sm">Send a Stage 1 setup config to spin up the shared C++ core</p>
               </div>
             )}
 
@@ -510,16 +555,27 @@ function App({ initialMetadata }: { initialMetadata: any }) {
           {gameState && (
             <div className="panel">
               <h3 className="panel-title">Round 1 Technology Market</h3>
-              <div className="tech-grid">
-                {Object.entries(gameState.tech_tray).map(([techName, tech]) => (
-                  <div key={techName} className={`tech-card ${tech.category}`}>
-                    <div className="tech-name">{techName}</div>
-                    <span className={`tech-category-badge ${tech.category}`}>{tech.category}</span>
-                    <div className="tech-count" style={{ marginTop: '6px' }}>
-                      Qty Available: <strong>{tech.count}</strong>
+              <div className="flex flex-col gap-4">
+                {['Military', 'Grid', 'Nano', 'Rare'].map((category) => {
+                  const categoryTechs = Object.entries(gameState.tech_tray).filter(([_, tech]) => tech.category === category);
+                  if (categoryTechs.length === 0) return null;
+                  return (
+                    <div key={category}>
+                      <h4 className="text-sm font-semibold text-[#94a3b8] mb-2 uppercase">{category} Track</h4>
+                      <div className="tech-grid">
+                        {categoryTechs.map(([techName, tech]) => (
+                          <div key={techName} className={`tech-card ${tech.category}`}>
+                            <div className="tech-name">{techName}</div>
+                            <span className={`tech-category-badge ${tech.category}`}>{tech.category}</span>
+                            <div className="tech-count mt-1.5">
+                              Qty Available: <strong>{tech.count}</strong>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
