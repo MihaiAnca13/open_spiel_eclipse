@@ -1,0 +1,153 @@
+//
+// Created by Mihai on 26/05/2026.
+//
+
+#ifndef ECLIPSE_SECTORS_H
+#define ECLIPSE_SECTORS_H
+
+#include <cstdint>
+#include <vector>
+#include <nlohmann/json.hpp>
+
+struct HexCoord {
+    int8_t q, r;
+};
+
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(HexCoord, q, r);
+
+struct Sector {
+    uint16_t sector_id;
+    uint8_t owner_id = 255;  // 255 = unowned
+    HexCoord coords;
+    uint8_t rotation;
+    uint8_t points;
+    // Population: Bits or counters for which slots are occupied
+    // Since slots are fixed per tile, just track which index is filled
+    uint16_t occupied_slots_mask; // Bit i is 1 if SECTOR_TABLE[id].slots[i] has a cube
+
+    bool discovery_tile_present; // Flips to false once claimed
+    bool orbital_built;
+    bool monolith_built;
+};
+
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Sector, sector_id, owner_id, coords, rotation, points, occupied_slots_mask, discovery_tile_present, orbital_built, monolith_built);
+
+
+enum class PlanetType : uint8_t {
+    MONEY, SCIENCE, MATERIALS,
+    ADV_MONEY, ADV_SCIENCE, ADV_MATERIALS,
+    ANY, ADV_ANY
+};
+
+struct PlanetSlot {
+    PlanetType type;
+};
+
+enum class SectorType { OUTER, INNER, MIDDLE, STARTING, CENTER, GUARDIAN };
+
+struct SectorDefinition {
+    const char* name;
+    uint16_t sector_id;
+    SectorType type;
+    uint8_t points;            // VP value
+    uint8_t wormholes_mask;    // Bitmask for the 6 edges
+    bool has_artifact;
+    bool start_with_discovery;
+    std::vector<PlanetSlot> slots; // What is printed on the tile
+    uint8_t starting_ancients;
+    bool has_guardian;         // True for sectors 271-274
+    bool is_gcds;              // True only for sector 001
+};
+
+// Index this by sector_id for O(1) lookup
+static const SectorDefinition SECTOR_TABLE[] = {
+    { "Galactic Center", 1, SectorType::CENTER, 4, 0b111111, true, true, {{PlanetType::ADV_MATERIALS}, {PlanetType::MATERIALS}, {PlanetType::ADV_SCIENCE}, {PlanetType::SCIENCE}, {PlanetType::ADV_MONEY}, {PlanetType::MONEY}}, 0, false, true },
+    { "CASTOR", 101, SectorType::INNER, 2, 0b111110, false, false, {{PlanetType::ADV_MATERIALS}, {PlanetType::MATERIALS}, {PlanetType::MONEY}}, 0, false, false },
+    { "Pollux", 102, SectorType::INNER, 2, 0b101101, false, false, {{PlanetType::SCIENCE}, {PlanetType::SCIENCE}}, 0, false, false },
+    { "Beta Leonis", 103, SectorType::INNER, 2, 0b110111, false, false, {{PlanetType::SCIENCE}, {PlanetType::MONEY}}, 0, false, false },
+    { "ARCTURUS", 104, SectorType::INNER, 2, 0b011011, false, false, {{PlanetType::ADV_MONEY}, {PlanetType::MONEY}, {PlanetType::ADV_SCIENCE}, {PlanetType::SCIENCE}}, 0, false, false },
+    { "ZETA HERCULIS", 105, SectorType::INNER, 2, 0b111011, false, false, {{PlanetType::MONEY}, {PlanetType::SCIENCE}, {PlanetType::ADV_MATERIALS}}, 0, false, false },
+    { "Capella", 106, SectorType::INNER, 2, 0b001111, false, false, {{PlanetType::SCIENCE}, {PlanetType::MATERIALS}}, 0, false, false },
+    { "Aldebaran", 107, SectorType::INNER, 3, 0b101111, true, false, {{PlanetType::ADV_SCIENCE}, {PlanetType::MONEY}, {PlanetType::ADV_MATERIALS}}, 0, false, false },
+    { "Mu Cassiopeiae", 108, SectorType::INNER, 2, 0b011011, false, false, {{PlanetType::ADV_MONEY}, {PlanetType::SCIENCE}, {PlanetType::ANY}}, 1, false, false },
+    { "Alpha Lacertae", 109, SectorType::INNER, 4, 0b111110, true, false, {{PlanetType::MATERIALS}, {PlanetType::MONEY}}, 2, false, false },
+    { "Iota Bootis", 110, SectorType::INNER, 2, 0b011101, false, false, {{PlanetType::ADV_MONEY}, {PlanetType::ANY}}, 0, false, false },
+    { "ALPHA CENTAURI", 201, SectorType::MIDDLE, 1, 0b101010, false, false, {{PlanetType::MATERIALS}, {PlanetType::MONEY}}, 0, false, false },
+    { "Fomalhaut", 202, SectorType::MIDDLE, 2, 0b101010, true, false, {{PlanetType::ADV_SCIENCE}, {PlanetType::SCIENCE}}, 0, false, false },
+    { "Chi Draconis", 203, SectorType::MIDDLE, 2, 0b101011, false, false, {{PlanetType::MATERIALS}, {PlanetType::MONEY}, {PlanetType::SCIENCE}}, 2, false, false },
+    { "Vega", 204, SectorType::MIDDLE, 2, 0b101011, true, false, {{PlanetType::ADV_MONEY}, {PlanetType::ADV_MATERIALS}, {PlanetType::ANY}}, 1, false, false },
+    { "MU HERCULIS", 205, SectorType::MIDDLE, 1, 0b011100, true, false, {{PlanetType::ADV_MONEY}, {PlanetType::MONEY}, {PlanetType::ADV_SCIENCE}}, 0, false, false },
+    { "Epsilon Indi", 206, SectorType::MIDDLE, 1, 0b101110, false, false, {{PlanetType::MATERIALS}}, 0, false, false },
+    { "ZETA RETICULI", 207, SectorType::MIDDLE, 2, 0b001011, false, true, {}, 0, false, false },
+    { "Iota Persei", 208, SectorType::MIDDLE, 2, 0b101101, false, false, {}, 0, false, false },
+    { "Delta Eridani", 209, SectorType::MIDDLE, 1, 0b101011, false, false, {{PlanetType::MONEY}, {PlanetType::SCIENCE}}, 0, false, false },
+    { "Psi Capricorni", 210, SectorType::MIDDLE, 1, 0b101001, false, false, {{PlanetType::MONEY}, {PlanetType::MATERIALS}}, 0, false, false },
+    { "Beta Aquilae", 211, SectorType::MIDDLE, 1, 0b001111, false, false, {{PlanetType::MONEY}, {PlanetType::MATERIALS}, {PlanetType::ANY}}, 1, false, false },
+    { "Beta Monocerotis", 214, SectorType::MIDDLE, 2, 0b110111, false, false, {{PlanetType::ADV_ANY}, {PlanetType::ADV_MATERIALS}, {PlanetType::SCIENCE}}, 1, false, false },
+    { "Procyon", 221, SectorType::STARTING, 3, 0b011011, false, false, {{PlanetType::ADV_MONEY}, {PlanetType::MONEY}, {PlanetType::ADV_SCIENCE}, {PlanetType::SCIENCE}, {PlanetType::MATERIALS}}, 0, false, false },
+    { "Epsilon Eridani", 222, SectorType::STARTING, 3, 0b011011, false, false, {{PlanetType::ADV_MONEY}, {PlanetType::MONEY}, {PlanetType::ADV_SCIENCE}, {PlanetType::SCIENCE}}, 0, false, false },
+    { "Altair", 223, SectorType::STARTING, 3, 0b011011, false, false, {{PlanetType::ADV_MONEY}, {PlanetType::MONEY}, {PlanetType::ADV_SCIENCE}, {PlanetType::SCIENCE}, {PlanetType::MATERIALS}}, 0, false, false },
+    { "Beta Hydri", 224, SectorType::STARTING, 3, 0b011011, false, false, {{PlanetType::MONEY}, {PlanetType::ADV_SCIENCE}, {PlanetType::ADV_MATERIALS}}, 0, false, false },
+    { "Eta Cassiopeiae", 225, SectorType::STARTING, 3, 0b011011, false, false, {{PlanetType::ADV_MONEY}, {PlanetType::MONEY}, {PlanetType::ADV_SCIENCE}, {PlanetType::SCIENCE}, {PlanetType::MATERIALS}}, 0, false, false },
+    { "61 Cygni", 226, SectorType::STARTING, 3, 0b011011, false, false, {{PlanetType::SCIENCE}, {PlanetType::MATERIALS}}, 0, false, false },
+    { "Sirius", 227, SectorType::STARTING, 3, 0b011011, false, false, {{PlanetType::ADV_MONEY}, {PlanetType::MONEY}, {PlanetType::ADV_SCIENCE}, {PlanetType::SCIENCE}, {PlanetType::MATERIALS}}, 0, false, false },
+    { "Sigma Draconis", 228, SectorType::STARTING, 3, 0b011011, false, false, {{PlanetType::MONEY}, {PlanetType::SCIENCE}, {PlanetType::ADV_MATERIALS}}, 0, false, false },
+    { "Tau Ceti", 229, SectorType::STARTING, 3, 0b011011, false, false, {{PlanetType::ADV_MONEY}, {PlanetType::MONEY}, {PlanetType::ADV_SCIENCE}, {PlanetType::SCIENCE}, {PlanetType::MATERIALS}}, 0, false, false },
+    { "Lambda Aurigae", 230, SectorType::STARTING, 3, 0b011011, false, false, {{PlanetType::ADV_MONEY}, {PlanetType::MONEY}, {PlanetType::SCIENCE}, {PlanetType::ADV_MATERIALS}}, 0, false, false },
+    { "Delta Pavonis", 231, SectorType::STARTING, 3, 0b011011, false, false, {{PlanetType::ADV_MONEY}, {PlanetType::MONEY}, {PlanetType::ADV_SCIENCE}, {PlanetType::SCIENCE}, {PlanetType::MATERIALS}}, 0, false, false },
+    { "Rigel", 232, SectorType::STARTING, 3, 0b011011, false, false, {{PlanetType::ADV_MONEY}, {PlanetType::SCIENCE}, {PlanetType::ADV_MATERIALS}, {PlanetType::MATERIALS}}, 0, false, false },
+    { "Omega Fornacis", 271, SectorType::GUARDIAN, 2, 0b011011, true, true, {{PlanetType::ADV_MATERIALS}, {PlanetType::MONEY}, {PlanetType::SCIENCE}}, 0, true, false },
+    { "Sigma Hydrae", 272, SectorType::GUARDIAN, 2, 0b011011, true, true, {{PlanetType::MONEY}, {PlanetType::ADV_SCIENCE}, {PlanetType::MATERIALS}}, 0, true, false },
+    { "Theta Ophiuchi", 273, SectorType::GUARDIAN, 2, 0b011011, true, true, {{PlanetType::ADV_MATERIALS}, {PlanetType::MATERIALS}, {PlanetType::MONEY}}, 0, true, false },
+    { "Alpha Lyncis", 274, SectorType::GUARDIAN, 2, 0b011011, true, true, {{PlanetType::ADV_SCIENCE}, {PlanetType::SCIENCE}, {PlanetType::MONEY}}, 0, true, false },
+    { "Delta Corvi", 281, SectorType::MIDDLE, 2, 0b101101, false, false, {{PlanetType::SCIENCE}, {PlanetType::MONEY}}, 0, false, false },
+    { "ZETA DRACONIS", 301, SectorType::OUTER, 2, 0b001101, true, true, {{PlanetType::SCIENCE}, {PlanetType::MONEY}, {PlanetType::ADV_MATERIALS}}, 2, false, false },
+    { "Gamma Serpentis", 302, SectorType::OUTER, 2, 0b011001, true, false, {{PlanetType::ADV_SCIENCE}, {PlanetType::ADV_MONEY}, {PlanetType::MATERIALS}}, 1, false, false },
+    { "ETA CEPHEI", 303, SectorType::OUTER, 2, 0b101000, true, true, {{PlanetType::ADV_SCIENCE}, {PlanetType::ADV_MONEY}}, 0, false, false },
+    { "THETA PEGASI", 304, SectorType::OUTER, 2, 0b001001, false, false, {{PlanetType::ADV_MONEY}, {PlanetType::MATERIALS}}, 0, false, false },
+    { "Lambda Serpentis", 305, SectorType::OUTER, 1, 0b001011, false, false, {{PlanetType::SCIENCE}, {PlanetType::MATERIALS}}, 1, false, false },
+    { "BETA CENTAURI", 306, SectorType::OUTER, 1, 0b001010, false, false, {{PlanetType::MONEY}, {PlanetType::MATERIALS}}, 0, false, false },
+    { "SIGMA SAGITTARII", 307, SectorType::OUTER, 2, 0b001101, false, false, {{PlanetType::MONEY}, {PlanetType::ADV_SCIENCE}}, 0, false, false },
+    { "Kappa Scorpii", 308, SectorType::OUTER, 2, 0b101100, false, false, {{PlanetType::SCIENCE}, {PlanetType::ADV_MATERIALS}}, 0, false, false },
+    { "Phi Piscium", 309, SectorType::OUTER, 2, 0b101001, false, false, {{PlanetType::MONEY}, {PlanetType::ADV_SCIENCE}}, 0, false, false },
+    { "Nu Phoenicis", 310, SectorType::OUTER, 1, 0b001001, false, false, {{PlanetType::SCIENCE}, {PlanetType::MATERIALS}}, 0, false, false },
+    { "CANOPUS", 311, SectorType::OUTER, 1, 0b001101, false, false, {{PlanetType::MATERIALS}}, 0, false, false },
+    { "Antares", 312, SectorType::OUTER, 1, 0b001011, true, false, {{PlanetType::MATERIALS}}, 0, false, false },
+    { "Alpha Ursae Minoris", 313, SectorType::OUTER, 1, 0b001001, false, false, {{PlanetType::ANY}}, 0, false, false },
+    { "Spica", 314, SectorType::OUTER, 1, 0b011100, false, false, {{PlanetType::ANY}}, 0, false, false },
+    { "EPSILON AURIGAE", 315, SectorType::OUTER, 1, 0b101001, false, false, {}, 0, false, false },
+    { "IOTA CARINAE", 316, SectorType::OUTER, 1, 0b001011, false, false, {}, 0, false, false },
+    { "Beta Crucis", 317, SectorType::OUTER, 2, 0b011000, false, true, {{PlanetType::ADV_MONEY}, {PlanetType::MONEY}}, 0, false, false },
+    { "GAMMA VELORUM", 318, SectorType::OUTER, 1, 0b001100, false, true, {{PlanetType::ADV_MATERIALS}}, 0, false, false },
+    { "Beta Sextantis", 381, SectorType::OUTER, 1, 0b011001, false, false, {{PlanetType::MATERIALS}, {PlanetType::MONEY}}, 0, false, false },
+    { "Zeta Chamaeleontis", 382, SectorType::OUTER, 1, 0b001101, false, false, {{PlanetType::SCIENCE}, {PlanetType::MATERIALS}}, 0, false, false },
+    { "Geminga", 393, SectorType::OUTER, 1, 0b001011, false, false, {{PlanetType::SCIENCE}}, 0, false, false },
+    { "Simeis 147", 394, SectorType::OUTER, 1, 0b101001, false, false, {{PlanetType::MATERIALS}}, 0, false, false },
+};
+
+struct SectorLookupTable {
+    uint8_t mapping[395];
+};
+
+inline const SectorDefinition* get_sector_definition(uint16_t sector_id) {
+    static const SectorLookupTable lookup = []() {
+        SectorLookupTable t{};
+        for (int i = 0; i < 395; ++i) {
+            t.mapping[i] = 255;
+        }
+        for (uint8_t idx = 0; idx < sizeof(SECTOR_TABLE) / sizeof(SECTOR_TABLE[0]); ++idx) {
+            uint16_t id = SECTOR_TABLE[idx].sector_id;
+            if (id < 395) {
+                t.mapping[id] = idx;
+            }
+        }
+        return t;
+    }();
+
+    if (sector_id == 0 || sector_id >= 395) return nullptr;
+    uint8_t index = lookup.mapping[sector_id];
+    if (index == 255) return nullptr;
+    return &SECTOR_TABLE[index];
+}
+
+#endif //ECLIPSE_SECTORS_H

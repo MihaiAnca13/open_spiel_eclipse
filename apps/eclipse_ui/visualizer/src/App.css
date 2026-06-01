@@ -1,0 +1,356 @@
+.app-container {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background-color: #0f1015;
+  color: #e2e8f0;
+  font-family: system-ui, -apple-system, sans-serif;
+  padding: 20px;
+  box-sizing: border-box;
+}
+
+.header {
+  text-align: center;
+  margin-bottom: 24px;
+  border-bottom: 1px solid #1e293b;
+  padding-bottom: 16px;
+}
+
+.header h1 {
+  font-size: 32px;
+  color: #f8fafc;
+  margin: 0 0 8px 0;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  text-shadow: 0 0 10px rgba(168, 85, 247, 0.4);
+}
+
+.header p {
+  font-size: 14px;
+  color: #94a3b8;
+  margin: 0;
+}
+
+.main-layout {
+  display: grid;
+  grid-template-columns: 350px 1fr;
+  gap: 24px;
+  flex-grow: 1;
+}
+
+@media (max-width: 1024px) {
+  .main-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.panel {
+  background-color: #1a1c23;
+  border: 1px solid #2d313f;
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.panel-title {
+  font-size: 18px;
+  color: #f1f5f9;
+  font-weight: 600;
+  margin: 0 0 4px 0;
+  border-left: 4px solid #a855f7;
+  padding-left: 10px;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.form-group label {
+  font-size: 13px;
+  color: #94a3b8;
+  font-weight: 500;
+}
+
+.form-group input, .form-group select {
+  background-color: #0f1015;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  color: #f1f5f9;
+  padding: 8px 12px;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.form-group input:focus, .form-group select:focus {
+  border-color: #a855f7;
+}
+
+.btn-primary {
+  background-color: #a855f7;
+  color: #ffffff;
+  border: none;
+  border-radius: 6px;
+  padding: 10px 16px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.2s, transform 0.1s;
+}
+
+.btn-primary:hover {
+  background-color: #c084fc;
+}
+
+.btn-primary:active {
+  transform: scale(0.98);
+}
+
+.btn-secondary {
+  background-color: #334155;
+  color: #f1f5f9;
+  border: none;
+  border-radius: 6px;
+  padding: 10px 16px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.btn-secondary:hover {
+  background-color: #475569;
+}
+
+.player-choice-card {
+  background-color: #242835;
+  border: 1px solid #3b4252;
+  border-radius: 8px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.player-choice-card.active {
+  border-color: #a855f7;
+}
+
+.player-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.player-badge {
+  background-color: #1e1b4b;
+  color: #818cf8;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  border: 1px solid #3730a3;
+}
+
+.board-container {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.map-viewport {
+  background-color: #0c0d12;
+  border: 1px solid #272a37;
+  border-radius: 12px;
+  height: 520px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  overflow: hidden;
+  box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.8);
+}
+
+.map-viewport::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+  background-size: 24px 24px;
+  pointer-events: none;
+}
+
+.tech-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 12px;
+}
+
+.tech-card {
+  background-color: #1a1c23;
+  border-radius: 8px;
+  border: 1px solid #2d313f;
+  padding: 10px;
+  text-align: center;
+  position: relative;
+}
+
+.tech-card.Military { border-top: 3px solid #ef4444; }
+.tech-card.Grid { border-top: 3px solid #3b82f6; }
+.tech-card.Nano { border-top: 3px solid #10b981; }
+.tech-card.Rare { border-top: 3px solid #f59e0b; }
+
+.tech-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: #f1f5f9;
+  margin-bottom: 4px;
+}
+
+.tech-count {
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.tech-category-badge {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background-color: #0f1015;
+}
+
+.tech-category-badge.Military { color: #fca5a5; }
+.tech-category-badge.Grid { color: #93c5fd; }
+.tech-category-badge.Nano { color: #6ee7b7; }
+.tech-category-badge.Rare { color: #fde047; }
+
+.hex-polygon {
+  cursor: pointer;
+  transition: fill 0.2s, stroke 0.2s, filter 0.2s;
+}
+
+.hex-polygon:hover {
+  filter: brightness(1.2) drop-shadow(0 0 8px rgba(168, 85, 247, 0.4));
+}
+
+.galaxy-info-overlay {
+  position: absolute;
+  bottom: 16px;
+  left: 16px;
+  background-color: rgba(26, 28, 35, 0.85);
+  border: 1px solid #2d313f;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 12px;
+  display: flex;
+  gap: 16px;
+  pointer-events: none;
+}
+
+.galaxy-info-item {
+  display: flex;
+  flex-direction: column;
+}
+
+.galaxy-info-item span:first-child {
+  color: #94a3b8;
+  font-size: 10px;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.galaxy-info-item span:last-child {
+  color: #f1f5f9;
+  font-weight: 600;
+}
+
+.json-inspector {
+  background-color: #0c0d12;
+  border: 1px solid #272a37;
+  border-radius: 8px;
+  padding: 16px;
+  margin-top: 16px;
+}
+
+.json-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #f1f5f9;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.json-code {
+  font-family: monospace;
+  font-size: 11px;
+  color: #38bdf8;
+  background-color: #0f1015;
+  padding: 12px;
+  border-radius: 6px;
+  max-height: 250px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  text-align: left;
+  margin-top: 12px;
+  border: 1px solid #1e293b;
+}
+
+.turn-order-bar {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  background-color: #1a1c23;
+  border: 1px solid #2d313f;
+  padding: 8px 16px;
+  border-radius: 8px;
+}
+
+.turn-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background-color: #0f1015;
+  border: 1px solid #334155;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.turn-badge.active {
+  border-color: #a855f7;
+  background-color: rgba(168, 85, 247, 0.1);
+  color: #c084fc;
+}
+
+.turn-num {
+  font-size: 10px;
+  background-color: #334155;
+  color: #e2e8f0;
+  border-radius: 9999px;
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Species specific styles */
+.color-eridani { color: #f87171; border-color: #f87171; }
+.color-hydran { color: #c084fc; border-color: #c084fc; }
+.color-planta { color: #4ade80; border-color: #4ade80; }
+.color-draco { color: #fb923c; border-color: #fb923c; }
+.color-mechanema { color: #cbd5e1; border-color: #cbd5e1; }
+.color-orion { color: #f43f5e; border-color: #f43f5e; }
+.color-terran { color: #60a5fa; border-color: #60a5fa; }
+

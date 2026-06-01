@@ -69,3 +69,6 @@ open_spiel/.vs
 
 # Editor swap files
 *.swp
+
+# node modules
+apps/eclipse_ui/visualizer/node_modules

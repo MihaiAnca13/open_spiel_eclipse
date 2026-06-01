@@ -295,6 +295,8 @@ add_subdirectory (game_transforms)
 
 if (OPEN_SPIEL_BUILD_WITH_PYTHON)
   add_subdirectory (python)
+  add_subdirectory (${CMAKE_CURRENT_SOURCE_DIR}/../apps/eclipse_ui/native
+                    ${CMAKE_CURRENT_BINARY_DIR}/apps/eclipse_ui_native)
 endif()
 
 add_subdirectory (utils)

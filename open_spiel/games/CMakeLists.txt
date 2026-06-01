@@ -82,6 +82,27 @@ set(GAME_SOURCES
   dou_dizhu/dou_dizhu.h
   dou_dizhu/dou_dizhu_utils.cc
   dou_dizhu/dou_dizhu_utils.h
+  eclipse/eclipse.cc
+  eclipse/eclipse.h
+  eclipse/systems/combat.cpp
+  eclipse/systems/combat.h
+  eclipse/systems/setup.cpp
+  eclipse/systems/setup.h
+  eclipse/systems/actions/explore.cpp
+  eclipse/systems/actions/explore.h
+  eclipse/systems/actions/research.cpp
+  eclipse/systems/actions/research.h
+  eclipse/actions.h
+  eclipse/dice.h
+  eclipse/discovery_tiles.h
+  eclipse/galaxy.h
+  eclipse/minor_species.h
+  eclipse/npc.h
+  eclipse/resources.h
+  eclipse/sectors.h
+  eclipse/species.h
+  eclipse/state.h
+  eclipse/tech.h
   efg_game/efg_game.cc
   efg_game/efg_game.h
   efg_game/efg_game_data.cc
@@ -467,6 +488,10 @@ add_test(deep_sea_test deep_sea_test)
 add_executable(dots_and_boxes_test dots_and_boxes/dots_and_boxes_test.cc ${OPEN_SPIEL_OBJECTS}
                $<TARGET_OBJECTS:tests>)
 add_test(dots_and_boxes_test dots_and_boxes_test)
+
+add_executable(eclipse_test eclipse/eclipse_test.cc ${OPEN_SPIEL_OBJECTS}
+               $<TARGET_OBJECTS:tests>)
+add_test(eclipse_test eclipse_test)
 
 add_executable(dynamic_routing_data_test dynamic_routing/dynamic_routing_data_test.cc ${OPEN_SPIEL_OBJECTS}
                $<TARGET_OBJECTS:tests>)
