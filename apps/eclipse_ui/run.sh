@@ -4,7 +4,7 @@ set -euo pipefail
 
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 REPO_ROOT="$( cd "$DIR/../.." && pwd )"
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+PYTHON_BIN="${PYTHON_BIN:-$REPO_ROOT/.venv/bin/python}"
 FRONTEND_CMD="${FRONTEND_CMD:-}"
 WSL_BUN_BIN="${WSL_BUN_BIN:-$HOME/.bun/bin/bun}"
 NVM_DIR="${NVM_DIR:-$HOME/.nvm}"

@@ -7,6 +7,7 @@
 #include "../sectors.h"
 #include <algorithm>
 #include <random>
+#include <numeric>
 
 // Pre-defined balanced starting positions in Ring II (distance 2 from center)
 static const HexCoord BALANCED_POSITIONS[] = {
@@ -18,14 +19,8 @@ static const HexCoord BALANCED_POSITIONS[] = {
     { 2,  0}  // Position 5
 };
 
-State initialize_pre_choice_state(unsigned int seed, uint8_t num_players, NPCDifficulty difficulty) {
+State initialize_pre_choice_state(std::mt19937_64& rng, uint8_t num_players, NPCDifficulty difficulty) {
     State state;
-    if (seed == 0) {
-        state.rng.seed(std::random_device{}());
-    }
-    else {
-        state.rng.seed(seed);
-    }
 
     // TODO: allow difficulty to be set per NPC and/or random per NPC
     state.gcds_difficulty = difficulty;
@@ -41,7 +36,7 @@ State initialize_pre_choice_state(unsigned int seed, uint8_t num_players, NPCDif
     }
 
     // Shuffle tech bag
-    std::shuffle(state.tech_bag.begin(), state.tech_bag.end(), state.rng);
+    std::shuffle(state.tech_bag.begin(), state.tech_bag.end(), rng);
 
     // 2. Draw initial tech tiles for the round 1 market based on player count
     //    Note: Rare techs drawn during setup are placed but do not count against the limit!
@@ -52,7 +47,7 @@ State initialize_pre_choice_state(unsigned int seed, uint8_t num_players, NPCDif
     else if (num_players >= 6) target_regular_tiles = 20;
 
     uint8_t regular_drawn = 0;
-    state.tech_tray.clear();
+    state.tech_tray.fill(0);
 
     while (regular_drawn < target_regular_tiles && !state.tech_bag.empty()) {
         TechBit drawn = state.tech_bag.back();
@@ -67,7 +62,7 @@ State initialize_pre_choice_state(unsigned int seed, uint8_t num_players, NPCDif
             }
         }
 
-        state.tech_tray[drawn]++;
+        state.add_to_tech_tray(drawn);
         if (cat != TechCategory::RARE) {
             regular_drawn++;
         }
@@ -81,11 +76,10 @@ State initialize_pre_choice_state(unsigned int seed, uint8_t num_players, NPCDif
             state.reputation_tiles.push_back(tile);
         }
     }
-    std::shuffle(state.reputation_tiles.begin(), state.reputation_tiles.end(), state.rng);
+    std::shuffle(state.reputation_tiles.begin(), state.reputation_tiles.end(), rng);
 
     // 4. Pre-generate player shells and randomize initial turn order
-    state.players = std::vector<Player>();
-    // state.players.clear();
+    state.players.clear();
     std::vector<uint8_t> initial_turns(num_players);
     for (uint8_t i = 0; i < num_players; ++i) {
         initial_turns[i] = i;
@@ -98,7 +92,7 @@ State initialize_pre_choice_state(unsigned int seed, uint8_t num_players, NPCDif
         p_shell.has_passed = false;
         state.players.push_back(p_shell);
     }
-    std::shuffle(initial_turns.begin(), initial_turns.end(), state.rng);
+    std::shuffle(initial_turns.begin(), initial_turns.end(), rng);
 
     for (size_t i = 0; i < MAX_PLAYERS; ++i) {
         if (i < num_players) {
@@ -113,10 +107,31 @@ State initialize_pre_choice_state(unsigned int seed, uint8_t num_players, NPCDif
     state.current_phase = 0; // Action Phase
     state.pass_order.clear();
 
+    // 5. Populate sector bags as bitmasks (allocation-free representation)
+    state.sector_bag_inner = (1U << 10) - 1;   // 10 inner sectors (all bits set)
+    state.sector_bag_middle = (1U << 13) - 1;  // 13 middle sectors (all bits set)
+
+    // Select exactly N random outer sectors based on player count
+    std::vector<uint8_t> outer_indices(22);
+    std::iota(outer_indices.begin(), outer_indices.end(), 0);
+    std::shuffle(outer_indices.begin(), outer_indices.end(), rng);
+
+    size_t target_outer_tiles = 18;
+    if (num_players == 2) target_outer_tiles = 5;
+    else if (num_players == 3) target_outer_tiles = 8;
+    else if (num_players == 4) target_outer_tiles = 14;
+    else if (num_players == 5) target_outer_tiles = 16;
+    else target_outer_tiles = 18;
+
+    state.sector_bag_outer = 0;
+    for (size_t i = 0; i < target_outer_tiles && i < outer_indices.size(); ++i) {
+        state.sector_bag_outer |= (1U << outer_indices[i]);
+    }
+
     return state;
 }
 
-void finalize_game_setup(State& state, const std::vector<PlayerConfig>& player_choices) {
+void finalize_game_setup(std::mt19937_64& rng, State& state, const std::vector<PlayerConfig>& player_choices) {
     size_t player_count = player_choices.size();
     // state.players.clear();
     state.unit_registry.clear();
@@ -301,7 +316,7 @@ void finalize_game_setup(State& state, const std::vector<PlayerConfig>& player_c
     // Place Guardian sectors in empty positions (< 6 players)
     if (!guardian_position_indices.empty()) {
         std::vector<uint16_t> guardian_sectors = {271, 272, 273, 274};
-        std::shuffle(guardian_sectors.begin(), guardian_sectors.end(), state.rng);
+        std::shuffle(guardian_sectors.begin(), guardian_sectors.end(), rng);
 
         for (size_t i = 0; i < guardian_position_indices.size(); ++i) {
             size_t pos_idx = guardian_position_indices[i];

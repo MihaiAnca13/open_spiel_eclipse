@@ -20,12 +20,13 @@ std::string InitializePreChoiceApi(unsigned int seed, uint8_t num_players,
     difficulty = NPCDifficulty::HARD;
   }
 
-  State state = initialize_pre_choice_state(seed, num_players, difficulty);
+  std::mt19937_64 rng(seed);
+  State state = initialize_pre_choice_state(rng, num_players, difficulty);
   nlohmann::json json_state = state;
   return json_state.dump();
 }
 
-std::string FinalizeGameSetupApi(const std::string& state_json,
+std::string FinalizeGameSetupApi(unsigned int seed, const std::string& state_json,
                                  const std::string& player_choices_json) {
   nlohmann::json state_value = nlohmann::json::parse(state_json);
   State state = state_value.get<State>();
@@ -34,7 +35,8 @@ std::string FinalizeGameSetupApi(const std::string& state_json,
   std::vector<PlayerConfig> choices =
       choices_value.get<std::vector<PlayerConfig>>();
 
-  finalize_game_setup(state, choices);
+  std::mt19937_64 rng(seed);
+  finalize_game_setup(rng, state, choices);
 
   nlohmann::json result = state;
   return result.dump();

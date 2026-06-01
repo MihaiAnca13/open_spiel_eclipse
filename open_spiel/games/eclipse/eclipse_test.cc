@@ -1,3 +1,5 @@
+// NOTE: CHANGES HERE ARE DEFFERED. Right now we are focusing on the core game state and UI for human players.
+
 #include "open_spiel/games/eclipse/eclipse.h"
 
 #include <vector>
