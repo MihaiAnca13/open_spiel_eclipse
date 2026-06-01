@@ -8,10 +8,11 @@ def main() -> None:
     names = pyspiel.registered_names()
     assert game_name in names, f"{game_name!r} not found in registered_names()"
 
-    game = pyspiel.load_game(game_name, {"players": 4, "seed": 7})
+    game = pyspiel.load_game(game_name, {"players": 4, "rng_seed": 7})
     state = game.new_initial_state()
 
     assert not state.is_terminal()
+    assert state.is_chance_node()
     assert game.num_distinct_actions() == 32
     assert state.legal_actions()
 

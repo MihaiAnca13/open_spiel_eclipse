@@ -9,7 +9,6 @@
 #include <vector>
 #include <array>
 #include <unordered_map>
-#include <random>
 #include <nlohmann/json.hpp>
 
 #include "tech.h"
@@ -19,7 +18,7 @@
 #include "fixed_vector.h"
 #include "absl/container/fixed_array.h"
 
-using namespace open_spiel::eclipse;
+using open_spiel::eclipse::FixedVector;
 
 #define MAX_PLAYERS 6
 
@@ -97,18 +96,18 @@ struct State {
     // Tech market and NPC states
     std::array<uint8_t, 40> tech_tray = {0};
     FixedVector<TechBit, 130> tech_bag;
-    uint16_t sector_bag_inner;
-    uint16_t sector_bag_middle;
-    uint32_t sector_bag_outer;
+    uint16_t sector_bag_inner = 0;
+    uint16_t sector_bag_middle = 0;
+    uint32_t sector_bag_outer = 0;
     NPCDifficulty gcds_difficulty = NPCDifficulty::EASY;
     NPCDifficulty guardian_difficulty = NPCDifficulty::EASY;
     NPCDifficulty ancient_difficulty = NPCDifficulty::EASY;
 
     // Turn tracking and passing queue
-    uint8_t current_player;
-    uint8_t current_phase;
-    uint8_t current_round;
-    uint8_t turn_order[MAX_PLAYERS];
+    uint8_t current_player = 255;
+    uint8_t current_phase = 0;
+    uint8_t current_round = 0;
+    uint8_t turn_order[MAX_PLAYERS] = {255, 255, 255, 255, 255, 255};
     FixedVector<uint8_t, MAX_PLAYERS> pass_order;
 
     // Helper functions for tech market tray (allocation-free representation)
@@ -148,8 +147,14 @@ inline void to_json(nlohmann::json& j, const State& s) {
     nlohmann::json tray_j = nlohmann::json::object();
     for (size_t i = 0; i < 40; ++i) {
         if (s.tech_tray[i] > 0) {
-            std::string name = TECH_TABLE[i].name;
-            tray_j[name] = s.tech_tray[i];
+            const auto& tech = TECH_TABLE[i];
+            nlohmann::json entry = nlohmann::json::object();
+            entry["count"] = s.tech_tray[i];
+            entry["category"] = tech.category;
+            entry["base_cost"] = tech.base_cost;
+            entry["min_cost"] = tech.min_cost;
+            entry["copies"] = tech.copies;
+            tray_j[tech.name] = entry;
         }
     }
 
@@ -185,8 +190,12 @@ inline void from_json(const nlohmann::json& j, State& s) {
         auto tray_j = j.at("tech_tray");
         for (auto& el : tray_j.items()) {
             const std::string& name = el.key();
-            uint8_t count = el.value().get<uint8_t>();
-            
+            uint8_t count = 0;
+            if (el.value().is_number_integer()) {
+                count = el.value().get<uint8_t>();
+            } else if (el.value().is_object()) {
+                count = el.value().at("count").get<uint8_t>();
+            }
             for (size_t i = 0; i < 40; ++i) {
                 if (TECH_TABLE[i].name == name) {
                     s.tech_tray[i] = count;

@@ -1,38 +1,43 @@
 import json
-from fastapi import FastAPI, Body
+
+from fastapi import Body, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
 from . import eclipse_ui_native
 
 app = FastAPI()
 
-from fastapi.middleware.cors import CORSMiddleware
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Allow all origins, perfect for local development
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-@app.get("/setup/pre-choice")
-async def setup_pre_choice(seed: int = 42, num_players: int = 4, difficulty: str = "Easy"):
-    # Call C++ Stage 1 setup (returns a JSON string)
-    state_json_str = eclipse_ui_native.initialize_pre_choice(seed, num_players, difficulty)
-    # Parse back into a Python dict so FastAPI can return standard JSON
-    return json.loads(state_json_str)
+
+@app.post("/setup/pre-choice")
+async def setup_pre_choice(
+    config: dict = Body(..., description="UI-driven setup configuration."),
+):
+    snapshot_json_str = eclipse_ui_native.initialize_pre_choice(json.dumps(config))
+    return json.loads(snapshot_json_str)
+
 
 @app.post("/setup/finalize")
 async def setup_finalize(
-    seed: int = Body(42, description="Random seed for RNG"),
-    state: dict = Body(..., description="The current Stage 1 State dict"),
-    player_choices: list = Body(..., description="List of chosen player configurations [{'species': 'Planta', 'is_ai': false}, ...]")
+    snapshot: dict = Body(..., description="Stage 1 setup snapshot."),
+    player_choices: list = Body(
+        ..., description="Final player choices [{'species': 'Planta', 'is_ai': false}, ...]"
+    ),
 ):
-    # Convert inputs to strings to cross the C++ boundary
-    state_str = json.dumps(state)
-    choices_str = json.dumps(player_choices)
+    finalized_snapshot_json_str = eclipse_ui_native.finalize_game_setup(
+        json.dumps(snapshot), json.dumps(player_choices)
+    )
+    return json.loads(finalized_snapshot_json_str)
 
-    # Call C++ Stage 2 setup (returns updated JSON string)
-    updated_state_json_str = eclipse_ui_native.finalize_game_setup(seed, state_str, choices_str)
-    
-    # Parse and return updated state as dict
-    return json.loads(updated_state_json_str)
+
+@app.get("/metadata")
+async def metadata():
+    metadata_json_str = eclipse_ui_native.get_game_metadata()
+    return json.loads(metadata_json_str)

@@ -5,6 +5,7 @@
 #ifndef ECLIPSE_RESOURCES_H
 #define ECLIPSE_RESOURCES_H
 
+#include <array>
 #include <cstdint>
 #include <nlohmann/json.hpp>
 
@@ -34,5 +35,11 @@ NLOHMANN_JSON_SERIALIZE_ENUM(Species, {
     {Species::ORION_HEGEMONY, "Orion Hegemony"},
     {Species::TERRAN_FACTIONS, "Terran Factions"}
 });
+
+inline constexpr std::array<Species, 7> ALL_SPECIES = {
+    Species::ERIDANI_EMPIRE, Species::HYDRAN_PROGRESS, Species::PLANTA,
+    Species::DESCENDANTS_OF_DRACO, Species::MECHANEMA,
+    Species::ORION_HEGEMONY, Species::TERRAN_FACTIONS
+};
 
 #endif //ECLIPSE_RESOURCES_H

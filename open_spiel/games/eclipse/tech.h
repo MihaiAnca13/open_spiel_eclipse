@@ -11,6 +11,13 @@
 
 enum class TechCategory { MILITARY, GRID, NANO, RARE };
 
+NLOHMANN_JSON_SERIALIZE_ENUM(TechCategory, {
+    {TechCategory::MILITARY, "Military"},
+    {TechCategory::GRID, "Grid"},
+    {TechCategory::NANO, "Nano"},
+    {TechCategory::RARE, "Rare"}
+});
+
 // 0 - 7 military, 8 - Y grid, Y - Z nano, Z - W rare
 enum class TechBit : uint64_t {
     NONE               = 0,

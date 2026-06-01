@@ -5,15 +5,23 @@ from typing import Any
 import pyspiel
 
 
-def load_eclipse_game(players: int = 4, seed: int = 7) -> pyspiel.Game:
-    return pyspiel.load_game("eclipse", {"players": players, "seed": seed})
+def load_eclipse_game(players: int = 4, rng_seed: int = 7) -> pyspiel.Game:
+    return pyspiel.load_game("eclipse", {"players": players, "rng_seed": rng_seed})
 
 
 def state_to_lightzero_dict(state: pyspiel.State, player: int | None = None) -> dict[str, Any]:
     current_player = state.current_player()
-    observer_player = current_player if player is None else player
+    observer_player = (
+        current_player
+        if player is None and current_player >= 0
+        else (player if player is not None else 0)
+    )
     legal_actions = list(state.legal_actions())
-    num_actions = state.get_game().num_distinct_actions()
+    num_actions = (
+        state.get_game().max_chance_outcomes()
+        if state.is_chance_node()
+        else state.get_game().num_distinct_actions()
+    )
     action_mask = [0] * num_actions
     for action in legal_actions:
         action_mask[action] = 1

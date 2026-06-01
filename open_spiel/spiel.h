@@ -83,7 +83,7 @@ struct GameType {
   enum class ChanceMode {
     kDeterministic,       // No chance nodes
     kExplicitStochastic,  // Has at least one chance node, all with
-                          // deterministic ApplyAction()
+    // deterministic ApplyAction()
     kSampledStochastic,   // At least one chance node with non-deterministic
                           // ApplyAction()
   };

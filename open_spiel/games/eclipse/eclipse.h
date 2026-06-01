@@ -5,13 +5,14 @@
 #ifndef OPEN_SPIEL_GAMES_ECLIPSE_ECLIPSE_H_
 #define OPEN_SPIEL_GAMES_ECLIPSE_ECLIPSE_H_
 
+#include <random>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "open_spiel/spiel.h"
 #include "open_spiel/spiel_globals.h"
-#include "state.h"
+#include "systems/setup.h"
 
 namespace open_spiel {
 namespace eclipse {
@@ -22,20 +23,40 @@ class EclipseGame : public Game {
   
   int NumDistinctActions() const override;
   std::unique_ptr<State> NewInitialState() const override;
+  std::unique_ptr<State> DeserializeState(const std::string& str) const override;
+  int MaxChanceOutcomes() const override { return 1; }
   int NumPlayers() const override;
   double MinUtility() const override { return 0.0; }
   double MaxUtility() const override { return 255.0; }
   absl::optional<double> UtilitySum() const override { return absl::nullopt; }
   std::vector<int> ObservationTensorShape() const override;
   int MaxGameLength() const override;
+  std::string GetRNGState() const override;
+  void SetRNGState(const std::string& rng_state) const override;
 
   // Parameter getters
   int GetPlayersParam() const { return ParameterValue<int>("players"); }
-  int GetSeedParam() const { return ParameterValue<int>("seed"); }
+  uint64_t GetRngSeedParam() const {
+    return static_cast<uint64_t>(ParameterValue<int>("rng_seed"));
+  }
+  SetupConfig InitialSetupConfig() const;
+
+  std::mt19937_64& rng() const { return rng_; }
+
+ private:
+  mutable std::mt19937_64 rng_;
 };
 
 class EclipseState : public State {
  public:
+  enum class PendingRandomEvent : uint8_t {
+    kNone = 0,
+    kInitialSetup = 1,
+    kExploreDraw = 2,
+    kDiscoveryDraw = 3,
+    kCombatRoll = 4,
+  };
+
   explicit EclipseState(std::shared_ptr<const Game> game);
   EclipseState(const EclipseState&) = default;
 
@@ -45,22 +66,31 @@ class EclipseState : public State {
   std::string ToString() const override;
   bool IsTerminal() const override;
   std::vector<double> Returns() const override;
-  std::unique_ptr<State> Clone() const override {
-    return std::make_unique<EclipseState>(*this);
-  }
+  std::unique_ptr<State> Clone() const override;
 
   ActionsAndProbs ChanceOutcomes() const override;
+  std::string Serialize() const override;
 
   std::string InformationStateString(Player player) const override;
   std::string ObservationString(Player player) const override;
   void ObservationTensor(Player player, absl::Span<float> values) const override;
 
+  const ::State& RawState() const { return eclipse_state_; }
+  PendingRandomEvent pending_random_event() const { return pending_random_event_; }
+  void RestoreFromSnapshot(const SetupConfig& config,
+                           const ::State& state,
+                           PendingRandomEvent pending_random_event);
+
  protected:
   void DoApplyAction(Action action_id) override;
 
  private:
+  std::shared_ptr<const EclipseGame> eclipse_game_;
+  void ResolveChanceEvent(Action action_id);
+
   ::State eclipse_state_;
-  bool initialized_ = false;
+  SetupConfig setup_config_;
+  PendingRandomEvent pending_random_event_ = PendingRandomEvent::kInitialSetup;
 };
 
 } // namespace eclipse

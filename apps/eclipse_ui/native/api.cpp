@@ -11,42 +11,64 @@ namespace py = pybind11;
 
 namespace {
 
-std::string InitializePreChoiceApi(unsigned int seed, uint8_t num_players,
-                                   const std::string& difficulty_str) {
-  NPCDifficulty difficulty = NPCDifficulty::EASY;
-  if (difficulty_str == "Medium") {
-    difficulty = NPCDifficulty::MEDIUM;
-  } else if (difficulty_str == "Hard") {
-    difficulty = NPCDifficulty::HARD;
-  }
-
-  std::mt19937_64 rng(seed);
-  State state = initialize_pre_choice_state(rng, num_players, difficulty);
-  nlohmann::json json_state = state;
-  return json_state.dump();
+std::string InitializePreChoiceApi(const std::string& config_json) {
+  const nlohmann::json config_value = nlohmann::json::parse(config_json);
+  const SetupConfig config = config_value.get<SetupConfig>();
+  const SetupSnapshot snapshot = CreatePreChoiceSnapshot(config);
+  return nlohmann::json(snapshot).dump();
 }
 
-std::string FinalizeGameSetupApi(unsigned int seed, const std::string& state_json,
+std::string FinalizeGameSetupApi(const std::string& snapshot_json,
                                  const std::string& player_choices_json) {
-  nlohmann::json state_value = nlohmann::json::parse(state_json);
-  State state = state_value.get<State>();
+  const nlohmann::json snapshot_value = nlohmann::json::parse(snapshot_json);
+  const SetupSnapshot snapshot = snapshot_value.get<SetupSnapshot>();
 
-  nlohmann::json choices_value = nlohmann::json::parse(player_choices_json);
-  std::vector<PlayerConfig> choices =
+  const nlohmann::json choices_value = nlohmann::json::parse(player_choices_json);
+  const std::vector<PlayerConfig> player_choices =
       choices_value.get<std::vector<PlayerConfig>>();
 
-  std::mt19937_64 rng(seed);
-  finalize_game_setup(rng, state, choices);
+  return nlohmann::json(FinalizeSetupSnapshot(snapshot, player_choices)).dump();
+}
 
-  nlohmann::json result = state;
-  return result.dump();
+std::string GetGameMetadataApi() {
+  nlohmann::json metadata = nlohmann::json::object();
+
+  nlohmann::json species = nlohmann::json::array();
+  for (const auto s : ALL_SPECIES) {
+    nlohmann::json j = s;
+    species.push_back(j.get<std::string>());
+  }
+  metadata["species"] = species;
+
+  nlohmann::json tech_catalog = nlohmann::json::object();
+  const size_t tech_count = sizeof(TECH_TABLE) / sizeof(TECH_TABLE[0]);
+  for (size_t i = 0; i < tech_count; ++i) {
+    const auto& tech = TECH_TABLE[i];
+    nlohmann::json tech_json = nlohmann::json::object();
+    tech_json["category"] = tech.category;
+    tech_json["base_cost"] = tech.base_cost;
+    tech_json["min_cost"] = tech.min_cost;
+    tech_json["copies"] = tech.copies;
+    tech_catalog[tech.name] = tech_json;
+  }
+  metadata["tech_catalog"] = tech_catalog;
+
+  nlohmann::json npc_difficulties = nlohmann::json::array();
+  npc_difficulties.push_back("Easy");
+  npc_difficulties.push_back("Medium");
+  npc_difficulties.push_back("Hard");
+  metadata["npc_difficulties"] = npc_difficulties;
+
+  return metadata.dump();
 }
 
 }  // namespace
 
 PYBIND11_MODULE(eclipse_ui_native, module) {
   module.def("initialize_pre_choice", &InitializePreChoiceApi,
-             "Stage 1 setup that returns serialized pre-choice state JSON.");
+             "Create a deterministic pre-choice setup snapshot from UI config.");
   module.def("finalize_game_setup", &FinalizeGameSetupApi,
-             "Stage 2 setup that returns finalized state JSON.");
+             "Finalize a pre-choice snapshot with explicit player choices.");
+  module.def("get_game_metadata", &GetGameMetadataApi,
+             "Return game metadata (species, tech catalog, etc.) from C++ tables.");
 }
