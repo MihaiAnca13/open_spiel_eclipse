@@ -163,6 +163,7 @@ void ExplorePureHelpersTest() {
 
 void ExploreZoneAndConnectionTest() {
   ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+  s.sector_bag_inner = (1u << 10) - 1;  // inner ring stocked (neighbours of center)
   // Anchor controlled by player 0 at the center.
   Sector& anchor = s.galaxy.at(0, 0);
   anchor.sector_id = 221;  // wormholes 0b011011
@@ -182,6 +183,25 @@ void ExploreZoneAndConnectionTest() {
   es.selected_sector_id = 305;  // wormholes 0b001011
   std::vector<uint8_t> rotations = legal_explore_rotations(s, 0);
   SPIEL_CHECK_FALSE(rotations.empty());
+}
+
+void ExploreExhaustedRingTest() {
+  ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+  Sector& anchor = s.galaxy.at(0, 0);  // neighbours are all distance 1 (inner ring)
+  anchor.sector_id = 221;
+  anchor.owner_id = 0;
+  anchor.coords = {0, 0};
+
+  // Empty inner bag: an exhausted ring cannot be explored (no reshuffle).
+  s.sector_bag_inner = 0;
+  SPIEL_CHECK_FALSE(is_legal_explore_zone(s, 0, 1, 0));
+  SPIEL_CHECK_TRUE(legal_explore_zones(s, 0).empty());
+  SPIEL_CHECK_FALSE(has_explore_zone(s, 0));
+
+  // With one inner tile left, the ring is explorable again.
+  s.sector_bag_inner = 1;
+  SPIEL_CHECK_TRUE(is_legal_explore_zone(s, 0, 1, 0));
+  SPIEL_CHECK_TRUE(has_explore_zone(s, 0));
 }
 
 void ExploreClaimControlTest() {
@@ -283,6 +303,60 @@ void ExploreSpeciesRandomSimTest() {
                          /*verbose=*/false);
 }
 
+void ExploreStopAndDracoDrawTest() {
+  // hex<->index bijection round-trips.
+  for (int idx : {0, 7, 112, 224}) {
+    HexCoord h = index_to_hex(idx);
+    SPIEL_CHECK_EQ(hex_to_index(h.q, h.r), idx);
+  }
+
+  // choose_explore_zone accepts a legal hex and rejects an illegal one.
+  {
+    ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+    s.sector_bag_inner = (1u << 10) - 1;  // inner ring (neighbours of center) stocked
+    Sector& anchor = s.galaxy.at(0, 0);
+    anchor.sector_id = 221;
+    anchor.owner_id = 0;
+    anchor.coords = {0, 0};
+    s.explore_state.phase = ExplorePhase::choose_zone;
+    s.explore_state.player_id = 0;
+    SPIEL_CHECK_TRUE(is_legal_explore_zone(s, 0, 1, 0));    // adjacent, empty
+    SPIEL_CHECK_FALSE(is_legal_explore_zone(s, 0, 4, 4));   // not adjacent
+    SPIEL_CHECK_FALSE(choose_explore_zone(s, 0, HexCoord{4, 4}));
+    SPIEL_CHECK_TRUE(choose_explore_zone(s, 0, HexCoord{1, 0}));
+    SPIEL_CHECK_TRUE(s.explore_state.phase == ExplorePhase::draw_tile);
+  }
+
+  // Stopping ends the Explore action regardless of remaining activations.
+  {
+    ::State s = MakeSinglePlayerState(Species::PLANTA);
+    s.explore_state.phase = ExplorePhase::choose_zone;
+    s.explore_state.player_id = 0;
+    s.explore_state.activations_remaining = 2;
+    stop_exploring(s);
+    SPIEL_CHECK_TRUE(s.explore_state.phase == ExplorePhase::inactive);
+  }
+
+  // Draco draws one tile, is offered a second, and may proceed with just one.
+  {
+    ::State s = MakeSinglePlayerState(Species::DESCENDANTS_OF_DRACO);
+    s.sector_bag_outer = 0b11;  // two outer tiles available (bits 0 and 1)
+    s.explore_state.player_id = 0;
+    s.explore_state.ring = SectorType::OUTER;
+    s.explore_state.phase = ExplorePhase::draw_tile;
+
+    apply_explore_draw(s, /*ring_bit=*/0);  // flips outer bit 0 -> sector 301
+    SPIEL_CHECK_EQ(s.explore_state.drawn_count, 1);
+    SPIEL_CHECK_TRUE(s.explore_state.phase == ExplorePhase::draw_again_decision);
+
+    SPIEL_CHECK_TRUE(skip_second_draw(s, 0));
+    SPIEL_CHECK_TRUE(s.explore_state.phase == ExplorePhase::place_or_discard);
+    SPIEL_CHECK_EQ(s.explore_state.selected_sector_id, 301);
+  }
+}
+
+// Drives an Explore action through the public API, preferring progressing
+// actions so the full place -> rotate -> claim path is exercised.
 void ExploreFullActionViaApiTest() {
   auto game = LoadEclipseGame(2, 7);
   auto state = game->NewInitialState();
@@ -298,6 +372,7 @@ void ExploreFullActionViaApiTest() {
   }
 
   state->ApplyAction(explore_start);
+  bool placed = false;
 
   int steps = 0;
   while (eclipse_state->RawState().explore_state.phase != ExplorePhase::inactive &&
@@ -312,11 +387,27 @@ void ExploreFullActionViaApiTest() {
     } else {
       std::vector<Action> acts = state->LegalActions();
       SPIEL_CHECK_FALSE(acts.empty());
-      state->ApplyAction(acts[0]);  // acts[0] makes progress (place/rotate/claim)
+      // Prefer a progressing action over stop/discard/skip so we reach placement.
+      Action chosen = acts[0];
+      for (Action a : acts) {
+        std::string name = state->ActionToString(state->CurrentPlayer(), a);
+        if (name.rfind("EXPLORE_STOP", 0) != 0 &&
+            name.rfind("EXPLORE_DISCARD", 0) != 0 &&
+            name.rfind("EXPLORE_SKIP", 0) != 0) {
+          chosen = a;
+          break;
+        }
+      }
+      if (eclipse_state->RawState().explore_state.phase ==
+          ExplorePhase::choose_rotation) {
+        placed = true;
+      }
+      state->ApplyAction(chosen);
     }
     steps++;
   }
-  // The Explore action fully resolves and the turn moves on.
+  // The Explore action fully resolves, a tile was placed, and the turn moves on.
+  SPIEL_CHECK_TRUE(placed);
   SPIEL_CHECK_TRUE(eclipse_state->RawState().explore_state.phase ==
                    ExplorePhase::inactive);
   SPIEL_CHECK_FALSE(state->IsChanceNode());
@@ -335,9 +426,11 @@ int main(int argc, char** argv) {
   open_spiel::eclipse::AppConfigSnapshotTest();
   open_spiel::eclipse::ExplorePureHelpersTest();
   open_spiel::eclipse::ExploreZoneAndConnectionTest();
+  open_spiel::eclipse::ExploreExhaustedRingTest();
   open_spiel::eclipse::ExploreClaimControlTest();
   open_spiel::eclipse::ExploreAncientBlocksControlTest();
   open_spiel::eclipse::ExploreDiscoveryVpTest();
+  open_spiel::eclipse::ExploreStopAndDracoDrawTest();
   open_spiel::eclipse::ExploreSpeciesRandomSimTest();
   open_spiel::eclipse::ExploreFullActionViaApiTest();
 }

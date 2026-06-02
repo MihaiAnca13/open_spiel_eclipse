@@ -21,30 +21,35 @@ namespace {
 constexpr Action chance_resolve = 0;
 
 // Action layout:
-//   0       = PASS  (also the no-op chance-resolve token)
-//   1-8     = RESEARCH (index 0-7)
-//   9-16    = BUILD (index 0-7)
-//   17      = start an EXPLORE action
-//   18-23   = explore: choose the k-th legal zone
-//   24 / 25 = explore: place / discard the drawn tile
-//   26-31   = explore: place with rotation 0-5
-//   32 / 33 = explore: take control / decline
-//   34 / 35 = explore: discovery reward / 2 VP
-//   36-37   = explore (Descendants of Draco): keep drawn tile 0 / 1
+//   0        = PASS  (also the no-op chance-resolve token)
+//   1-8      = RESEARCH (index 0-7)
+//   9-16     = BUILD (index 0-7)
+//   17       = start an EXPLORE action
+//   18 / 19  = explore: place / discard the drawn tile
+//   20-25    = explore: place with rotation 0-5
+//   26 / 27  = explore: take control / decline
+//   28 / 29  = explore: discovery reward / 2 VP
+//   30 / 31  = explore (Draco): keep drawn tile 0 / 1
+//   32 / 33  = explore (Draco): flip a second tile / proceed with one
+//   34       = explore: stop (decline remaining activations)
+//   35..259  = explore: choose zone == galaxy cell index (one id per hex)
 constexpr Action action_pass = 0;
 constexpr Action action_research_start = 1;
 constexpr Action action_build_start = 9;
 constexpr Action action_explore = 17;
-constexpr Action explore_zone_start = 18;
-constexpr Action explore_place = 24;
-constexpr Action explore_discard = 25;
-constexpr Action explore_rotation_start = 26;
-constexpr Action explore_claim_yes = 32;
-constexpr Action explore_claim_no = 33;
-constexpr Action explore_discovery_reward = 34;
-constexpr Action explore_discovery_vp = 35;
-constexpr Action explore_select_tile_start = 36;
-constexpr int num_distinct_actions = 38;
+constexpr Action explore_place = 18;
+constexpr Action explore_discard = 19;
+constexpr Action explore_rotation_start = 20;
+constexpr Action explore_claim_yes = 26;
+constexpr Action explore_claim_no = 27;
+constexpr Action explore_discovery_reward = 28;
+constexpr Action explore_discovery_vp = 29;
+constexpr Action explore_select_tile_start = 30;
+constexpr Action explore_draw_again = 32;
+constexpr Action explore_skip_second = 33;
+constexpr Action explore_stop = 34;
+constexpr Action explore_zone_start = 35;  // + galaxy cell index (0..224)
+constexpr int num_distinct_actions = explore_zone_start + GALAXY_CELL_COUNT;
 
 const GameType game_type{
     /*short_name=*/"eclipse",
@@ -247,11 +252,17 @@ std::vector<Action> EclipseState::ExploreLegalActions() const {
 
   switch (es.phase) {
     case ExplorePhase::choose_zone: {
-      std::vector<HexCoord> zones = legal_explore_zones(s, es.player_id);
-      size_t n = std::min<size_t>(zones.size(), 6);
-      for (size_t k = 0; k < n; ++k) {
-        actions.push_back(explore_zone_start + static_cast<Action>(k));
+      // One stable action id per galaxy hex; no truncation regardless of how
+      // many legal zones exist. Plus the option to stop exploring.
+      for (const HexCoord& zone : legal_explore_zones(s, es.player_id)) {
+        actions.push_back(explore_zone_start + hex_to_index(zone.q, zone.r));
       }
+      actions.push_back(explore_stop);
+      break;
+    }
+    case ExplorePhase::draw_again_decision: {
+      actions.push_back(explore_draw_again);
+      actions.push_back(explore_skip_second);
       break;
     }
     case ExplorePhase::select_drawn_tile: {
@@ -294,6 +305,9 @@ std::vector<Action> EclipseState::ExploreLegalActions() const {
     default:
       break;
   }
+  // OpenSpiel requires LegalActions sorted ascending; zone ids are emitted in
+  // grid-discovery order and explore_stop trails the zone block numerically.
+  std::sort(actions.begin(), actions.end());
   return actions;
 }
 
@@ -321,10 +335,6 @@ std::string EclipseState::ActionToString(Player player, Action action_id) const 
   if (action_id >= action_build_start && action_id < action_explore) {
     return "BUILD_" + std::to_string(action_id - action_build_start);
   }
-  if (action_id >= explore_zone_start &&
-      action_id < explore_zone_start + 6) {
-    return "EXPLORE_ZONE_" + std::to_string(action_id - explore_zone_start);
-  }
   if (action_id == explore_place) return "EXPLORE_PLACE";
   if (action_id == explore_discard) return "EXPLORE_DISCARD";
   if (action_id >= explore_rotation_start &&
@@ -339,6 +349,15 @@ std::string EclipseState::ActionToString(Player player, Action action_id) const 
       action_id < explore_select_tile_start + 2) {
     return "EXPLORE_SELECT_TILE_" +
            std::to_string(action_id - explore_select_tile_start);
+  }
+  if (action_id == explore_draw_again) return "EXPLORE_DRAW_AGAIN";
+  if (action_id == explore_skip_second) return "EXPLORE_SKIP_SECOND";
+  if (action_id == explore_stop) return "EXPLORE_STOP";
+  if (action_id >= explore_zone_start &&
+      action_id < explore_zone_start + GALAXY_CELL_COUNT) {
+    HexCoord zone = index_to_hex(action_id - explore_zone_start);
+    return "EXPLORE_ZONE_" + std::to_string(zone.q) + "_" +
+           std::to_string(zone.r);
   }
   return "UNKNOWN_ACTION(" + std::to_string(action_id) + ")";
 }
@@ -449,6 +468,21 @@ std::string EclipseState::ObservationString(Player player) const {
      << ", Science: " << static_cast<int>(me.resources.science)
      << ", Materials: " << static_cast<int>(me.resources.materials) << "\n";
   ss << "Visible sectors owned by me or empty near me.\n";
+
+  // The Explore sub-state is public once a tile is flipped, so report it to all.
+  const ExploreState& es = eclipse_state_.explore_state;
+  if (es.phase != ExplorePhase::inactive) {
+    ss << "Explore: phase=" << nlohmann::json(es.phase).get<std::string>()
+       << ", player=" << static_cast<int>(es.player_id)
+       << ", activations_left=" << static_cast<int>(es.activations_remaining)
+       << ", zone=(" << static_cast<int>(es.zone_q) << ","
+       << static_cast<int>(es.zone_r) << ")"
+       << ", drawn=" << static_cast<int>(es.drawn_count);
+    for (uint8_t i = 0; i < es.drawn_count && i < 2; ++i) {
+      ss << " " << static_cast<int>(es.drawn_sector_ids[i]);
+    }
+    ss << ", selected=" << static_cast<int>(es.selected_sector_id) << "\n";
+  }
   return ss.str();
 }
 
@@ -485,6 +519,23 @@ void EclipseState::ObservationTensor(Player player, absl::Span<float> values) co
 
   values[50] = static_cast<float>(eclipse_state_.current_round);
   values[51] = static_cast<float>(eclipse_state_.current_phase);
+
+  // Explore sub-state (public): lets an agent at a place/rotate/claim decision
+  // node actually see the drawn tile, zone and phase it is deciding on.
+  const ExploreState& es = eclipse_state_.explore_state;
+  if (es.phase != ExplorePhase::inactive) {
+    values[53] = 1.0f;
+    values[54] = static_cast<float>(es.phase);
+    values[55] = static_cast<float>(es.activations_remaining);
+    values[56] = static_cast<float>(es.ring);
+    values[57] = static_cast<float>(es.zone_q);
+    values[58] = static_cast<float>(es.zone_r);
+    values[59] = static_cast<float>(es.drawn_count);
+    values[60] = static_cast<float>(es.drawn_sector_ids[0]);
+    values[61] = static_cast<float>(es.drawn_sector_ids[1]);
+    values[62] = static_cast<float>(es.selected_sector_id);
+    values[63] = static_cast<float>(es.chosen_rotation);
+  }
 }
 
 void EclipseState::RestoreFromSnapshot(
@@ -535,8 +586,19 @@ void EclipseState::ApplyExploreSubAction(Action action_id) {
   const uint8_t player = s.explore_state.player_id;
   switch (s.explore_state.phase) {
     case ExplorePhase::choose_zone:
-      choose_explore_zone(s, player,
-                          static_cast<uint8_t>(action_id - explore_zone_start));
+      if (action_id == explore_stop) {
+        stop_exploring(s);
+      } else {
+        choose_explore_zone(s, player,
+                            index_to_hex(action_id - explore_zone_start));
+      }
+      break;
+    case ExplorePhase::draw_again_decision:
+      if (action_id == explore_draw_again) {
+        draw_again(s, player);
+      } else {
+        skip_second_draw(s, player);
+      }
       break;
     case ExplorePhase::select_drawn_tile:
       select_drawn_tile(
@@ -568,17 +630,16 @@ void EclipseState::ApplyExploreSubAction(Action action_id) {
 
 void EclipseState::DoApplyAction(Action action_id) {
   if (pending_random_event_ != PendingRandomEvent::none) {
+    bool was_explore_draw =
+        pending_random_event_ == PendingRandomEvent::explore_draw;
     ResolveChanceEvent(action_id);
-    // The explore tile draw may need another tile (Descendants of Draco) or may
-    // have finished the action entirely (empty bag ended the last activation).
-    if (pending_random_event_ == PendingRandomEvent::explore_draw) {
-      if (eclipse_state_.explore_state.phase == ExplorePhase::draw_tile) {
-        pending_random_event_ = PendingRandomEvent::explore_draw;  // re-arm
-      } else {
-        pending_random_event_ = PendingRandomEvent::none;
-        if (eclipse_state_.explore_state.phase == ExplorePhase::inactive) {
-          AdvanceTurn();
-        }
+    if (was_explore_draw) {
+      pending_random_event_ = PendingRandomEvent::none;
+      // An empty ring bag can end the last activation outright; otherwise a
+      // player decision phase (place/draw-again/select) follows. Any further
+      // draw (Draco's second tile) is re-armed from the decision branch below.
+      if (eclipse_state_.explore_state.phase == ExplorePhase::inactive) {
+        AdvanceTurn();
       }
     }
     return;

@@ -62,6 +62,13 @@ SectorType zone_ring(int distance) {
     return SectorType::OUTER;
 }
 
+// A zone is only explorable if its ring still has tiles left in the bag. There
+// is no discard-pile reshuffle: once a ring's bag is empty, that ring can no
+// longer be explored.
+bool zone_ring_has_tiles(const State& state, int q, int r) {
+    return ring_bag_value(state, zone_ring(hex_distance(0, 0, q, r))) != 0;
+}
+
 void clear_ring_bag_bit(State& state, SectorType ring, uint8_t bit) {
     switch (ring) {
         case SectorType::INNER:
@@ -116,6 +123,7 @@ void collect_explore_zones(const State& state, uint8_t player_id, bool first_onl
                 int nr = r + dir.second;
                 if (!in_galaxy_bounds(nq, nr)) continue;
                 if (state.galaxy.at(nq, nr).sector_id != 0) continue;  // not empty
+                if (!zone_ring_has_tiles(state, nq, nr)) continue;  // ring exhausted
                 if (already_listed(static_cast<int8_t>(nq), static_cast<int8_t>(nr))) {
                     continue;
                 }
@@ -256,14 +264,24 @@ bool begin_explore(State& state, uint8_t player_id) {
     return true;
 }
 
-bool choose_explore_zone(State& state, uint8_t player_id, uint8_t zone_index) {
+bool is_legal_explore_zone(const State& state, uint8_t player_id, int q, int r) {
+    if (!in_galaxy_bounds(q, r)) return false;
+    if (state.galaxy.at(q, r).sector_id != 0) return false;  // must be unexplored
+    if (!zone_ring_has_tiles(state, q, r)) return false;     // ring exhausted
+    for (const auto& dir : HEX_DIRECTIONS) {
+        int nq = q + dir.first;
+        int nr = r + dir.second;
+        if (!in_galaxy_bounds(nq, nr)) continue;
+        if (is_explore_anchor(state, player_id, state.galaxy.at(nq, nr))) return true;
+    }
+    return false;
+}
+
+bool choose_explore_zone(State& state, uint8_t player_id, HexCoord zone) {
     ExploreState& es = state.explore_state;
     if (es.phase != ExplorePhase::choose_zone) return false;
+    if (!is_legal_explore_zone(state, player_id, zone.q, zone.r)) return false;
 
-    std::vector<HexCoord> zones = legal_explore_zones(state, player_id);
-    if (zone_index >= zones.size()) return false;
-
-    const HexCoord zone = zones[zone_index];
     es.zone_q = zone.q;
     es.zone_r = zone.r;
     es.ring = zone_ring(hex_distance(0, 0, zone.q, zone.r));
@@ -273,9 +291,12 @@ bool choose_explore_zone(State& state, uint8_t player_id, uint8_t zone_index) {
     return true;
 }
 
+void stop_exploring(State& state) {
+    state.explore_state = ExploreState{};  // phase = inactive, player_id = 255
+}
+
 void apply_explore_draw(State& state, uint8_t ring_bit) {
     ExploreState& es = state.explore_state;
-    const uint8_t needed = is_draco(state, es.player_id) ? 2 : 1;
 
     if (ring_bag_value(state, es.ring) != 0) {
         uint16_t sector_id = ring_bit_to_sector_id(es.ring, ring_bit);
@@ -286,24 +307,39 @@ void apply_explore_draw(State& state, uint8_t ring_bit) {
         clear_ring_bag_bit(state, es.ring, ring_bit);
     }
 
-    // Draco needs a second tile if one remains.
-    if (es.drawn_count < needed && ring_bag_value(state, es.ring) != 0) {
-        es.phase = ExplorePhase::draw_tile;
-        return;
-    }
-
     if (es.drawn_count == 0) {
         // Ring bag exhausted, nothing flipped: the activation has no effect.
         end_explore_activation(state);
         return;
     }
     if (es.drawn_count >= 2) {
+        // Draco has now flipped both tiles; choose which one to keep.
         es.selected_sector_id = 0;
         es.phase = ExplorePhase::select_drawn_tile;
+        return;
+    }
+    // Exactly one tile flipped. Draco may flip a second if the bag still has one.
+    if (is_draco(state, es.player_id) && ring_bag_value(state, es.ring) != 0) {
+        es.phase = ExplorePhase::draw_again_decision;
     } else {
         es.selected_sector_id = es.drawn_sector_ids[0];
         es.phase = ExplorePhase::place_or_discard;
     }
+}
+
+bool draw_again(State& state, uint8_t player_id) {
+    ExploreState& es = state.explore_state;
+    if (es.phase != ExplorePhase::draw_again_decision) return false;
+    es.phase = ExplorePhase::draw_tile;  // arms another chance draw
+    return true;
+}
+
+bool skip_second_draw(State& state, uint8_t player_id) {
+    ExploreState& es = state.explore_state;
+    if (es.phase != ExplorePhase::draw_again_decision) return false;
+    es.selected_sector_id = es.drawn_sector_ids[0];
+    es.phase = ExplorePhase::place_or_discard;
+    return true;
 }
 
 bool select_drawn_tile(State& state, uint8_t player_id, uint8_t tile_index) {
@@ -326,7 +362,8 @@ bool place_drawn_tile(State& state, uint8_t player_id) {
 bool discard_drawn_tile(State& state, uint8_t player_id) {
     ExploreState& es = state.explore_state;
     if (es.phase != ExplorePhase::place_or_discard) return false;
-    // Discarded tiles stay out of the bag (no discard-pile reshuffle yet, TODO).
+    // Discarded tiles are gone for good (no discard pile / reshuffle): a ring's
+    // bag only depletes, and an exhausted ring becomes unexplorable.
     end_explore_activation(state);
     return true;
 }

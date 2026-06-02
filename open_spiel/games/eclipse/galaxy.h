@@ -57,6 +57,19 @@ inline int16_t unpack_r(uint32_t key) {
     return static_cast<int16_t>(key & 0xFFFF);
 }
 
+// Stable bijection between an axial hex coordinate and a dense cell index in
+// [0, MAP_SIZE*MAP_SIZE). Used to give every galaxy hex a fixed action id.
+constexpr int GALAXY_CELL_COUNT = MAP_SIZE * MAP_SIZE;
+
+inline int hex_to_index(int q, int r) {
+    return (q + OFFSET) * MAP_SIZE + (r + OFFSET);
+}
+
+inline HexCoord index_to_hex(int index) {
+    return HexCoord{static_cast<int8_t>(index / MAP_SIZE - OFFSET),
+                    static_cast<int8_t>(index % MAP_SIZE - OFFSET)};
+}
+
 // Hex grid neighbor directions: {dq, dr}
 inline constexpr std::array<std::pair<int16_t, int16_t>, 6> HEX_DIRECTIONS = {{
     {1, 0},    // East

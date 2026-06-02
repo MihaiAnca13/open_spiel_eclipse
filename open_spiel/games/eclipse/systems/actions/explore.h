@@ -18,19 +18,21 @@
 // the rest of the raw game state) so State can embed it; see state.h.
 enum class ExplorePhase : uint8_t {
     inactive = 0,
-    choose_zone,        // player picks an adjacent unexplored hex (zone)
-    draw_tile,          // chance node: flip tile(s) from the zone's ring bag
-    select_drawn_tile,  // Descendants of Draco only: keep one of two drawn tiles
-    place_or_discard,   // player keeps or discards the (selected) tile
-    choose_rotation,    // player picks a rotation that forms a wormhole connection
-    claim_control,      // player decides whether to drop an influence disc
-    discovery_reward,   // player picks discovery reward vs 2 VP
+    choose_zone,         // player picks an adjacent unexplored hex (zone), or stops
+    draw_tile,           // chance node: flip a tile from the zone's ring bag
+    draw_again_decision, // Descendants of Draco only: flip a second tile, or not
+    select_drawn_tile,   // Descendants of Draco only: keep one of two drawn tiles
+    place_or_discard,    // player keeps or discards the (selected) tile
+    choose_rotation,     // player picks a rotation that forms a wormhole connection
+    claim_control,       // player decides whether to drop an influence disc
+    discovery_reward,    // player picks discovery reward vs 2 VP
 };
 
 NLOHMANN_JSON_SERIALIZE_ENUM(ExplorePhase, {
     {ExplorePhase::inactive, "inactive"},
     {ExplorePhase::choose_zone, "choose_zone"},
     {ExplorePhase::draw_tile, "draw_tile"},
+    {ExplorePhase::draw_again_decision, "draw_again_decision"},
     {ExplorePhase::select_drawn_tile, "select_drawn_tile"},
     {ExplorePhase::place_or_discard, "place_or_discard"},
     {ExplorePhase::choose_rotation, "choose_rotation"},
@@ -98,12 +100,26 @@ std::vector<uint8_t> legal_explore_rotations(const ::State& state, uint8_t playe
 // move to choose_zone. Returns false (and stays inactive) if no legal zone.
 bool begin_explore(::State& state, uint8_t player_id);
 
-// Fix the chosen zone (and its ring) and move to draw_tile.
-bool choose_explore_zone(::State& state, uint8_t player_id, uint8_t zone_index);
+// True if the empty hex (q, r) is a legal explore zone for the player: in
+// bounds, unexplored, and adjacent to a sector they Control or have a ship in.
+bool is_legal_explore_zone(const ::State& state, uint8_t player_id, int q, int r);
 
-// Resolve a chance draw: record the drawn tile, remove it from the bag, and
-// advance the phase (re-arming draw_tile for the Descendants' second tile).
+// Fix the chosen zone (and its ring) and move to draw_tile. The zone is given as
+// an absolute hex; rejected if it is not currently a legal zone.
+bool choose_explore_zone(::State& state, uint8_t player_id, ::HexCoord zone);
+
+// End the Explore action now without using remaining activations (the rules let
+// Planta/Draco decide after the first sector whether to keep exploring).
+void stop_exploring(::State& state);
+
+// Resolve a single chance draw: record the drawn tile, remove it from the bag,
+// and advance the phase (Draco branches to draw_again_decision after one tile).
 void apply_explore_draw(::State& state, uint8_t ring_bit);
+
+// Descendants of Draco, after the first tile: flip a second tile (draw_again) or
+// proceed with just the one (skip_second_draw).
+bool draw_again(::State& state, uint8_t player_id);
+bool skip_second_draw(::State& state, uint8_t player_id);
 
 // Descendants of Draco: keep drawn tile `tile_index`, discard the other.
 bool select_drawn_tile(::State& state, uint8_t player_id, uint8_t tile_index);
