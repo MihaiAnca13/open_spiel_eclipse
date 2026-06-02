@@ -16,6 +16,7 @@
 #include "resources.h"
 #include "npc.h"
 #include "fixed_vector.h"
+#include "systems/actions/explore.h"
 #include "absl/container/fixed_array.h"
 
 using open_spiel::eclipse::FixedVector;
@@ -110,6 +111,9 @@ struct State {
     uint8_t turn_order[MAX_PLAYERS] = {255, 255, 255, 255, 255, 255};
     FixedVector<uint8_t, MAX_PLAYERS> pass_order;
 
+    // In-flight Explore action (inactive when no Explore is being resolved).
+    ExploreState explore_state;
+
     // Helper functions for tech market tray (allocation-free representation)
     uint8_t get_tech_tray_count(TechBit tech) const {
         for (size_t i = 0; i < 40; ++i) {
@@ -175,7 +179,8 @@ inline void to_json(nlohmann::json& j, const State& s) {
         {"current_phase", s.current_phase},
         {"current_round", s.current_round},
         {"turn_order", s.turn_order},
-        {"pass_order", s.pass_order}
+        {"pass_order", s.pass_order},
+        {"explore_state", s.explore_state}
     };
 }
 
@@ -228,6 +233,12 @@ inline void from_json(const nlohmann::json& j, State& s) {
     }
     
     j.at("pass_order").get_to(s.pass_order);
+
+    if (j.contains("explore_state")) {
+        j.at("explore_state").get_to(s.explore_state);
+    } else {
+        s.explore_state = ExploreState{};
+    }
 }
 
 #endif //ECLIPSE_STATE_H

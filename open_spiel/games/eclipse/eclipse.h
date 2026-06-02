@@ -24,7 +24,7 @@ class EclipseGame : public Game {
   int NumDistinctActions() const override;
   std::unique_ptr<State> NewInitialState() const override;
   std::unique_ptr<State> DeserializeState(const std::string& str) const override;
-  int MaxChanceOutcomes() const override { return 1; }
+  int MaxChanceOutcomes() const override { return 22; }
   int NumPlayers() const override;
   double MinUtility() const override { return 0.0; }
   double MaxUtility() const override { return 255.0; }
@@ -50,11 +50,11 @@ class EclipseGame : public Game {
 class EclipseState : public State {
  public:
   enum class PendingRandomEvent : uint8_t {
-    kNone = 0,
-    kInitialSetup = 1,
-    kExploreDraw = 2,
-    kDiscoveryDraw = 3,
-    kCombatRoll = 4,
+    none = 0,
+    initial_setup = 1,
+    explore_draw = 2,
+    discovery_draw = 3,
+    combat_roll = 4,
   };
 
   explicit EclipseState(std::shared_ptr<const Game> game);
@@ -87,10 +87,13 @@ class EclipseState : public State {
  private:
   std::shared_ptr<const EclipseGame> eclipse_game_;
   void ResolveChanceEvent(Action action_id);
+  std::vector<Action> ExploreLegalActions() const;
+  void ApplyExploreSubAction(Action action_id);
+  void AdvanceTurn();
 
   ::State eclipse_state_;
   SetupConfig setup_config_;
-  PendingRandomEvent pending_random_event_ = PendingRandomEvent::kInitialSetup;
+  PendingRandomEvent pending_random_event_ = PendingRandomEvent::initial_setup;
 };
 
 } // namespace eclipse

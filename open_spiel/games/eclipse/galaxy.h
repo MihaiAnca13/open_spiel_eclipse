@@ -79,6 +79,15 @@ inline std::array<uint32_t, 6> get_neighbors(int16_t q, int16_t r) {
     };
 }
 
+// Circularly rotate a 6-edge bitmask (e.g. a sector's wormhole edges) by
+// `rotation` steps, clockwise in the HEX_DIRECTIONS ordering (E,NE,NW,W,SW,SE).
+inline uint8_t rotate_edge_mask(uint8_t mask, uint8_t rotation) {
+    rotation %= 6;
+    uint8_t lo = static_cast<uint8_t>((mask << rotation) & 0x3F);
+    uint8_t hi = static_cast<uint8_t>(mask >> (6 - rotation));
+    return static_cast<uint8_t>((lo | hi) & 0x3F);
+}
+
 // Hex distance formula using axial coordinates
 inline int hex_distance(int16_t q1, int16_t r1, int16_t q2, int16_t r2) {
     return (abs(q1 - q2) + abs(q1 + r1 - q2 - r2) + abs(r1 - r2)) / 2;

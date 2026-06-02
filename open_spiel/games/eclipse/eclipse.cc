@@ -8,6 +8,7 @@
 #include <sstream>
 #include <stdexcept>
 
+#include "open_spiel/games/eclipse/systems/actions/explore.h"
 #include "open_spiel/games/eclipse/systems/setup.h"
 #include "open_spiel/json/include/nlohmann/json.hpp"
 #include "open_spiel/observer.h"
@@ -17,18 +18,35 @@ namespace eclipse {
 
 namespace {
 
-constexpr Action kChanceResolve = 0;
+constexpr Action chance_resolve = 0;
 
-// Action ID: 0 = PASS
-// Action ID: 1-8 = RESEARCH (index 0 to 7)
-// Action ID: 9-16 = BUILD (index 0 to 7)
-// Action ID: 17 = DUMMY EXPLORE
-constexpr Action kActionPass = 0;
-constexpr Action kActionResearchStart = 1;
-constexpr Action kActionBuildStart = 9;
-constexpr Action kActionExplore = 17;
+// Action layout:
+//   0       = PASS  (also the no-op chance-resolve token)
+//   1-8     = RESEARCH (index 0-7)
+//   9-16    = BUILD (index 0-7)
+//   17      = start an EXPLORE action
+//   18-23   = explore: choose the k-th legal zone
+//   24 / 25 = explore: place / discard the drawn tile
+//   26-31   = explore: place with rotation 0-5
+//   32 / 33 = explore: take control / decline
+//   34 / 35 = explore: discovery reward / 2 VP
+//   36-37   = explore (Descendants of Draco): keep drawn tile 0 / 1
+constexpr Action action_pass = 0;
+constexpr Action action_research_start = 1;
+constexpr Action action_build_start = 9;
+constexpr Action action_explore = 17;
+constexpr Action explore_zone_start = 18;
+constexpr Action explore_place = 24;
+constexpr Action explore_discard = 25;
+constexpr Action explore_rotation_start = 26;
+constexpr Action explore_claim_yes = 32;
+constexpr Action explore_claim_no = 33;
+constexpr Action explore_discovery_reward = 34;
+constexpr Action explore_discovery_vp = 35;
+constexpr Action explore_select_tile_start = 36;
+constexpr int num_distinct_actions = 38;
 
-const GameType kGameType{
+const GameType game_type{
     /*short_name=*/"eclipse",
     /*long_name=*/"Eclipse: New Dawn for the Galaxy",
     /*dynamics=*/GameType::Dynamics::kSequential,
@@ -59,21 +77,21 @@ std::shared_ptr<const Game> CreateGame(const GameParameters& params) {
   return std::make_shared<EclipseGame>(params);
 }
 
-REGISTER_SPIEL_GAME(kGameType, CreateGame);
-RegisterSingleTensorObserver single_tensor(kGameType.short_name);
+REGISTER_SPIEL_GAME(game_type, CreateGame);
+RegisterSingleTensorObserver single_tensor(game_type.short_name);
 
 std::string PendingRandomEventToString(
     EclipseState::PendingRandomEvent pending_event) {
   switch (pending_event) {
-    case EclipseState::PendingRandomEvent::kNone:
+    case EclipseState::PendingRandomEvent::none:
       return "none";
-    case EclipseState::PendingRandomEvent::kInitialSetup:
+    case EclipseState::PendingRandomEvent::initial_setup:
       return "initial_setup";
-    case EclipseState::PendingRandomEvent::kExploreDraw:
+    case EclipseState::PendingRandomEvent::explore_draw:
       return "explore_draw";
-    case EclipseState::PendingRandomEvent::kDiscoveryDraw:
+    case EclipseState::PendingRandomEvent::discovery_draw:
       return "discovery_draw";
-    case EclipseState::PendingRandomEvent::kCombatRoll:
+    case EclipseState::PendingRandomEvent::combat_roll:
       return "combat_roll";
   }
   return "unknown";
@@ -81,7 +99,7 @@ std::string PendingRandomEventToString(
 
 EclipseState::PendingRandomEvent PendingRandomEventFromInt(int value) {
   if (value < 0 ||
-      value > static_cast<int>(EclipseState::PendingRandomEvent::kCombatRoll)) {
+      value > static_cast<int>(EclipseState::PendingRandomEvent::combat_roll)) {
     throw std::invalid_argument("invalid pending random event");
   }
   return static_cast<EclipseState::PendingRandomEvent>(value);
@@ -90,11 +108,11 @@ EclipseState::PendingRandomEvent PendingRandomEventFromInt(int value) {
 }  // namespace
 
 EclipseGame::EclipseGame(const GameParameters& params)
-    : Game(kGameType, params),
+    : Game(game_type, params),
       rng_(std::mt19937_64(static_cast<uint64_t>(ParameterValue<int>(
           "rng_seed")))) {}
 
-int EclipseGame::NumDistinctActions() const { return 32; }
+int EclipseGame::NumDistinctActions() const { return num_distinct_actions; }
 
 int EclipseGame::NumPlayers() const { return ParameterValue<int>("players"); }
 
@@ -172,7 +190,7 @@ Player EclipseState::CurrentPlayer() const {
   if (IsTerminal()) {
     return kTerminalPlayerId;
   }
-  if (pending_random_event_ != PendingRandomEvent::kNone) {
+  if (pending_random_event_ != PendingRandomEvent::none) {
     return kChancePlayerId;
   }
   return eclipse_state_.current_player;
@@ -182,12 +200,23 @@ std::vector<Action> EclipseState::LegalActions() const {
   if (IsTerminal()) {
     return {};
   }
-  if (pending_random_event_ != PendingRandomEvent::kNone) {
-    return {kChanceResolve};
+  if (pending_random_event_ != PendingRandomEvent::none) {
+    // Chance node: the legal actions are exactly the chance outcomes.
+    std::vector<Action> actions;
+    for (const auto& [outcome, prob] : ChanceOutcomes()) {
+      actions.push_back(outcome);
+    }
+    return actions;
+  }
+
+  // Mid-Explore: only the choices valid for the current sub-phase are legal.
+  const ::State& s = eclipse_state_;
+  if (s.explore_state.phase != ExplorePhase::inactive) {
+    return ExploreLegalActions();
   }
 
   std::vector<Action> actions;
-  actions.push_back(kActionPass);
+  actions.push_back(action_pass);
 
   uint8_t current_player = eclipse_state_.current_player;
   if (current_player < eclipse_state_.players.size() &&
@@ -195,42 +224,128 @@ std::vector<Action> EclipseState::LegalActions() const {
     const auto& player = eclipse_state_.players[current_player];
     if (player.resources.science >= 2) {
       for (int i = 0; i < 8; ++i) {
-        actions.push_back(kActionResearchStart + i);
+        actions.push_back(action_research_start + i);
       }
     }
     if (player.resources.materials >= 3) {
       for (int i = 0; i < 4; ++i) {
-        actions.push_back(kActionBuildStart + i);
+        actions.push_back(action_build_start + i);
       }
     }
-    actions.push_back(kActionExplore);
+    if (has_explore_zone(s, current_player)) {
+      actions.push_back(action_explore);
+    }
   }
 
   return actions;
 }
 
+std::vector<Action> EclipseState::ExploreLegalActions() const {
+  const ::State& s = eclipse_state_;
+  const ExploreState& es = s.explore_state;
+  std::vector<Action> actions;
+
+  switch (es.phase) {
+    case ExplorePhase::choose_zone: {
+      std::vector<HexCoord> zones = legal_explore_zones(s, es.player_id);
+      size_t n = std::min<size_t>(zones.size(), 6);
+      for (size_t k = 0; k < n; ++k) {
+        actions.push_back(explore_zone_start + static_cast<Action>(k));
+      }
+      break;
+    }
+    case ExplorePhase::select_drawn_tile: {
+      for (uint8_t i = 0; i < es.drawn_count && i < 2; ++i) {
+        actions.push_back(explore_select_tile_start + i);
+      }
+      break;
+    }
+    case ExplorePhase::place_or_discard: {
+      if (!legal_explore_rotations(s, es.player_id).empty()) {
+        actions.push_back(explore_place);
+      }
+      actions.push_back(explore_discard);
+      break;
+    }
+    case ExplorePhase::choose_rotation: {
+      for (uint8_t rot : legal_explore_rotations(s, es.player_id)) {
+        actions.push_back(explore_rotation_start + rot);
+      }
+      break;
+    }
+    case ExplorePhase::claim_control: {
+      const SectorDefinition* def = get_sector_definition(es.selected_sector_id);
+      bool has_ancients = def != nullptr && def->starting_ancients > 0;
+      bool draco = s.players[es.player_id].species_id ==
+                   Species::DESCENDANTS_OF_DRACO;
+      bool may_control = !has_ancients || draco;
+      if (may_control &&
+          available_influence_discs(s.players[es.player_id]) > 0) {
+        actions.push_back(explore_claim_yes);
+      }
+      actions.push_back(explore_claim_no);
+      break;
+    }
+    case ExplorePhase::discovery_reward: {
+      actions.push_back(explore_discovery_reward);
+      actions.push_back(explore_discovery_vp);
+      break;
+    }
+    default:
+      break;
+  }
+  return actions;
+}
+
 std::string EclipseState::ActionToString(Player player, Action action_id) const {
-  if (pending_random_event_ != PendingRandomEvent::kNone) {
+  if (pending_random_event_ == PendingRandomEvent::explore_draw) {
+    uint32_t bag = ring_bag_value(eclipse_state_, eclipse_state_.explore_state.ring);
+    if (bag == 0) return "EXPLORE_DRAW_EMPTY";
+    return "EXPLORE_DRAW_SECTOR_" +
+           std::to_string(ring_bit_to_sector_id(
+               eclipse_state_.explore_state.ring,
+               static_cast<uint8_t>(action_id)));
+  }
+  if (pending_random_event_ != PendingRandomEvent::none) {
     return "RESOLVE_" + PendingRandomEventToString(pending_random_event_);
   }
-  if (action_id == kActionPass) {
+  if (action_id == action_pass) {
     return "PASS";
   }
-  if (action_id == kActionExplore) {
+  if (action_id == action_explore) {
     return "EXPLORE";
   }
-  if (action_id >= kActionResearchStart && action_id < kActionBuildStart) {
-    return "RESEARCH_" + std::to_string(action_id - kActionResearchStart);
+  if (action_id >= action_research_start && action_id < action_build_start) {
+    return "RESEARCH_" + std::to_string(action_id - action_research_start);
   }
-  if (action_id >= kActionBuildStart && action_id < kActionExplore) {
-    return "BUILD_" + std::to_string(action_id - kActionBuildStart);
+  if (action_id >= action_build_start && action_id < action_explore) {
+    return "BUILD_" + std::to_string(action_id - action_build_start);
+  }
+  if (action_id >= explore_zone_start &&
+      action_id < explore_zone_start + 6) {
+    return "EXPLORE_ZONE_" + std::to_string(action_id - explore_zone_start);
+  }
+  if (action_id == explore_place) return "EXPLORE_PLACE";
+  if (action_id == explore_discard) return "EXPLORE_DISCARD";
+  if (action_id >= explore_rotation_start &&
+      action_id < explore_rotation_start + 6) {
+    return "EXPLORE_ROT_" + std::to_string(action_id - explore_rotation_start);
+  }
+  if (action_id == explore_claim_yes) return "EXPLORE_CLAIM_YES";
+  if (action_id == explore_claim_no) return "EXPLORE_CLAIM_NO";
+  if (action_id == explore_discovery_reward) return "EXPLORE_DISCOVERY_REWARD";
+  if (action_id == explore_discovery_vp) return "EXPLORE_DISCOVERY_VP";
+  if (action_id >= explore_select_tile_start &&
+      action_id < explore_select_tile_start + 2) {
+    return "EXPLORE_SELECT_TILE_" +
+           std::to_string(action_id - explore_select_tile_start);
   }
   return "UNKNOWN_ACTION(" + std::to_string(action_id) + ")";
 }
 
 std::string EclipseState::ToString() const {
   std::stringstream ss;
-  if (pending_random_event_ != PendingRandomEvent::kNone) {
+  if (pending_random_event_ != PendingRandomEvent::none) {
     ss << "Eclipse Pending Random Event: "
        << PendingRandomEventToString(pending_random_event_) << "\n";
     ss << "Configured players: " << static_cast<int>(setup_config_.players)
@@ -261,7 +376,7 @@ std::string EclipseState::ToString() const {
 }
 
 bool EclipseState::IsTerminal() const {
-  return pending_random_event_ == PendingRandomEvent::kNone &&
+  return pending_random_event_ == PendingRandomEvent::none &&
          eclipse_state_.current_round > 9;
 }
 
@@ -278,10 +393,27 @@ std::vector<double> EclipseState::Returns() const {
 }
 
 ActionsAndProbs EclipseState::ChanceOutcomes() const {
-  if (pending_random_event_ == PendingRandomEvent::kNone) {
+  if (pending_random_event_ == PendingRandomEvent::none) {
     return {};
   }
-  return {{kChanceResolve, 1.0}};
+  if (pending_random_event_ == PendingRandomEvent::explore_draw) {
+    // Flip a uniformly random tile from the chosen zone's ring bag. The chance
+    // outcome action id is the bit index within that bag.
+    uint32_t bag = ring_bag_value(eclipse_state_, eclipse_state_.explore_state.ring);
+    if (bag == 0) {
+      return {{chance_resolve, 1.0}};  // empty bag: resolved as "drew nothing"
+    }
+    int count = __builtin_popcount(bag);
+    double prob = 1.0 / static_cast<double>(count);
+    ActionsAndProbs outcomes;
+    for (int bit = 0; bit < 22; ++bit) {
+      if (bag & (1u << bit)) {
+        outcomes.push_back({static_cast<Action>(bit), prob});
+      }
+    }
+    return outcomes;
+  }
+  return {{chance_resolve, 1.0}};
 }
 
 std::string EclipseState::Serialize() const {
@@ -305,7 +437,7 @@ std::string EclipseState::ObservationString(Player player) const {
 
   std::stringstream ss;
   ss << "Observation for Player " << player << ":\n";
-  if (pending_random_event_ != PendingRandomEvent::kNone) {
+  if (pending_random_event_ != PendingRandomEvent::none) {
     ss << "Waiting for " << PendingRandomEventToString(pending_random_event_)
        << "\n";
     return ss.str();
@@ -323,7 +455,7 @@ std::string EclipseState::ObservationString(Player player) const {
 void EclipseState::ObservationTensor(Player player, absl::Span<float> values) const {
   std::fill(values.begin(), values.end(), 0.0f);
 
-  if (pending_random_event_ != PendingRandomEvent::kNone) {
+  if (pending_random_event_ != PendingRandomEvent::none) {
     values[52] = static_cast<float>(pending_random_event_);
     return;
   }
@@ -364,10 +496,9 @@ void EclipseState::RestoreFromSnapshot(
 }
 
 void EclipseState::ResolveChanceEvent(Action action_id) {
-  SPIEL_CHECK_EQ(action_id, kChanceResolve);
-
   switch (pending_random_event_) {
-    case PendingRandomEvent::kInitialSetup: {
+    case PendingRandomEvent::initial_setup: {
+      SPIEL_CHECK_EQ(action_id, chance_resolve);
       eclipse_state_ = InitializeDeterministicSetupState(setup_config_);
       ResolveInitialSetupRandomness(eclipse_game_->rng(), setup_config_,
                                     eclipse_state_);
@@ -382,38 +513,110 @@ void EclipseState::ResolveChanceEvent(Action action_id) {
         });
       }
       FinalizeGameSetup(eclipse_state_, player_choices);
-      pending_random_event_ = PendingRandomEvent::kNone;
+      pending_random_event_ = PendingRandomEvent::none;
       return;
     }
-    case PendingRandomEvent::kNone:
+    case PendingRandomEvent::explore_draw: {
+      // action_id is the drawn bag bit (or chance_resolve if the bag was empty).
+      apply_explore_draw(eclipse_state_, static_cast<uint8_t>(action_id));
+      // Caller (DoApplyAction) inspects explore_state.phase to re-arm or finish.
+      return;
+    }
+    case PendingRandomEvent::none:
       SpielFatalError("no pending random event to resolve");
-    case PendingRandomEvent::kExploreDraw:
-    case PendingRandomEvent::kDiscoveryDraw:
-    case PendingRandomEvent::kCombatRoll:
+    case PendingRandomEvent::discovery_draw:
+    case PendingRandomEvent::combat_roll:
       SpielFatalError("pending random event is declared but unimplemented");
   }
 }
 
+void EclipseState::ApplyExploreSubAction(Action action_id) {
+  ::State& s = eclipse_state_;
+  const uint8_t player = s.explore_state.player_id;
+  switch (s.explore_state.phase) {
+    case ExplorePhase::choose_zone:
+      choose_explore_zone(s, player,
+                          static_cast<uint8_t>(action_id - explore_zone_start));
+      break;
+    case ExplorePhase::select_drawn_tile:
+      select_drawn_tile(
+          s, player,
+          static_cast<uint8_t>(action_id - explore_select_tile_start));
+      break;
+    case ExplorePhase::place_or_discard:
+      if (action_id == explore_place) {
+        place_drawn_tile(s, player);
+      } else {
+        discard_drawn_tile(s, player);
+      }
+      break;
+    case ExplorePhase::choose_rotation:
+      apply_explore_rotation(
+          s, player, static_cast<uint8_t>(action_id - explore_rotation_start));
+      break;
+    case ExplorePhase::claim_control:
+      claim_explore_control(s, player, action_id == explore_claim_yes);
+      break;
+    case ExplorePhase::discovery_reward:
+      resolve_explore_discovery(s, player,
+                                action_id == explore_discovery_reward);
+      break;
+    default:
+      break;
+  }
+}
+
 void EclipseState::DoApplyAction(Action action_id) {
-  if (pending_random_event_ != PendingRandomEvent::kNone) {
+  if (pending_random_event_ != PendingRandomEvent::none) {
     ResolveChanceEvent(action_id);
+    // The explore tile draw may need another tile (Descendants of Draco) or may
+    // have finished the action entirely (empty bag ended the last activation).
+    if (pending_random_event_ == PendingRandomEvent::explore_draw) {
+      if (eclipse_state_.explore_state.phase == ExplorePhase::draw_tile) {
+        pending_random_event_ = PendingRandomEvent::explore_draw;  // re-arm
+      } else {
+        pending_random_event_ = PendingRandomEvent::none;
+        if (eclipse_state_.explore_state.phase == ExplorePhase::inactive) {
+          AdvanceTurn();
+        }
+      }
+    }
+    return;
+  }
+
+  // Resolve a step of an in-flight Explore action without advancing the turn,
+  // until all activations are done (phase returns to inactive).
+  if (eclipse_state_.explore_state.phase != ExplorePhase::inactive) {
+    ApplyExploreSubAction(action_id);
+    if (eclipse_state_.explore_state.phase == ExplorePhase::draw_tile) {
+      pending_random_event_ = PendingRandomEvent::explore_draw;
+      return;
+    }
+    if (eclipse_state_.explore_state.phase != ExplorePhase::inactive) {
+      return;
+    }
+    AdvanceTurn();
     return;
   }
 
   uint8_t current_player = eclipse_state_.current_player;
 
-  // NOTE: ASSUMPTION / PLACEHOLDER
-  // These actions are actually not implemented correctly yet. just placeholder code
-  if (action_id == kActionPass) {
+  if (action_id == action_pass) {
     if (current_player < eclipse_state_.players.size()) {
       eclipse_state_.players[current_player].has_passed = true;
     }
-  } else if (action_id == kActionExplore) {
+  } else if (action_id == action_explore) {
     if (current_player < eclipse_state_.players.size()) {
-      eclipse_state_.players[current_player].score += 1;
+      begin_explore(eclipse_state_, current_player);
+      // begin_explore moves to choose_zone (wait for the player) unless there
+      // were no legal zones, in which case it stays inactive and we advance.
+      if (eclipse_state_.explore_state.phase != ExplorePhase::inactive) {
+        return;
+      }
     }
-  } else if (action_id >= kActionResearchStart &&
-             action_id < kActionBuildStart) {
+  } else if (action_id >= action_research_start &&
+             action_id < action_build_start) {
+    // NOTE: PLACEHOLDER - research is not wired to research_tech() yet.
     if (current_player < eclipse_state_.players.size()) {
       auto& player = eclipse_state_.players[current_player];
       if (player.resources.science >= 2) {
@@ -421,7 +624,8 @@ void EclipseState::DoApplyAction(Action action_id) {
         player.score += 2;
       }
     }
-  } else if (action_id >= kActionBuildStart && action_id < kActionExplore) {
+  } else if (action_id >= action_build_start && action_id < action_explore) {
+    // NOTE: PLACEHOLDER - build is not implemented yet.
     if (current_player < eclipse_state_.players.size()) {
       auto& player = eclipse_state_.players[current_player];
       if (player.resources.materials >= 3) {
@@ -430,6 +634,12 @@ void EclipseState::DoApplyAction(Action action_id) {
       }
     }
   }
+
+  AdvanceTurn();
+}
+
+void EclipseState::AdvanceTurn() {
+  const uint8_t current_player = eclipse_state_.current_player;
 
   bool all_passed = true;
   for (const auto& player : eclipse_state_.players) {
