@@ -5,6 +5,7 @@
 #include "explore.h"
 
 #include <algorithm>
+#include <bitset>
 
 #include "../../galaxy.h"
 #include "../../species.h"
@@ -83,15 +84,29 @@ void clear_ring_bag_bit(State& state, SectorType ring, uint8_t bit) {
     }
 }
 
-// The sector_ids the player has a ship in, gathered in one pass over the unit
-// registry. Each sector_id is unique to one placed tile, so this set identifies
-// the player's ship-occupied cells. (TODO: respect Pinning once combat exists.)
-std::vector<uint16_t> player_ship_sectors(const State& state, uint8_t player_id) {
-    std::vector<uint16_t> ids;
-    for (const Unit& unit : state.unit_registry) {
-        if (unit.player_id == player_id) ids.push_back(unit.sector_id);
+// True if an anchor neighbour of the (empty) zone presents a Wormhole on the
+// edge facing it — i.e. the zone is reachable by some sector tile, so a draw
+// there can actually be placed. Wormhole Generator relaxes this (a Wormhole on
+// either side connects), so any anchor neighbour qualifies. This gates zone
+// selection so the player is never offered an explore that is guaranteed to
+// force a discard for lack of a connection.
+bool zone_has_wormhole_access(const State& state, uint8_t player_id, int q, int r) {
+    const bool wormhole_generator =
+        state.players[player_id].has_tech(TechBit::WORMHOLE_GENERATOR);
+    for (uint8_t d = 0; d < 6; ++d) {
+        int nq = q + HEX_DIRECTIONS[d].first;
+        int nr = r + HEX_DIRECTIONS[d].second;
+        if (!in_galaxy_bounds(nq, nr)) continue;
+        const Sector& nb = state.galaxy.at(nq, nr);
+        if (nb.sector_id == 0 || !is_explore_anchor(state, player_id, nb)) continue;
+        if (wormhole_generator) return true;
+        const SectorDefinition* ndef = get_sector_definition(nb.sector_id);
+        if (ndef == nullptr) continue;
+        uint8_t mask = rotate_edge_mask(ndef->wormholes_mask, nb.rotation);
+        // The neighbour's edge facing the zone is the opposite direction.
+        if ((mask >> ((d + 3) % 6)) & 1u) return true;
     }
-    return ids;
+    return false;
 }
 
 // Enumerate empty hexes adjacent to one of the player's anchor sectors (a sector
@@ -100,33 +115,51 @@ std::vector<uint16_t> player_ship_sectors(const State& state, uint8_t player_id)
 // single grid pass; the ship set above keeps each cell's anchor test O(1) rather
 // than re-scanning the unit registry per cell. If `first_only`, returns as soon
 // as one zone is found (used by has_explore_zone to gate the action cheaply).
+// Sector ids index a dense table < 395; size the ship presence set to cover it.
+constexpr int kMaxSectorId = 512;
+
 void collect_explore_zones(const State& state, uint8_t player_id, bool first_only,
                            std::vector<HexCoord>& out) {
-    const std::vector<uint16_t> ships = player_ship_sectors(state, player_id);
-    auto already_listed = [&](int8_t q, int8_t r) {
-        for (const HexCoord& z : out) {
-            if (z.q == q && z.r == r) return true;
+    // O(U): mark the sector_ids the player has a ship in, so the per-cell anchor
+    // test below is O(1) instead of a std::find over the registry.
+    std::bitset<kMaxSectorId> ship_sector;
+    for (const Unit& unit : state.unit_registry) {
+        if (unit.player_id == player_id && unit.sector_id < kMaxSectorId) {
+            ship_sector.set(unit.sector_id);
         }
-        return false;
-    };
+    }
+    const bool wormhole_generator =
+        state.players[player_id].has_tech(TechBit::WORMHOLE_GENERATOR);
+    // O(1) dedup keyed by the cell's stable index, replacing a linear rescan of
+    // the growing output list per candidate.
+    std::bitset<GALAXY_CELL_COUNT> listed;
 
     for (int q = -GALAXY_RADIUS; q <= GALAXY_RADIUS; ++q) {
         for (int r = -GALAXY_RADIUS; r <= GALAXY_RADIUS; ++r) {
             const Sector& sector = state.galaxy.at(q, r);
             if (sector.sector_id == 0) continue;  // empty cell cannot be an anchor
-            bool anchor = sector.owner_id == player_id ||
-                          std::find(ships.begin(), ships.end(), sector.sector_id) !=
-                              ships.end();
+            const bool anchor =
+                sector.owner_id == player_id ||
+                (sector.sector_id < kMaxSectorId && ship_sector.test(sector.sector_id));
             if (!anchor) continue;
-            for (const auto& dir : HEX_DIRECTIONS) {
-                int nq = q + dir.first;
-                int nr = r + dir.second;
+            // The anchor's Wormhole edges, rotated into place once per anchor. Edge
+            // d faces the neighbour in direction d, so the gate below is a single
+            // bit test rather than a per-zone neighbour rescan.
+            const SectorDefinition* def = get_sector_definition(sector.sector_id);
+            const uint8_t anchor_mask =
+                def ? rotate_edge_mask(def->wormholes_mask, sector.rotation) : 0;
+            for (uint8_t d = 0; d < 6; ++d) {
+                const int nq = q + HEX_DIRECTIONS[d].first;
+                const int nr = r + HEX_DIRECTIONS[d].second;
                 if (!in_galaxy_bounds(nq, nr)) continue;
                 if (state.galaxy.at(nq, nr).sector_id != 0) continue;  // not empty
+                // Gate: the anchor must present a Wormhole toward the zone so a draw
+                // there can connect (Wormhole Generator connects either side).
+                if (!wormhole_generator && !((anchor_mask >> d) & 1u)) continue;
                 if (!zone_ring_has_tiles(state, nq, nr)) continue;  // ring exhausted
-                if (already_listed(static_cast<int8_t>(nq), static_cast<int8_t>(nr))) {
-                    continue;
-                }
+                const int cell = hex_to_index(nq, nr);
+                if (listed.test(cell)) continue;
+                listed.set(cell);
                 out.push_back(HexCoord{static_cast<int8_t>(nq), static_cast<int8_t>(nr)});
                 if (first_only) return;
             }
@@ -268,13 +301,8 @@ bool is_legal_explore_zone(const State& state, uint8_t player_id, int q, int r) 
     if (!in_galaxy_bounds(q, r)) return false;
     if (state.galaxy.at(q, r).sector_id != 0) return false;  // must be unexplored
     if (!zone_ring_has_tiles(state, q, r)) return false;     // ring exhausted
-    for (const auto& dir : HEX_DIRECTIONS) {
-        int nq = q + dir.first;
-        int nr = r + dir.second;
-        if (!in_galaxy_bounds(nq, nr)) continue;
-        if (is_explore_anchor(state, player_id, state.galaxy.at(nq, nr))) return true;
-    }
-    return false;
+    // Must be adjacent to an anchor that presents a Wormhole toward the zone.
+    return zone_has_wormhole_access(state, player_id, q, r);
 }
 
 bool choose_explore_zone(State& state, uint8_t player_id, HexCoord zone) {

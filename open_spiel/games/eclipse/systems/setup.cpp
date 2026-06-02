@@ -335,12 +335,25 @@ void FinalizeGameSetup(State& state,
     }
 
     // 2. Place player starting sectors and spawn their starting ships.
+    // Each alien species has a unique home sector, but several players may be
+    // Terran Factions — they must occupy distinct home tiles, otherwise a shared
+    // sector_id collides in every sector_id-keyed lookup (anchors, ships, claim).
+    static const uint16_t kTerranHomeSectors[] = {221, 223, 225, 227, 229, 231};
+    constexpr size_t kTerranHomeCount =
+        sizeof(kTerranHomeSectors) / sizeof(kTerranHomeSectors[0]);
+    size_t terran_seen = 0;
     const auto player_positions = PlayerPositionIndices(player_count);
     for (size_t i = 0; i < player_count; ++i) {
         const Player& player = state.players[i];
         const SpeciesData& species_data =
             SPECIES_TABLE[static_cast<size_t>(player.species_id)];
-        const uint16_t start_sector_id = species_data.starting_sector;
+        uint16_t start_sector_id = species_data.starting_sector;
+        if (player.species_id == Species::TERRAN_FACTIONS) {
+            if (terran_seen < kTerranHomeCount) {
+                start_sector_id = kTerranHomeSectors[terran_seen];
+            }
+            ++terran_seen;
+        }
         const SectorDefinition* sector_def = get_sector_definition(start_sector_id);
         const HexCoord coord = kBalancedPositions[player_positions[i]];
 

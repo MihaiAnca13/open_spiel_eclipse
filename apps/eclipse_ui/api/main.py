@@ -79,6 +79,9 @@ class Lobby:
     phase: str = "waiting"  # "waiting" | "setup" | "started"
     stage1_snapshot: Optional[dict] = None
     snapshot: Optional[dict] = None
+    # Canonical EclipseState::Serialize blob — the source of truth for gameplay
+    # (the UI-facing `snapshot` is derived from this after each action).
+    game_blob: Optional[dict] = None
     picker_order: List[int] = field(default_factory=list)   # seat indices, human only
     current_picker_idx: int = 0
     connections: list = field(default_factory=list)
@@ -90,6 +93,56 @@ class Lobby:
 
 
 lobby = Lobby()
+
+
+# ─── gameplay helpers ─────────────────────────────────────────────────────────
+
+PASS_ACTION = 0
+
+
+def _legal_info(blob: dict) -> dict:
+    """Decision facing the current player: {current_player, is_terminal,
+    legal_actions, action_strings}."""
+    return json.loads(eclipse_ui_native.legal_actions(json.dumps(blob)))
+
+
+def _apply(blob: dict, action_id: int) -> dict:
+    """Apply one action and auto-resolve chance, returning the new blob."""
+    return json.loads(eclipse_ui_native.apply_action(json.dumps(blob), action_id))
+
+
+def _all_humans_passed(blob: dict) -> bool:
+    players = blob.get("state", {}).get("players", [])
+    for idx, seat in enumerate(lobby.seats):
+        if seat.state == "human" and idx < len(players):
+            if not players[idx].get("has_passed", False):
+                return False
+    return True
+
+
+def _autoplay_ai(max_steps: int = 1000) -> None:
+    """Resolve AI/NPC seats until it is a human's turn (or the game ends).
+    An AI passes when every human has already passed (so the round can end);
+    otherwise it picks a uniform-random legal action (incl. explore sub-steps)."""
+    for _ in range(max_steps):
+        if lobby.game_blob is None:
+            return
+        info = _legal_info(lobby.game_blob)
+        if info["is_terminal"]:
+            return
+        cur = info["current_player"]
+        if cur is None or cur < 0 or cur >= len(lobby.seats):
+            return
+        if lobby.seats[cur].state != "ai":
+            return  # human's turn (or mid-explore human) — hand control back
+        legal = info["legal_actions"]
+        if not legal:
+            return
+        if PASS_ACTION in legal and _all_humans_passed(lobby.game_blob):
+            action = PASS_ACTION
+        else:
+            action = random.choice(legal)
+        lobby.game_blob = _apply(lobby.game_blob, action)
 
 
 def serialize_lobby(lby: Lobby) -> dict:
@@ -115,7 +168,15 @@ def serialize_lobby(lby: Lobby) -> dict:
     if lby.phase in ("setup", "started") and lby.stage1_snapshot:
         d["stage1_snapshot"] = lby.stage1_snapshot
     if lby.phase == "started" and lby.snapshot:
-        d["snapshot"] = lby.snapshot
+        snapshot = dict(lby.snapshot)
+        if lby.game_blob is not None:
+            snapshot["state"] = lby.game_blob["state"]
+            info = _legal_info(lby.game_blob)
+            snapshot["legal_actions"] = info["legal_actions"]
+            snapshot["action_strings"] = info["action_strings"]
+            snapshot["current_player"] = info["current_player"]
+            snapshot["is_terminal"] = info["is_terminal"]
+        d["snapshot"] = snapshot
     return d
 
 
@@ -395,10 +456,51 @@ async def lobby_finalize(body: dict = Body(...)):
     finalized = json.loads(finalized_str)
 
     lobby.snapshot = finalized
+    # Canonical gameplay blob (EclipseState::Serialize format). pending=0 and an
+    # empty rng_state mean DeserializeState reseeds from the config rng_seed.
+    lobby.game_blob = {
+        "setup_config": finalized["config"],
+        "state": finalized["state"],
+        "pending_random_event": 0,
+        "rng_state": "",
+    }
     lobby.phase = "started"
 
+    # If turn order opens on AI seats, resolve them up front so the first human
+    # to act sees a live decision.
+    _autoplay_ai()
+
     await broadcast_lobby()
-    return {"lobby": serialize_lobby(lobby), "snapshot": finalized}
+    return {"lobby": serialize_lobby(lobby), "snapshot": serialize_lobby(lobby).get("snapshot")}
+
+
+@app.post("/game/action")
+async def game_action(body: dict = Body(...)):
+    """Apply a gameplay action for the seat whose turn it is, then auto-resolve
+    any following AI seats. Broadcasts the new state to all clients."""
+    if lobby.phase != "started" or lobby.game_blob is None:
+        raise HTTPException(status_code=400, detail="Game not started")
+
+    seat = body.get("seat", body.get("player_id"))
+    action_id = body.get("action_id")
+    if not isinstance(seat, int) or not isinstance(action_id, int):
+        raise HTTPException(status_code=400, detail="seat and action_id are required ints")
+
+    info = _legal_info(lobby.game_blob)
+    if info["is_terminal"]:
+        raise HTTPException(status_code=400, detail="Game is over")
+    if info["current_player"] != seat:
+        raise HTTPException(status_code=403, detail="Not your turn")
+    if seat < 0 or seat >= len(lobby.seats) or lobby.seats[seat].state != "human":
+        raise HTTPException(status_code=403, detail="Not a controllable human seat")
+    if action_id not in info["legal_actions"]:
+        raise HTTPException(status_code=400, detail="Illegal action")
+
+    lobby.game_blob = _apply(lobby.game_blob, action_id)
+    _autoplay_ai()
+
+    await broadcast_lobby()
+    return serialize_lobby(lobby).get("snapshot")
 
 
 @app.post("/lobby/reset")
@@ -416,6 +518,7 @@ async def lobby_reset(body: dict = Body(...)):
     lobby.phase = "waiting"
     lobby.stage1_snapshot = None
     lobby.snapshot = None
+    lobby.game_blob = None
     lobby.picker_order = []
     lobby.current_picker_idx = 0
 

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import './App.css';
 import {
   SPECIES_THEME,
@@ -7,8 +7,9 @@ import {
   NPC_COLOR_GUARDIAN,
   getSpeciesHexColor,
 } from './theme';
+import ActionPanel, { ACTION, type ExploreState } from './ActionPanel';
 
-import { API_BASE } from './types/lobby';
+import { API_BASE, WS_BASE } from './types/lobby';
 
 interface HexCoord {
   q: number;
@@ -101,6 +102,10 @@ interface GameState {
   current_round: number;
   turn_order: number[];
   pass_order: number[];
+  explore_state?: ExploreState;
+  sector_bag_inner: number;
+  sector_bag_middle: number;
+  sector_bag_outer: number;
 }
 
 interface StagedPlayerConfig {
@@ -120,6 +125,55 @@ export interface SetupSnapshot {
   config: SetupConfig;
   state: GameState;
   finalized: boolean;
+  // Attached by the server once the game has started (see api/main.py).
+  legal_actions?: number[];
+  action_strings?: Record<string, string>;
+  current_player?: number;
+  is_terminal?: boolean;
+}
+
+// Remaining tiles in a ring bag = set bits in its bitmask.
+function bagCount(mask: number | undefined): number {
+  let m = (mask ?? 0) >>> 0;
+  let c = 0;
+  while (m) { m &= m - 1; c++; }
+  return c;
+}
+
+// Influence disc model — mirrors open_spiel/games/eclipse: total discs and the
+// upkeep cost exposed as discs leave the track (state.h INFLUENCE_UPKEEP_TABLE).
+const INFLUENCE_TOTAL = 12;
+const INFLUENCE_UPKEEP = [0, 0, 1, 2, 3, 5, 7, 10, 13, 17, 21, 25, 30];
+
+function InfluenceTrack({ onSectors, onActions }: { onSectors: number; onActions: number }) {
+  const deployed = onSectors + onActions;
+  const available = Math.max(0, INFLUENCE_TOTAL - deployed);
+  const upkeep = INFLUENCE_UPKEEP[Math.min(deployed, INFLUENCE_UPKEEP.length - 1)];
+  // Discs fill the track from the left; spent discs leave gaps and expose the
+  // upkeep cost. Order: available (on track) → on actions → on sectors.
+  const cells = Array.from({ length: INFLUENCE_TOTAL }, (_, i) => {
+    if (i < available) return 'avail';
+    if (i < available + onActions) return 'action';
+    return 'sector';
+  });
+  return (
+    <div className="influence-track">
+      <div className="influence-track-head">
+        <span>Influence Track</span>
+        <span className="influence-upkeep" title="Money paid each Upkeep phase">Upkeep 💰{upkeep}</span>
+      </div>
+      <div className="influence-pips">
+        {cells.map((kind, i) => (
+          <span key={i} className={`influence-pip ${kind}`} />
+        ))}
+      </div>
+      <div className="influence-legend">
+        <span><span className="influence-pip avail" /> {available} ready</span>
+        <span><span className="influence-pip action" /> {onActions} actions</span>
+        <span><span className="influence-pip sector" /> {onSectors} sectors</span>
+      </div>
+    </div>
+  );
 }
 
 function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [] }: { initialMetadata: any; initialSnapshot?: SetupSnapshot; mySeatIdx?: number; playerNames?: (string | null)[] }) {
@@ -132,6 +186,7 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [jsonExpanded, setJsonExpanded] = useState<boolean>(false);
+  const [actionInProgress, setActionInProgress] = useState<boolean>(false);
   const [hoveredSector, setHoveredSector] = useState<Sector | null>(null);
   const [setupFinalized, setSetupFinalized] = useState<boolean>(initialSnapshot?.finalized ?? false);
   const [playerStartingSectors, setPlayerStartingSectors] = useState<Record<number, number>>({});
@@ -273,6 +328,55 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
     setAiChoices((prev) => ({ ...prev, [playerId]: isAi }));
   };
 
+  // Once the game has started, subscribe to live state broadcasts so every
+  // player's action (and the server's AI auto-play) re-renders the board.
+  useEffect(() => {
+    if (!setupFinalized) return;
+    const playerId = sessionStorage.getItem('eclipse_player_id') ?? '';
+    let ws: WebSocket | null = null;
+    let closed = false;
+    const connect = () => {
+      ws = new WebSocket(`${WS_BASE}/ws?player_id=${encodeURIComponent(playerId)}`);
+      ws.onmessage = (e) => {
+        const msg = JSON.parse(e.data);
+        if (msg.type === 'lobby_state' && msg.lobby?.phase === 'started' && msg.lobby.snapshot) {
+          setSnapshot(msg.lobby.snapshot as SetupSnapshot);
+        }
+      };
+      ws.onclose = () => {
+        if (!closed) setTimeout(connect, 1000);
+      };
+    };
+    connect();
+    return () => {
+      closed = true;
+      ws?.close();
+    };
+  }, [setupFinalized]);
+
+  const submitAction = async (actionId: number) => {
+    if (actionInProgress) return;
+    setActionInProgress(true);
+    setError(null);
+    try {
+      const response = await fetch(`${API_BASE}/game/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ seat: mySeatIdx, action_id: actionId }),
+      });
+      if (!response.ok) {
+        const detail = await response.json().catch(() => null);
+        throw new Error(detail?.detail || `Action failed (${response.status})`);
+      }
+      const updated = await response.json();
+      if (updated) setSnapshot(updated as SetupSnapshot);
+    } catch (err: any) {
+      setError(err.message || 'Action failed');
+    } finally {
+      setActionInProgress(false);
+    }
+  };
+
   const hexSize = 35;
   const viewBoxWidth = 600;
   const viewBoxHeight = 520;
@@ -322,6 +426,40 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
   }
 
   const playerIds = Array.from({ length: numPlayers }, (_, playerId) => playerId);
+
+  // ── Gameplay (Action phase) derived state ──────────────────────────────────
+  const legalActions = snapshot?.legal_actions ?? [];
+  const exploreState = gameState?.explore_state;
+  const explorePhase = exploreState?.phase ?? 'inactive';
+  const isTerminal = snapshot?.is_terminal ?? false;
+  const isStarted = setupFinalized && snapshot?.current_player !== undefined;
+  const isMyTurn = isStarted && snapshot?.current_player === mySeatIdx && !isTerminal;
+  const inZoneSelect = isMyTurn && explorePhase === 'choose_zone';
+  const currentPlayerLabel =
+    snapshot?.current_player !== undefined ? playerLabel(snapshot.current_player) : '';
+  const selectedSectorId = exploreState?.selected_sector_id ?? 0;
+  const ancientsOnSelected =
+    !!gameState &&
+    selectedSectorId > 0 &&
+    gameState.unit_registry.some((u) => u.sector_id === selectedSectorId && u.player_id === 255);
+
+  // Legal explore zones → clickable hexes (action id 35 + hex_to_index(q,r)).
+  const legalZones = inZoneSelect
+    ? legalActions
+        .filter((a) => a >= ACTION.EXPLORE_ZONE_START)
+        .map((a) => {
+          const idx = a - ACTION.EXPLORE_ZONE_START;
+          const q = Math.floor(idx / 15) - 7;
+          const r = (idx % 15) - 7;
+          return {
+            action: a,
+            q,
+            r,
+            cx: centerX + hexSize * (Math.sqrt(3) * q + (Math.sqrt(3) / 2) * r),
+            cy: centerY + hexSize * (1.5 * r),
+          };
+        })
+    : [];
 
   return (
     <div className="w-[95%] mx-auto app-container">
@@ -453,19 +591,92 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
         <div className="board-container">
           {gameState && (
             <div className="turn-order-bar">
-              <span className="text-xs uppercase text-[#94a3b8] font-bold mr-2">Active Turn Order:</span>
+              <span className="text-xs uppercase text-[#94a3b8] font-bold mr-2">
+                {isStarted ? `Round ${gameState.current_round} · Turn Order:` : 'Active Turn Order:'}
+              </span>
               {gameState.turn_order.map((playerId, idx) => {
                 if (playerId === 255) return null;
                 const player = gameState.players[playerId];
                 const isActive = gameState.current_player === playerId;
+                const passed = player?.has_passed;
                 return (
-                  <div key={playerId} className={`turn-badge ${isActive ? 'active' : ''}`}>
+                  <div key={playerId} className={`turn-badge ${isActive ? 'active' : ''} ${passed ? 'passed' : ''}`}>
                     <span className="turn-num">{idx + 1}</span>
                     <span className={SPECIES_THEME[player?.species_id ?? '']?.cssClass ?? ''}>{playerLabel(playerId)} ({player?.species_id || 'Choosing...'})</span>
                     {player?.is_ai && <span className="text-[9px] bg-[#334155] text-[#93c5fd] px-1 py-0.5 rounded">AI</span>}
+                    {passed && <span className="text-[9px] text-[#94a3b8]">✓ passed</span>}
                   </div>
                 );
               })}
+            </div>
+          )}
+
+          {isStarted && gameState && (
+            <div className="stacks-bar">
+              <span className="text-xs uppercase text-[#94a3b8] font-bold mr-1">Sector stacks left:</span>
+              <span className="stack-pill inner" title="Ring I (Inner) tiles remaining">
+                <span className="stack-ring">I</span> {bagCount(gameState.sector_bag_inner)}
+              </span>
+              <span className="stack-pill middle" title="Ring II (Middle) tiles remaining">
+                <span className="stack-ring">II</span> {bagCount(gameState.sector_bag_middle)}
+              </span>
+              <span className="stack-pill outer" title="Ring III (Outer) tiles remaining">
+                <span className="stack-ring">III</span> {bagCount(gameState.sector_bag_outer)}
+              </span>
+            </div>
+          )}
+
+          {isStarted && gameState && (
+            <div className="game-hud">
+              <ActionPanel
+                explore={exploreState}
+                legalActions={legalActions}
+                isMyTurn={isMyTurn}
+                isTerminal={isTerminal}
+                busy={actionInProgress}
+                currentPlayerLabel={currentPlayerLabel}
+                ancientsOnSelected={ancientsOnSelected}
+                onAction={submitAction}
+              />
+              <div className="panel economy-panel">
+                <h3 className="panel-title">Players</h3>
+                <div className="economy-grid">
+                  {gameState.turn_order
+                    .filter((pid) => pid !== 255)
+                    .map((pid) => {
+                      const p = gameState.players[pid];
+                      if (!p) return null;
+                      const onSectors = p.disks_on_sectors ?? 0;
+                      const onActions = p.disks_on_actions ?? 0;
+                      const discsLeft = Math.max(0, INFLUENCE_TOTAL - onSectors - onActions);
+                      const isMine = pid === mySeatIdx;
+                      return (
+                        <div
+                          key={pid}
+                          className={`economy-card ${isMine ? 'mine' : ''} ${pid === gameState.current_player ? 'active' : ''}`}
+                        >
+                          <div className="economy-name">
+                            <span className={SPECIES_THEME[p.species_id ?? '']?.cssClass ?? ''}>{playerLabel(pid)}</span>
+                            <span className="economy-score">⭐ {p.score}</span>
+                          </div>
+                          <div className="economy-resources">
+                            <span className="res gold" title="Money">💰 {p.resources.gold} <em>+{p.resources.gold_prod}</em></span>
+                            <span className="res science" title="Science">🔬 {p.resources.science} <em>+{p.resources.science_prod}</em></span>
+                            <span className="res materials" title="Materials">⚙️ {p.resources.materials} <em>+{p.resources.materials_prod}</em></span>
+                          </div>
+                          {isMine ? (
+                            <InfluenceTrack onSectors={onSectors} onActions={onActions} />
+                          ) : (
+                            <div className="economy-meta">
+                              <span title="Influence discs available">🔵 {discsLeft} discs</span>
+                            </div>
+                          )}
+                          {p.has_passed && <div className="economy-meta"><span className="economy-passed">passed</span></div>}
+                        </div>
+                      );
+                    })}
+                </div>
+              </div>
             </div>
           )}
 
@@ -476,6 +687,19 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
                   const fillColor = getPlayerHexColor(sector.owner_id, sector.sector_id);
                   const isCenter = sector.sector_id === 1;
                   const units = getUnitsInSector(sector.sector_id);
+                  // Ownership / threat cues so a wild (uncontrolled) sector is never
+                  // mistaken for one you control. NPC units (Ancients/Guardians)
+                  // block control until cleared in combat.
+                  const owned = sector.owner_id !== 255;
+                  const hasHostiles = units.some((u) => u.player_id === 255);
+                  const stroke = isCenter
+                    ? '#eab308'
+                    : hasHostiles
+                      ? '#ef4444'
+                      : owned
+                        ? '#f8fafc'
+                        : '#475569';
+                  const strokeWidth = isCenter || hasHostiles || owned ? '2.5' : '1.5';
 
                   return (
                     <g
@@ -486,8 +710,9 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
                       <polygon
                         points={getHexPoints(cx, cy, hexSize - 1.5)}
                         fill={fillColor}
-                        stroke={isCenter ? '#eab308' : '#475569'}
-                        strokeWidth={isCenter ? '2.5' : '1.5'}
+                        fillOpacity={owned || hasHostiles ? 1 : 0.65}
+                        stroke={stroke}
+                        strokeWidth={strokeWidth}
                         className="hex-polygon"
                       />
 
@@ -525,6 +750,30 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
                     </g>
                   );
                 })}
+
+                {legalZones.map((zone) => (
+                  <g
+                    key={`zone-${zone.action}`}
+                    className="explore-zone"
+                    onClick={() => submitAction(zone.action)}
+                  >
+                    <polygon
+                      points={getHexPoints(zone.cx, zone.cy, hexSize - 1.5)}
+                      className="explore-zone-hex"
+                    />
+                    <text
+                      x={zone.cx}
+                      y={zone.cy + 4}
+                      textAnchor="middle"
+                      fill="#a7f3d0"
+                      fontSize="14px"
+                      fontWeight="bold"
+                      style={{ pointerEvents: 'none' }}
+                    >
+                      +
+                    </text>
+                  </g>
+                ))}
               </svg>
             ) : (
               <div className="text-center text-[#64748b]">

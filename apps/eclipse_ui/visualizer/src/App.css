@@ -345,6 +345,296 @@
   justify-content: center;
 }
 
+.turn-badge.passed {
+  opacity: 0.55;
+}
+
+/* Sector stack (ring bag) remaining-tile counts */
+.stacks-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.stack-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background-color: #0f1015;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #e2e8f0;
+}
+
+.stack-ring {
+  font-size: 10px;
+  font-weight: 800;
+  border-radius: 4px;
+  padding: 1px 5px;
+  background-color: #1e293b;
+}
+
+.stack-pill.inner .stack-ring { color: #f0abfc; }
+.stack-pill.middle .stack-ring { color: #7dd3fc; }
+.stack-pill.outer .stack-ring { color: #fdba74; }
+
+/* ── Gameplay HUD (Action phase) ─────────────────────────────────────────── */
+.game-hud {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) 2fr;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.action-panel,
+.economy-panel {
+  gap: 10px;
+}
+
+.action-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.action-row.action-wrap {
+  flex-wrap: wrap;
+}
+
+.action-btn {
+  flex: 1;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: filter 0.15s ease, opacity 0.15s ease;
+}
+
+.action-btn.primary {
+  background-color: #2563eb;
+  color: #f8fafc;
+}
+
+.action-btn.secondary {
+  background-color: #1e293b;
+  color: #cbd5e1;
+  border-color: #334155;
+}
+
+.action-btn.danger {
+  background-color: #7f1d1d;
+  color: #fecaca;
+}
+
+.action-btn:hover:not(:disabled) {
+  filter: brightness(1.15);
+}
+
+.action-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.action-waiting {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #94a3b8;
+}
+
+.action-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid #334155;
+  border-top-color: #60a5fa;
+  border-radius: 9999px;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.drawn-tile {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background-color: #0f1015;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  padding: 8px 12px;
+}
+
+.drawn-tile-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  color: #94a3b8;
+}
+
+.drawn-tile-id {
+  font-size: 18px;
+  font-weight: 800;
+  color: #a7f3d0;
+}
+
+/* Player economy cards */
+.economy-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 8px;
+}
+
+.economy-card {
+  background-color: #0f1015;
+  border: 1px solid #2d313f;
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.economy-card.active {
+  border-color: #a855f7;
+}
+
+.economy-card.mine {
+  box-shadow: inset 0 0 0 1px #60a5fa;
+}
+
+.economy-name {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.economy-score {
+  color: #fbbf24;
+}
+
+.economy-resources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  color: #e2e8f0;
+}
+
+.economy-resources .res em {
+  color: #64748b;
+  font-style: normal;
+  font-size: 10px;
+}
+
+.economy-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.economy-passed {
+  color: #f59e0b;
+}
+
+/* Influence disc track (local player) */
+.influence-track {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  border-top: 1px solid #2d313f;
+  padding-top: 6px;
+}
+
+.influence-track-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #94a3b8;
+}
+
+.influence-upkeep {
+  color: #fbbf24;
+  font-weight: 700;
+}
+
+.influence-pips {
+  display: flex;
+  gap: 3px;
+  flex-wrap: wrap;
+}
+
+.influence-pip {
+  width: 12px;
+  height: 12px;
+  border-radius: 9999px;
+  display: inline-block;
+  box-sizing: border-box;
+}
+
+.influence-pip.avail {
+  background-color: #3b82f6;
+  box-shadow: 0 0 4px rgba(59, 130, 246, 0.6);
+}
+
+.influence-pip.action {
+  background-color: transparent;
+  border: 1.5px solid #f59e0b;
+}
+
+.influence-pip.sector {
+  background-color: transparent;
+  border: 1.5px solid #4ade80;
+}
+
+.influence-legend {
+  display: flex;
+  gap: 10px;
+  font-size: 10px;
+  color: #94a3b8;
+}
+
+.influence-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.influence-legend .influence-pip {
+  width: 9px;
+  height: 9px;
+}
+
+/* Clickable explore zones on the map */
+.explore-zone {
+  cursor: pointer;
+}
+
+.explore-zone-hex {
+  fill: rgba(16, 185, 129, 0.12);
+  stroke: #34d399;
+  stroke-width: 2;
+  stroke-dasharray: 4 3;
+  transition: fill 0.15s ease;
+}
+
+.explore-zone:hover .explore-zone-hex {
+  fill: rgba(16, 185, 129, 0.3);
+}
+
 /* Species specific styles */
 .color-eridani { color: #f87171; border-color: #f87171; }
 .color-hydran { color: #c084fc; border-color: #c084fc; }
