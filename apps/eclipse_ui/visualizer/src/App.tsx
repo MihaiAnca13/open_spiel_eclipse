@@ -8,7 +8,7 @@ import {
   getSpeciesHexColor,
 } from './theme';
 
-const API_BASE = 'http://127.0.0.1:8000';
+import { API_BASE } from './types/lobby';
 
 interface HexCoord {
   q: number;
@@ -116,36 +116,47 @@ interface SetupConfig {
   staged_players: StagedPlayerConfig[];
 }
 
-interface SetupSnapshot {
+export interface SetupSnapshot {
   config: SetupConfig;
   state: GameState;
   finalized: boolean;
 }
 
-function App({ initialMetadata }: { initialMetadata: any }) {
-  const [rngSeed, setRngSeed] = useState<number>(42);
-  const [numPlayers, setNumPlayers] = useState<number>(4);
+function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [] }: { initialMetadata: any; initialSnapshot?: SetupSnapshot; mySeatIdx?: number; playerNames?: (string | null)[] }) {
+  const playerLabel = (pid: number) => playerNames[pid] || `Player ${pid + 1}`;
+  const [rngSeed, setRngSeed] = useState<number>(initialSnapshot?.config.rng_seed ?? 42);
+  const [numPlayers, setNumPlayers] = useState<number>(initialSnapshot?.config.players ?? 4);
   const [gameMetadata] = useState<any>(initialMetadata);
   const [difficulty, setDifficulty] = useState<string>(initialMetadata.npc_difficulties?.[0] ?? 'Easy');
-  const [snapshot, setSnapshot] = useState<SetupSnapshot | null>(null);
+  const [snapshot, setSnapshot] = useState<SetupSnapshot | null>(initialSnapshot ?? null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [jsonExpanded, setJsonExpanded] = useState<boolean>(false);
   const [hoveredSector, setHoveredSector] = useState<Sector | null>(null);
-  const [setupFinalized, setSetupFinalized] = useState<boolean>(false);
+  const [setupFinalized, setSetupFinalized] = useState<boolean>(initialSnapshot?.finalized ?? false);
   const [playerStartingSectors, setPlayerStartingSectors] = useState<Record<number, number>>({});
 
   const speciesList: string[] = gameMetadata.species ?? Object.keys(SPECIES_THEME);
   const [speciesChoices, setSpeciesChoices] = useState<Record<number, string>>(() => {
+    if (initialSnapshot) {
+      return Object.fromEntries(
+        initialSnapshot.config.staged_players.map((p, i) => [i, p.species ?? speciesList[i % speciesList.length]])
+      );
+    }
     const choices: Record<number, string> = {};
     for (let i = 0; i < 6; i++) {
       choices[i] = speciesList[i % speciesList.length];
     }
     return choices;
   });
-  const [aiChoices, setAiChoices] = useState<Record<number, boolean>>(
-    Object.fromEntries(Array.from({ length: 6 }, (_, i) => [i, i !== 0]))
-  );
+  const [aiChoices, setAiChoices] = useState<Record<number, boolean>>(() => {
+    if (initialSnapshot) {
+      return Object.fromEntries(
+        initialSnapshot.config.staged_players.map((p, i) => [i, p.is_ai])
+      );
+    }
+    return Object.fromEntries(Array.from({ length: 6 }, (_, i) => [i, i !== 0]));
+  });
 
   const getAiDefault = (playerId: number) => aiChoices[playerId] ?? (playerId !== 0);
 
@@ -317,6 +328,11 @@ function App({ initialMetadata }: { initialMetadata: any }) {
       <header className="header">
         <h1>Eclipse setup & map visualizer</h1>
         <p>Interactive staged setup backed by the shared OpenSpiel Eclipse core</p>
+        {mySeatIdx >= 0 && (
+          <span className="text-xs text-[#60a5fa] font-semibold">
+            You are Player {mySeatIdx + 1} — {playerLabel(mySeatIdx)}
+          </span>
+        )}
       </header>
 
       {error && (
@@ -371,7 +387,7 @@ function App({ initialMetadata }: { initialMetadata: any }) {
                 return (
                   <div key={playerId} className={`player-choice-card ${isFirstPicker ? 'active' : ''}`}>
                     <div className="player-card-header">
-                      <span className="text-[13px] font-bold">Player {playerId}</span>
+                      <span className="text-[13px] font-bold">{playerLabel(playerId)}</span>
                       <span className="player-badge">
                         {gameState
                           ? isFirstPicker
@@ -445,7 +461,7 @@ function App({ initialMetadata }: { initialMetadata: any }) {
                 return (
                   <div key={playerId} className={`turn-badge ${isActive ? 'active' : ''}`}>
                     <span className="turn-num">{idx + 1}</span>
-                    <span className={SPECIES_THEME[player?.species_id ?? '']?.cssClass ?? ''}>P{playerId} ({player?.species_id || 'Choosing...'})</span>
+                    <span className={SPECIES_THEME[player?.species_id ?? '']?.cssClass ?? ''}>{playerLabel(playerId)} ({player?.species_id || 'Choosing...'})</span>
                     {player?.is_ai && <span className="text-[9px] bg-[#334155] text-[#93c5fd] px-1 py-0.5 rounded">AI</span>}
                   </div>
                 );
@@ -533,7 +549,7 @@ function App({ initialMetadata }: { initialMetadata: any }) {
                 <div className="galaxy-info-item">
                   <span>Owner</span>
                   <span>
-                    {hoveredSector.owner_id === 255 ? 'Unowned (Neutral)' : `Player ${hoveredSector.owner_id} (${gameState.players[hoveredSector.owner_id]?.species_id})`}
+                    {hoveredSector.owner_id === 255 ? 'Unowned (Neutral)' : `${playerLabel(hoveredSector.owner_id)} (${gameState.players[hoveredSector.owner_id]?.species_id})`}
                   </span>
                 </div>
                 <div className="galaxy-info-item">

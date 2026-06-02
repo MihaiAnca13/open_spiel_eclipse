@@ -1,10 +1,9 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
-import App from './App.tsx'
+import Root from './Root'
+import { API_BASE } from './types/lobby'
 import { SPECIES_THEME } from './theme'
-
-const API_BASE = 'http://127.0.0.1:8000'
 
 const DEFAULT_METADATA = {
   species: Object.keys(SPECIES_THEME),
@@ -19,7 +18,7 @@ async function bootstrap() {
 
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
-      <App initialMetadata={metadata} />
+      <Root initialMetadata={metadata} />
     </StrictMode>,
   )
 }
