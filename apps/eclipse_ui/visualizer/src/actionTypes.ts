@@ -1,0 +1,17 @@
+// Action ids - mirror open_spiel/games/eclipse/eclipse.cc:36-52.
+export const ACTION = {
+  PASS: 0,
+  EXPLORE: 17,
+  EXPLORE_PLACE: 18,
+  EXPLORE_DISCARD: 19,
+  EXPLORE_ROT_START: 20, // +0..5
+  EXPLORE_CLAIM_YES: 26,
+  EXPLORE_CLAIM_NO: 27,
+  EXPLORE_DISCOVERY_REWARD: 28,
+  EXPLORE_DISCOVERY_VP: 29,
+  EXPLORE_SELECT_TILE_START: 30, // +0..1
+  EXPLORE_DRAW_AGAIN: 32,
+  EXPLORE_SKIP_SECOND: 33,
+  EXPLORE_STOP: 34,
+  EXPLORE_ZONE_START: 35, // + hex_to_index(q, r)
+} as const;

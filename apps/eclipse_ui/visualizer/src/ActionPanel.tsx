@@ -2,23 +2,7 @@
 // server-supplied `legal_actions` list plus the explore sub-phase in
 // `gameState.explore_state`, so the UI never needs to reimplement game rules.
 
-// Action ids — mirror open_spiel/games/eclipse/eclipse.cc:36-52.
-export const ACTION = {
-  PASS: 0,
-  EXPLORE: 17,
-  EXPLORE_PLACE: 18,
-  EXPLORE_DISCARD: 19,
-  EXPLORE_ROT_START: 20, // +0..5
-  EXPLORE_CLAIM_YES: 26,
-  EXPLORE_CLAIM_NO: 27,
-  EXPLORE_DISCOVERY_REWARD: 28,
-  EXPLORE_DISCOVERY_VP: 29,
-  EXPLORE_SELECT_TILE_START: 30, // +0..1
-  EXPLORE_DRAW_AGAIN: 32,
-  EXPLORE_SKIP_SECOND: 33,
-  EXPLORE_STOP: 34,
-  EXPLORE_ZONE_START: 35, // + hex_to_index(q, r)
-} as const;
+import { ACTION } from './actionTypes';
 
 const RING_NAME: Record<number, string> = { 0: 'Inner (I)', 1: 'Middle (II)', 2: 'Outer (III)' };
 
@@ -43,6 +27,8 @@ interface Props {
   busy: boolean;
   currentPlayerLabel: string;
   ancientsOnSelected: boolean;
+  previewRotation: number | null;
+  onConfirmPreviewRotation: () => void;
   onAction: (actionId: number) => void;
 }
 
@@ -54,12 +40,14 @@ export default function ActionPanel({
   busy,
   currentPlayerLabel,
   ancientsOnSelected,
+  previewRotation,
+  onConfirmPreviewRotation,
   onAction,
 }: Props) {
   const legal = new Set(legalActions);
   const phase = explore?.phase ?? 'inactive';
 
-  const Btn = ({ id, label, kind = 'primary' }: { id: number; label: string; kind?: 'primary' | 'secondary' | 'danger' }) =>
+  const renderActionButton = (id: number, label: string, kind: 'primary' | 'secondary' | 'danger' = 'primary') =>
     legal.has(id) ? (
       <button className={`action-btn ${kind}`} disabled={busy} onClick={() => onAction(id)}>
         {label}
@@ -102,8 +90,8 @@ export default function ActionPanel({
             Take one action. Play continues around the table — you act again each turn until you <strong>Pass</strong> for the round.
           </span>
           <div className="action-row">
-            <Btn id={ACTION.EXPLORE} label="🔭 Explore" />
-            <Btn id={ACTION.PASS} label="✋ Pass" kind="secondary" />
+            {renderActionButton(ACTION.EXPLORE, '🔭 Explore')}
+            {renderActionButton(ACTION.PASS, '✋ Pass', 'secondary')}
           </div>
           <div className="action-row">
             <button className="action-btn secondary" disabled title="Not implemented yet">Research (soon)</button>
@@ -119,7 +107,7 @@ export default function ActionPanel({
             {explore ? ` Activations left: ${explore.activations_remaining}.` : ''}
           </span>
           <div className="action-row">
-            <Btn id={ACTION.EXPLORE_STOP} label="Stop exploring" kind="secondary" />
+            {renderActionButton(ACTION.EXPLORE_STOP, 'Stop exploring', 'secondary')}
           </div>
         </>
       )}
@@ -139,19 +127,29 @@ export default function ActionPanel({
             </span>
           )}
           <div className="action-row">
-            <Btn id={ACTION.EXPLORE_PLACE} label="Place tile" />
-            <Btn id={ACTION.EXPLORE_DISCARD} label="Discard" kind={legal.has(ACTION.EXPLORE_PLACE) ? 'danger' : 'primary'} />
+            {renderActionButton(ACTION.EXPLORE_PLACE, 'Place tile')}
+            {renderActionButton(ACTION.EXPLORE_DISCARD, 'Discard', legal.has(ACTION.EXPLORE_PLACE) ? 'danger' : 'primary')}
           </div>
         </>
       )}
 
       {phase === 'choose_rotation' && (
         <>
-          <span className="text-xs text-[#94a3b8]">Choose a rotation that forms a wormhole connection.</span>
-          <div className="action-row action-wrap">
-            {[0, 1, 2, 3, 4, 5].map((rot) => (
-              <Btn key={rot} id={ACTION.EXPLORE_ROT_START + rot} label={`Rot ${rot}`} />
-            ))}
+          <span className="text-xs text-[#94a3b8]">
+            Preview the sector on the map, rotate it with the arrows, then confirm.
+          </span>
+          <div className="drawn-tile">
+            <span className="drawn-tile-label">Preview rotation</span>
+            <span className="drawn-tile-id">{previewRotation ?? '-'}</span>
+          </div>
+          <div className="action-row">
+            <button
+              className="action-btn primary"
+              disabled={busy || previewRotation === null}
+              onClick={onConfirmPreviewRotation}
+            >
+              Confirm rotation
+            </button>
           </div>
         </>
       )}
@@ -168,8 +166,8 @@ export default function ActionPanel({
             </span>
           )}
           <div className="action-row">
-            <Btn id={ACTION.EXPLORE_CLAIM_YES} label="Claim control" />
-            <Btn id={ACTION.EXPLORE_CLAIM_NO} label={legal.has(ACTION.EXPLORE_CLAIM_YES) ? 'Decline' : 'Continue'} kind="secondary" />
+            {renderActionButton(ACTION.EXPLORE_CLAIM_YES, 'Claim control')}
+            {renderActionButton(ACTION.EXPLORE_CLAIM_NO, legal.has(ACTION.EXPLORE_CLAIM_YES) ? 'Decline' : 'Continue', 'secondary')}
           </div>
         </>
       )}
@@ -178,8 +176,8 @@ export default function ActionPanel({
         <>
           <span className="text-xs text-[#94a3b8]">Resolve the Discovery tile in this sector.</span>
           <div className="action-row">
-            <Btn id={ACTION.EXPLORE_DISCOVERY_REWARD} label="Take reward" />
-            <Btn id={ACTION.EXPLORE_DISCOVERY_VP} label="Take 2 VP" kind="secondary" />
+            {renderActionButton(ACTION.EXPLORE_DISCOVERY_REWARD, 'Take reward')}
+            {renderActionButton(ACTION.EXPLORE_DISCOVERY_VP, 'Take 2 VP', 'secondary')}
           </div>
         </>
       )}
@@ -188,8 +186,8 @@ export default function ActionPanel({
         <>
           <span className="text-xs text-[#94a3b8]">Keep one of the drawn tiles.</span>
           <div className="action-row">
-            <Btn id={ACTION.EXPLORE_SELECT_TILE_START} label={`Keep #${explore?.drawn_sector_ids?.[0] ?? 0}`} />
-            <Btn id={ACTION.EXPLORE_SELECT_TILE_START + 1} label={`Keep #${explore?.drawn_sector_ids?.[1] ?? 0}`} />
+            {renderActionButton(ACTION.EXPLORE_SELECT_TILE_START, `Keep #${explore?.drawn_sector_ids?.[0] ?? 0}`)}
+            {renderActionButton(ACTION.EXPLORE_SELECT_TILE_START + 1, `Keep #${explore?.drawn_sector_ids?.[1] ?? 0}`)}
           </div>
         </>
       )}
@@ -198,8 +196,8 @@ export default function ActionPanel({
         <>
           <span className="text-xs text-[#94a3b8]">Draw a second tile or proceed with this one?</span>
           <div className="action-row">
-            <Btn id={ACTION.EXPLORE_DRAW_AGAIN} label="Draw again" />
-            <Btn id={ACTION.EXPLORE_SKIP_SECOND} label="Proceed" kind="secondary" />
+            {renderActionButton(ACTION.EXPLORE_DRAW_AGAIN, 'Draw again')}
+            {renderActionButton(ACTION.EXPLORE_SKIP_SECOND, 'Proceed', 'secondary')}
           </div>
         </>
       )}

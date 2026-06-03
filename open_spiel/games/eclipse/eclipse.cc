@@ -227,17 +227,18 @@ std::vector<Action> EclipseState::LegalActions() const {
   if (current_player < eclipse_state_.players.size() &&
       !eclipse_state_.players[current_player].has_passed) {
     const auto& player = eclipse_state_.players[current_player];
-    if (player.resources.science >= 2) {
+    const bool has_action_disk = available_influence_discs(player) > 0;
+    if (has_action_disk && player.resources.science >= 2) {
       for (int i = 0; i < 8; ++i) {
         actions.push_back(action_research_start + i);
       }
     }
-    if (player.resources.materials >= 3) {
+    if (has_action_disk && player.resources.materials >= 3) {
       for (int i = 0; i < 4; ++i) {
         actions.push_back(action_build_start + i);
       }
     }
-    if (has_explore_zone(s, current_player)) {
+    if (has_action_disk && has_explore_zone(s, current_player)) {
       actions.push_back(action_explore);
     }
   }
@@ -315,10 +316,12 @@ std::string EclipseState::ActionToString(Player player, Action action_id) const 
   if (pending_random_event_ == PendingRandomEvent::explore_draw) {
     uint32_t bag = ring_bag_value(eclipse_state_, eclipse_state_.explore_state.ring);
     if (bag == 0) return "EXPLORE_DRAW_EMPTY";
-    return "EXPLORE_DRAW_SECTOR_" +
-           std::to_string(ring_bit_to_sector_id(
-               eclipse_state_.explore_state.ring,
-               static_cast<uint8_t>(action_id)));
+    uint16_t sector_id = ring_bit_to_sector_id(
+        eclipse_state_.explore_state.ring, static_cast<uint8_t>(action_id));
+    if (sector_id == 0) {
+      return "EXPLORE_DRAW_BIT_" + std::to_string(action_id);
+    }
+    return "EXPLORE_DRAW_SECTOR_" + std::to_string(sector_id);
   }
   if (pending_random_event_ != PendingRandomEvent::none) {
     return "RESOLVE_" + PendingRandomEventToString(pending_random_event_);
@@ -668,7 +671,10 @@ void EclipseState::DoApplyAction(Action action_id) {
     }
   } else if (action_id == action_explore) {
     if (current_player < eclipse_state_.players.size()) {
-      begin_explore(eclipse_state_, current_player);
+      bool started = begin_explore(eclipse_state_, current_player);
+      if (started) {
+        ++eclipse_state_.players[current_player].disks_on_actions;
+      }
       // begin_explore moves to choose_zone (wait for the player) unless there
       // were no legal zones, in which case it stays inactive and we advance.
       if (eclipse_state_.explore_state.phase != ExplorePhase::inactive) {
@@ -680,7 +686,8 @@ void EclipseState::DoApplyAction(Action action_id) {
     // NOTE: PLACEHOLDER - research is not wired to research_tech() yet.
     if (current_player < eclipse_state_.players.size()) {
       auto& player = eclipse_state_.players[current_player];
-      if (player.resources.science >= 2) {
+      if (available_influence_discs(player) > 0 && player.resources.science >= 2) {
+        ++player.disks_on_actions;
         player.resources.science -= 2;
         player.score += 2;
       }
@@ -689,7 +696,8 @@ void EclipseState::DoApplyAction(Action action_id) {
     // NOTE: PLACEHOLDER - build is not implemented yet.
     if (current_player < eclipse_state_.players.size()) {
       auto& player = eclipse_state_.players[current_player];
-      if (player.resources.materials >= 3) {
+      if (available_influence_discs(player) > 0 && player.resources.materials >= 3) {
+        ++player.disks_on_actions;
         player.resources.materials -= 3;
         player.score += 3;
       }
@@ -715,6 +723,7 @@ void EclipseState::AdvanceTurn() {
     if (eclipse_state_.current_round <= 9) {
       for (auto& player : eclipse_state_.players) {
         player.has_passed = false;
+        player.disks_on_actions = 0;
       }
       eclipse_state_.current_player = eclipse_state_.turn_order[0];
     }

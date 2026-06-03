@@ -721,6 +721,53 @@
   fill: rgba(16, 185, 129, 0.3);
 }
 
+.explore-preview {
+  filter: drop-shadow(0 0 10px rgba(52, 211, 153, 0.45));
+}
+
+.explore-preview-hex {
+  stroke: #34d399;
+  stroke-width: 3;
+  stroke-dasharray: 5 3;
+  pointer-events: none;
+}
+
+.explore-preview-id {
+  fill: #f8fafc;
+  font-size: 11px;
+  font-weight: 800;
+  pointer-events: none;
+}
+
+.explore-preview-rotation {
+  fill: #a7f3d0;
+  font-size: 8px;
+  font-weight: 800;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+
+.explore-preview-control {
+  cursor: pointer;
+}
+
+.explore-preview-control circle {
+  fill: #0f172a;
+  stroke: #34d399;
+  stroke-width: 2;
+}
+
+.explore-preview-control text {
+  fill: #d1fae5;
+  font-size: 18px;
+  font-weight: 900;
+  pointer-events: none;
+}
+
+.explore-preview-control:hover circle {
+  filter: brightness(1.15);
+}
+
 /* Species specific styles */
 .color-eridani { color: #f87171; border-color: #f87171; }
 .color-hydran { color: #c084fc; border-color: #c084fc; }

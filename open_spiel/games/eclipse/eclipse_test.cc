@@ -175,12 +175,12 @@ void ExploreZoneAndConnectionTest() {
   std::vector<HexCoord> zones = legal_explore_zones(s, 0);
   SPIEL_CHECK_FALSE(zones.empty());
 
-  // A drawn tile placed in the eastern zone has at least one connecting rotation.
+  // A drawn tile placed in a connected neighbour zone has at least one rotation.
   ExploreState& es = s.explore_state;
   es.player_id = 0;
   es.zone_q = 1;
-  es.zone_r = 0;
-  es.selected_sector_id = 305;  // wormholes 0b001011
+  es.zone_r = -1;
+  es.selected_sector_id = 305;  // wormholes 0b110100
   std::vector<uint8_t> rotations = legal_explore_rotations(s, 0);
   SPIEL_CHECK_FALSE(rotations.empty());
 }
@@ -200,7 +200,7 @@ void ExploreExhaustedRingTest() {
 
   // With one inner tile left, the ring is explorable again.
   s.sector_bag_inner = 1;
-  SPIEL_CHECK_TRUE(is_legal_explore_zone(s, 0, 1, 0));
+  SPIEL_CHECK_TRUE(is_legal_explore_zone(s, 0, 1, -1));
   SPIEL_CHECK_TRUE(has_explore_zone(s, 0));
 }
 
@@ -320,10 +320,10 @@ void ExploreStopAndDracoDrawTest() {
     anchor.coords = {0, 0};
     s.explore_state.phase = ExplorePhase::choose_zone;
     s.explore_state.player_id = 0;
-    SPIEL_CHECK_TRUE(is_legal_explore_zone(s, 0, 1, 0));    // adjacent, empty
+    SPIEL_CHECK_TRUE(is_legal_explore_zone(s, 0, 1, -1));   // adjacent, connected, empty
     SPIEL_CHECK_FALSE(is_legal_explore_zone(s, 0, 4, 4));   // not adjacent
     SPIEL_CHECK_FALSE(choose_explore_zone(s, 0, HexCoord{4, 4}));
-    SPIEL_CHECK_TRUE(choose_explore_zone(s, 0, HexCoord{1, 0}));
+    SPIEL_CHECK_TRUE(choose_explore_zone(s, 0, HexCoord{1, -1}));
     SPIEL_CHECK_TRUE(s.explore_state.phase == ExplorePhase::draw_tile);
   }
 
@@ -372,6 +372,7 @@ void ExploreFullActionViaApiTest() {
   }
 
   state->ApplyAction(explore_start);
+  SPIEL_CHECK_EQ(eclipse_state->RawState().players[0].disks_on_actions, 1);
   bool placed = false;
 
   int steps = 0;
@@ -411,6 +412,7 @@ void ExploreFullActionViaApiTest() {
   SPIEL_CHECK_TRUE(eclipse_state->RawState().explore_state.phase ==
                    ExplorePhase::inactive);
   SPIEL_CHECK_FALSE(state->IsChanceNode());
+  SPIEL_CHECK_EQ(eclipse_state->RawState().players[0].disks_on_actions, 1);
 }
 
 }  // namespace

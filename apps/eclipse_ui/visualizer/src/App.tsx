@@ -8,7 +8,8 @@ import {
   NPC_COLOR_GUARDIAN,
   getPlayerColor,
 } from './theme';
-import ActionPanel, { ACTION, type ExploreState } from './ActionPanel';
+import ActionPanel, { type ExploreState } from './ActionPanel';
+import { ACTION } from './actionTypes';
 
 import {
   API_BASE,
@@ -135,6 +136,8 @@ export interface SetupSnapshot {
   is_terminal?: boolean;
 }
 
+const EMPTY_LEGAL_ACTIONS: number[] = [];
+
 // Remaining tiles in a ring bag = set bits in its bitmask.
 function bagCount(mask: number | undefined): number {
   let m = (mask ?? 0) >>> 0;
@@ -190,6 +193,7 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
   const [error, setError] = useState<string | null>(null);
   const [jsonExpanded, setJsonExpanded] = useState<boolean>(false);
   const [actionInProgress, setActionInProgress] = useState<boolean>(false);
+  const [previewRotation, setPreviewRotation] = useState<number | null>(null);
   const [hoveredSector, setHoveredSector] = useState<Sector | null>(null);
   // sector_id -> image URL (real tile art painted inside each hex).
   const [sectorImages, setSectorImages] = useState<Record<number, string>>({});
@@ -414,11 +418,9 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
   };
 
   const hexSize = 35;
-  // The tile art is drawn as flat-top hexes, so the whole board is rendered
-  // flat-top to match it; only the game's own rotation (0-5, ×60°) is applied
-  // to each tile. Backend wormhole math is unchanged. Calibrate by eye against
-  // a rotation=0 wormhole edge if a tile's wormholes don't meet its neighbour.
-  const IMAGE_ROTATION_OFFSET = 0;
+  // The PNG tile art is 180 degrees from the backend's rotation=0 wormhole
+  // masks. Apply that fixed offset, then apply the game's rotation.
+  const IMAGE_ROTATION_OFFSET = 180;
   const SQRT3 = Math.sqrt(3);
 
   // Axial (q,r) → pixel for a flat-top hex layout.
@@ -470,7 +472,7 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
   const playerIds = Array.from({ length: numPlayers }, (_, playerId) => playerId);
 
   // ── Gameplay (Action phase) derived state ──────────────────────────────────
-  const legalActions = snapshot?.legal_actions ?? [];
+  const legalActions = snapshot?.legal_actions ?? EMPTY_LEGAL_ACTIONS;
   const exploreState = gameState?.explore_state;
   const explorePhase = exploreState?.phase ?? 'inactive';
   const isTerminal = snapshot?.is_terminal ?? false;
@@ -480,10 +482,41 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
   const currentPlayerLabel =
     snapshot?.current_player !== undefined ? playerLabel(snapshot.current_player) : '';
   const selectedSectorId = exploreState?.selected_sector_id ?? 0;
+  const legalRotations = useMemo(
+    () =>
+      legalActions
+        .filter((action) => action >= ACTION.EXPLORE_ROT_START && action < ACTION.EXPLORE_ROT_START + 6)
+        .map((action) => action - ACTION.EXPLORE_ROT_START)
+        .sort((a, b) => a - b),
+    [legalActions]
+  );
+  const inRotationPreview =
+    isMyTurn &&
+    explorePhase === 'choose_rotation' &&
+    selectedSectorId > 0 &&
+    legalRotations.length > 0;
+  const currentPreviewRotation =
+    inRotationPreview && previewRotation !== null && legalRotations.includes(previewRotation)
+      ? previewRotation
+      : inRotationPreview
+        ? legalRotations[0]
+        : null;
   const ancientsOnSelected =
     !!gameState &&
     selectedSectorId > 0 &&
     gameState.unit_registry.some((u) => u.sector_id === selectedSectorId && u.player_id === 255);
+
+  const cyclePreviewRotation = (direction: -1 | 1) => {
+    if (!legalRotations.length) return;
+    const currentIndex = Math.max(0, legalRotations.indexOf(currentPreviewRotation ?? legalRotations[0]));
+    const nextIndex = (currentIndex + direction + legalRotations.length) % legalRotations.length;
+    setPreviewRotation(legalRotations[nextIndex]);
+  };
+
+  const confirmPreviewRotation = () => {
+    if (currentPreviewRotation === null || !legalRotations.includes(currentPreviewRotation)) return;
+    submitAction(ACTION.EXPLORE_ROT_START + currentPreviewRotation);
+  };
 
   // Legal explore zones → clickable hexes (action id 35 + hex_to_index(q,r)).
   const legalZones = inZoneSelect
@@ -497,9 +530,18 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
         })
     : [];
 
+  const previewZone =
+    inRotationPreview && exploreState
+      ? {
+          q: exploreState.zone_q,
+          r: exploreState.zone_r,
+          ...axialToPixel(exploreState.zone_q, exploreState.zone_r),
+        }
+      : null;
+
   // Auto-fit the SVG viewBox to the populated region (sectors + explore zones)
   // so the board fills the panel and zooms in as the galaxy grows.
-  const fitCells = [...activeSectors, ...legalZones];
+  const fitCells = previewZone ? [...activeSectors, ...legalZones, previewZone] : [...activeSectors, ...legalZones];
   const viewBox = (() => {
     if (fitCells.length === 0) return '0 0 600 520';
     const xs = fitCells.map((c) => c.cx);
@@ -687,6 +729,8 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
                 busy={actionInProgress}
                 currentPlayerLabel={currentPlayerLabel}
                 ancientsOnSelected={ancientsOnSelected}
+                previewRotation={currentPreviewRotation}
+                onConfirmPreviewRotation={confirmPreviewRotation}
                 onAction={submitAction}
               />
               <div className="panel economy-panel">
@@ -847,6 +891,87 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
                     </g>
                   );
                 })}
+
+                {inRotationPreview && previewZone && currentPreviewRotation !== null && (() => {
+                  const imgUrl = sectorImageUrl(selectedSectorId);
+                  const r = hexSize - 1.5;
+                  const imgSize = 2 * r;
+                  const clipId = `explore-preview-clip-${selectedSectorId}-${previewZone.q}-${previewZone.r}`;
+                  const imgDeg = IMAGE_ROTATION_OFFSET - 60 * currentPreviewRotation;
+                  const leftControlX = previewZone.cx - hexSize - 18;
+                  const rightControlX = previewZone.cx + hexSize + 18;
+
+                  return (
+                    <g className="explore-preview">
+                      {imgUrl && (
+                        <>
+                          <clipPath id={clipId}>
+                            <polygon points={getHexPoints(previewZone.cx, previewZone.cy, r)} />
+                          </clipPath>
+                          <g clipPath={`url(#${clipId})`}>
+                            <image
+                              href={imgUrl}
+                              x={previewZone.cx - imgSize / 2}
+                              y={previewZone.cy - imgSize / 2}
+                              width={imgSize}
+                              height={imgSize}
+                              preserveAspectRatio="xMidYMid slice"
+                              transform={`rotate(${imgDeg} ${previewZone.cx} ${previewZone.cy})`}
+                              onError={() =>
+                                setBrokenImages((prev) => new Set(prev).add(selectedSectorId))
+                              }
+                              style={{ pointerEvents: 'none' }}
+                            />
+                          </g>
+                        </>
+                      )}
+
+                      <polygon
+                        points={getHexPoints(previewZone.cx, previewZone.cy, r)}
+                        fill={imgUrl ? 'none' : UNOWNED_COLOR}
+                        fillOpacity={imgUrl ? 0 : 0.75}
+                        className="explore-preview-hex"
+                      />
+                      <text
+                        x={previewZone.cx}
+                        y={previewZone.cy - 6}
+                        textAnchor="middle"
+                        className="explore-preview-id"
+                      >
+                        {selectedSectorId}
+                      </text>
+                      <text
+                        x={previewZone.cx}
+                        y={previewZone.cy + 9}
+                        textAnchor="middle"
+                        className="explore-preview-rotation"
+                      >
+                        rot {currentPreviewRotation}
+                      </text>
+
+                      <g
+                        className="explore-preview-control"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          cyclePreviewRotation(1);
+                        }}
+                      >
+                        <circle cx={leftControlX} cy={previewZone.cy} r="14" />
+                        <text x={leftControlX} y={previewZone.cy + 5} textAnchor="middle">&lt;</text>
+                      </g>
+                      <g
+                        className="explore-preview-control"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          cyclePreviewRotation(-1);
+                        }}
+                      >
+                        <circle cx={rightControlX} cy={previewZone.cy} r="14" />
+                        <text x={rightControlX} y={previewZone.cy + 5} textAnchor="middle">&gt;</text>
+                      </g>
+                    </g>
+                  );
+                })()}
 
                 {legalZones.map((zone) => (
                   <g
