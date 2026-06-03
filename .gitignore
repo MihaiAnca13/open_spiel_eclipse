@@ -72,4 +72,5 @@ open_spiel/.vs
 
 # node modules
 apps/eclipse_ui/visualizer/node_modules
-apps/eclipse_ui/data
+*.png
+*.jpg

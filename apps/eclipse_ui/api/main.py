@@ -49,6 +49,18 @@ def _build_sector_manifest() -> dict[str, str]:
 
 SECTOR_MANIFEST = _build_sector_manifest()
 
+LAYOUTS_FILE = Path(__file__).resolve().parent.parent / "data" / "sector_layouts.json"
+
+
+def _load_sector_layouts() -> dict:
+    if LAYOUTS_FILE.exists():
+        import json as _json
+        return _json.loads(LAYOUTS_FILE.read_text())
+    return {}
+
+
+SECTOR_LAYOUTS = _load_sector_layouts()
+
 app.mount("/assets/sectors", StaticFiles(directory=str(SECTORS_DIR)), name="sectors")
 app.mount("/assets/tech", StaticFiles(directory=str(TECH_DIR)), name="tech")
 
@@ -56,6 +68,11 @@ app.mount("/assets/tech", StaticFiles(directory=str(TECH_DIR)), name="tech")
 @app.get("/sectors/manifest")
 async def sectors_manifest() -> dict[str, str]:
     return SECTOR_MANIFEST
+
+
+@app.get("/sectors/layouts")
+async def sectors_layouts() -> dict:
+    return SECTOR_LAYOUTS
 
 
 # ─── existing setup endpoints ────────────────────────────────────────────────

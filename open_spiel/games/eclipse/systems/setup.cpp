@@ -255,8 +255,12 @@ void FinalizeGameSetup(State& state,
         player.orbitals = 0;
         player.monoliths = 0;
         player.researched_techs = species_data.starting_techs;
-        player.colony_ships_total = 0;
-        player.colony_ships_available = 0;
+        player.colony_ships_total = species_data.starting_colony_ships;
+        player.colony_ships_available = species_data.starting_colony_ships;
+        // All cubes start on their respective tracks (index 12 = full track = 0 production).
+        player.resources.gold_prod      = 12;
+        player.resources.science_prod   = 12;
+        player.resources.materials_prod = 12;
         player.reputation_tiles.clear();
 
         for (size_t ship_idx = 0; ship_idx < 4; ++ship_idx) {
@@ -357,13 +361,40 @@ void FinalizeGameSetup(State& state,
         const SectorDefinition* sector_def = get_sector_definition(start_sector_id);
         const HexCoord coord = kBalancedPositions[player_positions[i]];
 
+        // Place starting population cubes in non-advanced slots.
+        // Hydran Progress special rule: also place in ADV_SCIENCE slot.
+        uint16_t start_mask = 0;
+        Player& mutable_player = state.players[i];
+        if (sector_def) {
+            for (uint8_t s = 0; s < static_cast<uint8_t>(sector_def->slots.size()); ++s) {
+                PlanetType stype = sector_def->slots[s].type;
+                bool is_adv = (stype == PlanetType::ADV_MONEY ||
+                               stype == PlanetType::ADV_SCIENCE ||
+                               stype == PlanetType::ADV_MATERIALS ||
+                               stype == PlanetType::ADV_ANY);
+                bool hydran_adv_sci = (mutable_player.species_id == Species::HYDRAN_PROGRESS &&
+                                       stype == PlanetType::ADV_SCIENCE);
+                if (!is_adv || hydran_adv_sci) {
+                    start_mask |= static_cast<uint16_t>(1u << s);
+                    // Decrement cubes-on-track counter for the matching track.
+                    if (stype == PlanetType::MONEY || stype == PlanetType::ADV_MONEY) {
+                        if (mutable_player.resources.gold_prod > 0) --mutable_player.resources.gold_prod;
+                    } else if (stype == PlanetType::SCIENCE || stype == PlanetType::ADV_SCIENCE) {
+                        if (mutable_player.resources.science_prod > 0) --mutable_player.resources.science_prod;
+                    } else { // MATERIALS, ANY, ADV_ANY
+                        if (mutable_player.resources.materials_prod > 0) --mutable_player.resources.materials_prod;
+                    }
+                }
+            }
+        }
+
         state.galaxy.at(coord.q, coord.r) = Sector{
             .sector_id = start_sector_id,
             .owner_id = player.id,
             .coords = coord,
             .rotation = 0,
             .points = sector_def ? sector_def->points : static_cast<uint8_t>(3),
-            .occupied_slots_mask = 0,
+            .occupied_slots_mask = start_mask,
             .discovery_tile_present = false,
             .orbital_built = false,
             .monolith_built = false,

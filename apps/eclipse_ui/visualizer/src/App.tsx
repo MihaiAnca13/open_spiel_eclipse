@@ -9,7 +9,7 @@ import {
   getPlayerColor,
 } from './theme';
 import ActionPanel, { type ExploreState } from './ActionPanel';
-import { ACTION } from './actionTypes';
+import { ACTION, TRADE_LABELS, POP_TRACK_LABELS } from './actionTypes';
 
 import {
   API_BASE,
@@ -82,6 +82,20 @@ interface Sector {
   discovery_tile_present: boolean;
   orbital_built: boolean;
   monolith_built: boolean;
+}
+
+interface PlanetLayout {
+  slot: number;
+  type: string;
+  dx: number;
+  dy: number;
+}
+
+interface SectorLayout {
+  influence_space: { dx: number; dy: number };
+  planets: PlanetLayout[];
+  monolith_anchor: { dx: number; dy: number };
+  orbital_anchor: { dx: number; dy: number };
 }
 
 interface Unit {
@@ -182,6 +196,191 @@ function InfluenceTrack({ onSectors, onActions }: { onSectors: number; onActions
   );
 }
 
+// Production table: index = cubes remaining on track (12=full=0 prod, 0=empty=28 prod)
+const POPULATION_PRODUCTION_TABLE = [28, 24, 21, 18, 15, 12, 10, 8, 6, 4, 3, 2, 0] as const;
+const POP_TRACK_MAX = 12;
+
+// Three population tracks arranged as arcs in a circle (like the control board).
+// cubesOnTrack[n] = cubes remaining on track n (12=full, 0=empty).
+// Tracks: 0=Materials, 1=Science, 2=Money
+function PopulationTracks({ resources, playerColor }: { resources: Resources; playerColor: string }) {
+  const tracks = [
+    { label: 'Mat', color: '#f97316', cubesOnTrack: resources.materials_prod },
+    { label: 'Sci', color: '#818cf8', cubesOnTrack: resources.science_prod },
+    { label: '$',   color: '#fbbf24', cubesOnTrack: resources.gold_prod },
+  ];
+
+  const W = 120;
+  const CX = W / 2;
+  const CY = W / 2 + 4;
+  const OUTER_R = 46;
+  const INNER_R = 30;
+  const DOT_R = 3.2;
+  // Arc centers (degrees): Materials=210, Science=90, Money=330 (=−30)
+  const ARC_SPAN = 100;
+  const ARC_CENTERS_DEG = [210, 90, 330];
+
+  return (
+    <div className="pop-tracks">
+      <svg viewBox={`0 0 ${W} ${W + 8}`} width={W} height={W + 8} style={{ display: 'block' }}>
+        {tracks.map((track, ti) => {
+          const centerDeg = ARC_CENTERS_DEG[ti];
+          const startDeg  = centerDeg - ARC_SPAN / 2;
+          const prod = POPULATION_PRODUCTION_TABLE[Math.min(track.cubesOnTrack, POP_TRACK_MAX)];
+
+          // Place 12 dots along the arc
+          const dots = Array.from({ length: POP_TRACK_MAX }, (_, i) => {
+            const frac = POP_TRACK_MAX === 1 ? 0.5 : i / (POP_TRACK_MAX - 1);
+            const deg  = startDeg + frac * ARC_SPAN;
+            const rad  = (deg * Math.PI) / 180;
+            const x    = CX + OUTER_R * Math.cos(rad);
+            const y    = CY + OUTER_R * Math.sin(rad);
+            // Cubes fill from the start of the arc; empty = cube placed on sector
+            const onTrack = i < track.cubesOnTrack;
+            return { x, y, onTrack };
+          });
+
+          // Label position: inside the arc, near arc center
+          const labelRad = (centerDeg * Math.PI) / 180;
+          const lx = CX + INNER_R * Math.cos(labelRad);
+          const ly = CY + INNER_R * Math.sin(labelRad);
+
+          return (
+            <g key={ti}>
+              {dots.map((d, i) => (
+                <circle
+                  key={i}
+                  cx={d.x}
+                  cy={d.y}
+                  r={DOT_R}
+                  fill={d.onTrack ? track.color : 'none'}
+                  stroke={track.color}
+                  strokeWidth={0.8}
+                  opacity={d.onTrack ? 0.9 : 0.35}
+                />
+              ))}
+              {/* Production value inside the arc */}
+              <text
+                x={lx}
+                y={ly + 3}
+                textAnchor="middle"
+                fill={track.color}
+                fontSize="9"
+                fontWeight="bold"
+              >
+                {prod}
+              </text>
+              {/* Track label at outer edge of arc center */}
+              <text
+                x={CX + (OUTER_R + 10) * Math.cos(labelRad)}
+                y={CY + (OUTER_R + 10) * Math.sin(labelRad) + 3}
+                textAnchor="middle"
+                fill={track.color}
+                fontSize="7"
+                opacity={0.7}
+              >
+                {track.label}
+              </text>
+            </g>
+          );
+        })}
+        {/* Center dot for aesthetics */}
+        <circle cx={CX} cy={CY} r={2.5} fill={playerColor} opacity={0.5} />
+      </svg>
+    </div>
+  );
+}
+
+function ColonyShips({
+  total,
+  available,
+  legalPlacements,
+  onPlace,
+}: {
+  total: number;
+  available: number;
+  legalPlacements: { actionId: number; sectorId: number; slotIdx: number; track: number }[];
+  onPlace: (actionId: number) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const used = total - available;
+
+  if (total === 0) return null;
+
+  return (
+    <div className="colony-ships">
+      <div
+        className={`colony-ships-header ${legalPlacements.length > 0 ? 'clickable' : ''}`}
+        onClick={() => legalPlacements.length > 0 && setExpanded(e => !e)}
+        title="Colony Ships"
+      >
+        <span className="colony-ships-label">Colony Ships</span>
+        <span className="colony-ships-icons">
+          {Array.from({ length: total }, (_, i) => (
+            <span
+              key={i}
+              className={`colony-ship-icon ${i < available ? 'available' : 'used'}`}
+              title={i < available ? 'Available (faceup)' : 'Used (facedown)'}
+            >
+              ◎
+            </span>
+          ))}
+        </span>
+        {legalPlacements.length > 0 && (
+          <span className="colony-ship-badge">{legalPlacements.length} placements</span>
+        )}
+      </div>
+      {expanded && legalPlacements.length > 0 && (
+        <div className="colony-ship-targets">
+          {legalPlacements.map(({ actionId, sectorId, slotIdx, track }) => (
+            <button
+              key={actionId}
+              className="colony-ship-target-btn"
+              onClick={() => { onPlace(actionId); setExpanded(false); }}
+              title={`Place a ${POP_TRACK_LABELS[track]} cube`}
+            >
+              Sector {sectorId} · slot {slotIdx} · {POP_TRACK_LABELS[track]}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TradePanel({
+  tradeRate,
+  legalTradeActions,
+  onTrade,
+}: {
+  tradeRate: number;
+  legalTradeActions: number[];
+  onTrade: (actionId: number) => void;
+}) {
+  if (legalTradeActions.length === 0) return null;
+  return (
+    <div className="trade-panel">
+      <span className="trade-label">Trade (×{tradeRate})</span>
+      <div className="trade-buttons">
+        {legalTradeActions.map(actionId => {
+          const conv = actionId - ACTION.TRADE_START;
+          const info = TRADE_LABELS[conv];
+          return info ? (
+            <button
+              key={actionId}
+              className="trade-btn"
+              onClick={() => onTrade(actionId)}
+              title={`Pay ${tradeRate} ${info.from} → 1 ${info.to}`}
+            >
+              {info.emoji}
+            </button>
+          ) : null;
+        })}
+      </div>
+    </div>
+  );
+}
+
 function App({
   initialMetadata,
   initialSnapshot,
@@ -212,6 +411,8 @@ function App({
   // sector_id -> image URL (real tile art painted inside each hex).
   const [sectorImages, setSectorImages] = useState<Record<number, string>>({});
   const [brokenImages, setBrokenImages] = useState<Set<number>>(new Set());
+  // sector_id -> pixel layout (planet positions, anchors) from sector_layouts.json
+  const [sectorLayouts, setSectorLayouts] = useState<Record<number, SectorLayout>>({});
   const { preview, beginPreview, clearPreview } = useImageHoverPreview();
   const [setupFinalized, setSetupFinalized] = useState<boolean>(initialSnapshot?.finalized ?? false);
   const [playerStartingSectors, setPlayerStartingSectors] = useState<Record<number, number>>({});
@@ -405,6 +606,22 @@ function App({
     };
   }, []);
 
+  // Load pixel layout for each sector tile (planet positions, anchors).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/sectors/layouts`);
+        const raw: Record<string, SectorLayout> = await res.json();
+        if (cancelled) return;
+        setSectorLayouts(
+          Object.fromEntries(Object.entries(raw).map(([k, v]) => [Number(k), v]))
+        );
+      } catch { /* non-fatal */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   const sectorImageUrl = (id: number): string | null =>
     (!brokenImages.has(id) && sectorImages[id]) || null;
 
@@ -584,6 +801,27 @@ function App({
     if (currentPreviewRotation === null || !legalRotations.includes(currentPreviewRotation)) return;
     submitAction(ACTION.EXPLORE_ROT_START + currentPreviewRotation);
   };
+
+  // Bonus actions available this turn.
+  const legalTradeActions = isMyTurn
+    ? legalActions.filter(a => a >= ACTION.TRADE_START && a < ACTION.COLONY_SHIP_START)
+    : [];
+  const legalColonyShipActions = isMyTurn
+    ? legalActions.filter(a => a >= ACTION.COLONY_SHIP_START)
+    : [];
+
+  // Decode colony ship actions into (sectorId, slotIdx, track) for display.
+  const colonyShipPlacements = legalColonyShipActions.map(actionId => {
+    const encoded = actionId - ACTION.COLONY_SHIP_START;
+    const cellIdx = Math.floor(encoded / ACTION.COLONY_SHIP_CODES_PER_CELL);
+    const rem = encoded % ACTION.COLONY_SHIP_CODES_PER_CELL;
+    const slotIdx = Math.floor(rem / ACTION.COLONY_SHIP_TRACKS);
+    const track = rem % ACTION.COLONY_SHIP_TRACKS;
+    const qIdx = Math.floor(cellIdx / 15);
+    const rIdx = cellIdx % 15;
+    const sector = gameState?.galaxy[qIdx]?.[rIdx];
+    return { actionId, sectorId: sector?.sector_id ?? 0, slotIdx, track };
+  });
 
   // Legal explore zones → clickable hexes (action id 35 + hex_to_index(q,r)).
   const legalZones = inZoneSelect
@@ -822,15 +1060,43 @@ function App({
                             <span className="economy-score">⭐ {p.score}</span>
                           </div>
                           <div className="economy-resources">
-                            <span className="res gold" title="Money">💰 {p.resources.gold} <em>+{p.resources.gold_prod}</em></span>
-                            <span className="res science" title="Science">🔬 {p.resources.science} <em>+{p.resources.science_prod}</em></span>
-                            <span className="res materials" title="Materials">⚙️ {p.resources.materials} <em>+{p.resources.materials_prod}</em></span>
+                            <span className="res gold" title="Money">
+                              💰 {p.resources.gold}
+                              <em> +{POPULATION_PRODUCTION_TABLE[Math.min(p.resources.gold_prod, POP_TRACK_MAX)]}</em>
+                            </span>
+                            <span className="res science" title="Science">
+                              🔬 {p.resources.science}
+                              <em> +{POPULATION_PRODUCTION_TABLE[Math.min(p.resources.science_prod, POP_TRACK_MAX)]}</em>
+                            </span>
+                            <span className="res materials" title="Materials">
+                              ⚙️ {p.resources.materials}
+                              <em> +{POPULATION_PRODUCTION_TABLE[Math.min(p.resources.materials_prod, POP_TRACK_MAX)]}</em>
+                            </span>
                           </div>
+                          <PopulationTracks resources={p.resources} playerColor={getPlayerColor(pid)} />
                           {isMine ? (
-                            <InfluenceTrack onSectors={onSectors} onActions={onActions} />
+                            <>
+                              <InfluenceTrack onSectors={onSectors} onActions={onActions} />
+                              <ColonyShips
+                                total={p.colony_ships_total}
+                                available={p.colony_ships_available}
+                                legalPlacements={colonyShipPlacements}
+                                onPlace={submitAction}
+                              />
+                              <TradePanel
+                                tradeRate={p.trade_rate}
+                                legalTradeActions={legalTradeActions}
+                                onTrade={submitAction}
+                              />
+                            </>
                           ) : (
                             <div className="economy-meta">
                               <span title="Influence discs available">🔵 {discsLeft} discs</span>
+                              {p.colony_ships_total > 0 && (
+                                <span title="Colony ships">
+                                  ◎ {p.colony_ships_available}/{p.colony_ships_total}
+                                </span>
+                              )}
                             </div>
                           )}
                           {p.has_passed && <div className="economy-meta"><span className="economy-passed">passed</span></div>}
@@ -955,6 +1221,95 @@ function App({
                           </text>
                         </g>
                       )}
+
+                      {/* ── sector overlay: planet cubes, influence disk, structures ── */}
+                      {(() => {
+                        const layout = sectorLayouts[sector.sector_id];
+                        if (!layout || !imgUrl) return null;
+                        // Image occupies imgSize×imgSize SVG pixels → same scale for overlays
+                        const scale = imgSize / 1024;
+                        const pColor = owned ? getPlayerColor(sector.owner_id) : '#ffffff';
+                        return (
+                          // Wrap in the same rotation as the tile image so overlays track with it
+                          <g transform={`rotate(${imgDeg} ${cx} ${cy})`} style={{ pointerEvents: 'none' }}>
+
+                            {/* Influence disk — small player-coloured disc at influence space */}
+                            {owned && (
+                              <circle
+                                cx={cx + layout.influence_space.dx * scale}
+                                cy={cy + layout.influence_space.dy * scale}
+                                r={5}
+                                fill={pColor}
+                                fillOpacity={0.9}
+                                stroke="#000"
+                                strokeWidth={0.6}
+                              />
+                            )}
+
+                            {/* Planet population cubes */}
+                            {layout.planets.map((planet) => {
+                              const occupied = Boolean((sector.occupied_slots_mask >> planet.slot) & 1);
+                              const px = cx + planet.dx * scale;
+                              const py = cy + planet.dy * scale;
+                              return occupied ? (
+                                <rect
+                                  key={planet.slot}
+                                  x={px - 4}
+                                  y={py - 4}
+                                  width={8}
+                                  height={8}
+                                  rx={1}
+                                  fill={pColor}
+                                  fillOpacity={0.9}
+                                  stroke="#000"
+                                  strokeWidth={0.5}
+                                />
+                              ) : (
+                                <rect
+                                  key={planet.slot}
+                                  x={px - 3.5}
+                                  y={py - 3.5}
+                                  width={7}
+                                  height={7}
+                                  rx={1}
+                                  fill="none"
+                                  stroke="#ffffff"
+                                  strokeWidth={0.6}
+                                  strokeOpacity={0.35}
+                                />
+                              );
+                            })}
+
+                            {/* Monolith — purple rectangle */}
+                            {sector.monolith_built && (
+                              <rect
+                                x={cx + layout.monolith_anchor.dx * scale - 4}
+                                y={cy + layout.monolith_anchor.dy * scale - 6}
+                                width={8}
+                                height={12}
+                                rx={1}
+                                fill="#a855f7"
+                                fillOpacity={0.9}
+                                stroke="#000"
+                                strokeWidth={0.5}
+                              />
+                            )}
+
+                            {/* Orbital — cyan circle */}
+                            {sector.orbital_built && (
+                              <circle
+                                cx={cx + layout.orbital_anchor.dx * scale}
+                                cy={cy + layout.orbital_anchor.dy * scale}
+                                r={4}
+                                fill="#22d3ee"
+                                fillOpacity={0.9}
+                                stroke="#000"
+                                strokeWidth={0.5}
+                              />
+                            )}
+                          </g>
+                        );
+                      })()}
                     </g>
                   );
                 })}

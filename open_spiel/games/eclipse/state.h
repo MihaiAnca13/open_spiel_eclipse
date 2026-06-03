@@ -50,7 +50,9 @@ enum ReputationTiles { ONE, TWO, THREE, FOUR };
 
 constexpr int REPUTATION_TILE_COUNTS[] = { 12, 10, 7, 4 }; // values are 1, 2, 3, 4
 
-// Index 0 means all cubes are on the board, Index 12 means all cubes are on the track.
+// Index = cubes remaining on the track (12=full/0-production, 0=empty/max-production).
+// Resources::gold_prod / science_prod / materials_prod store this index.
+// Production value = POPULATION_PRODUCTION_TABLE[cubes_on_track].
 static const int POPULATION_PRODUCTION_TABLE[] = { 28, 24, 21, 18, 15, 12, 10, 8, 6, 4, 3, 2, 0 };
 // Index 0 means no influence disk is used
 static const int INFLUENCE_UPKEEP_TABLE[] = { 0, 0, 1, 2, 3, 5, 7, 10, 13, 17, 21, 25, 30 };

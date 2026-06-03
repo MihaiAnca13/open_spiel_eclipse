@@ -8,6 +8,7 @@
 #include <sstream>
 #include <stdexcept>
 
+#include "open_spiel/games/eclipse/systems/actions/bonus.h"
 #include "open_spiel/games/eclipse/systems/actions/explore.h"
 #include "open_spiel/games/eclipse/systems/setup.h"
 #include "open_spiel/json/include/nlohmann/json.hpp"
@@ -49,7 +50,17 @@ constexpr Action explore_draw_again = 32;
 constexpr Action explore_skip_second = 33;
 constexpr Action explore_stop = 34;
 constexpr Action explore_zone_start = 35;  // + galaxy cell index (0..224)
-constexpr int num_distinct_actions = explore_zone_start + GALAXY_CELL_COUNT;
+//   260-265 = TRADE (index into TradeConversion enum)
+//   266+    = COLONY_SHIP: cell_idx*(SLOTS*TRACKS) + slot_idx*TRACKS + track
+//             track: 0=Money, 1=Science, 2=Materials
+constexpr Action action_trade_start        = 260;
+constexpr Action action_colony_ship_start  = 266;
+constexpr int COLONY_SHIP_SLOTS_PER_CELL   = 8;
+constexpr int COLONY_SHIP_TRACKS           = POP_TRACK_COUNT;  // 3
+constexpr int COLONY_SHIP_CODES_PER_CELL   =
+    COLONY_SHIP_SLOTS_PER_CELL * COLONY_SHIP_TRACKS;
+constexpr int num_distinct_actions =
+    action_colony_ship_start + GALAXY_CELL_COUNT * COLONY_SHIP_CODES_PER_CELL;
 
 const GameType game_type{
     /*short_name=*/"eclipse",
@@ -241,8 +252,22 @@ std::vector<Action> EclipseState::LegalActions() const {
     if (has_action_disk && has_explore_zone(s, current_player)) {
       actions.push_back(action_explore);
     }
+
+    // Bonus actions (no disc cost, no turn advance).
+    for (int c = 0; c < TRADE_CONVERSION_COUNT; ++c) {
+      if (can_trade(player, static_cast<TradeConversion>(c))) {
+        actions.push_back(action_trade_start + c);
+      }
+    }
+    for (const auto& p : legal_colony_ship_placements(s, current_player)) {
+      actions.push_back(action_colony_ship_start +
+                        p.cell * COLONY_SHIP_CODES_PER_CELL +
+                        p.slot * COLONY_SHIP_TRACKS +
+                        static_cast<int>(p.track));
+    }
   }
 
+  std::sort(actions.begin(), actions.end());
   return actions;
 }
 
@@ -361,6 +386,28 @@ std::string EclipseState::ActionToString(Player player, Action action_id) const 
     HexCoord zone = index_to_hex(action_id - explore_zone_start);
     return "EXPLORE_ZONE_" + std::to_string(zone.q) + "_" +
            std::to_string(zone.r);
+  }
+  static const char* kTradeNames[TRADE_CONVERSION_COUNT] = {
+      "TRADE_GOLD_TO_SCIENCE", "TRADE_GOLD_TO_MATERIALS",
+      "TRADE_SCIENCE_TO_GOLD", "TRADE_SCIENCE_TO_MATERIALS",
+      "TRADE_MATERIALS_TO_GOLD", "TRADE_MATERIALS_TO_SCIENCE",
+  };
+  if (action_id >= action_trade_start &&
+      action_id < action_colony_ship_start) {
+    return kTradeNames[action_id - action_trade_start];
+  }
+  if (action_id >= action_colony_ship_start) {
+    int encoded = static_cast<int>(action_id - action_colony_ship_start);
+    int cell = encoded / COLONY_SHIP_CODES_PER_CELL;
+    int rem  = encoded % COLONY_SHIP_CODES_PER_CELL;
+    int slot = rem / COLONY_SHIP_TRACKS;
+    int track = rem % COLONY_SHIP_TRACKS;
+    static const char* kTrackNames[COLONY_SHIP_TRACKS] = {"MONEY", "SCIENCE",
+                                                          "MATERIALS"};
+    HexCoord c = index_to_hex(cell);
+    return "COLONY_SHIP_" + std::to_string(c.q) + "_" +
+           std::to_string(c.r) + "_SLOT" + std::to_string(slot) + "_" +
+           kTrackNames[track];
   }
   return "UNKNOWN_ACTION(" + std::to_string(action_id) + ")";
 }
@@ -505,6 +552,14 @@ void EclipseState::ObservationTensor(Player player, absl::Span<float> values) co
   values[2] = static_cast<float>(me.resources.science);
   values[3] = static_cast<float>(me.resources.materials);
   values[4] = me.has_passed ? 1.0f : 0.0f;
+
+  // Self colony ships + population tracks (cubes remaining on each track).
+  // Without these the agent mutates state it cannot observe.
+  values[40] = static_cast<float>(me.colony_ships_available);
+  values[41] = static_cast<float>(me.colony_ships_total);
+  values[42] = static_cast<float>(me.resources.gold_prod);
+  values[43] = static_cast<float>(me.resources.science_prod);
+  values[44] = static_cast<float>(me.resources.materials_prod);
 
   int idx = 5;
   for (int other = 0; other < NumPlayers(); ++other) {
@@ -702,6 +757,23 @@ void EclipseState::DoApplyAction(Action action_id) {
         player.score += 3;
       }
     }
+  } else if (action_id >= action_trade_start &&
+             action_id < action_colony_ship_start) {
+    // Bonus action: trade — no disc, no turn advance.
+    SPIEL_CHECK_TRUE(execute_trade(
+        eclipse_state_, current_player,
+        static_cast<TradeConversion>(action_id - action_trade_start)));
+    return;
+  } else if (action_id >= action_colony_ship_start) {
+    // Bonus action: colony ship — no disc, no turn advance.
+    int encoded = static_cast<int>(action_id - action_colony_ship_start);
+    int cell = encoded / COLONY_SHIP_CODES_PER_CELL;
+    int rem  = encoded % COLONY_SHIP_CODES_PER_CELL;
+    SPIEL_CHECK_TRUE(use_colony_ship(
+        eclipse_state_, current_player, static_cast<uint8_t>(cell),
+        static_cast<uint8_t>(rem / COLONY_SHIP_TRACKS),
+        static_cast<PopTrack>(rem % COLONY_SHIP_TRACKS)));
+    return;
   }
 
   AdvanceTurn();

@@ -88,6 +88,8 @@ set(GAME_SOURCES
   eclipse/systems/combat.h
   eclipse/systems/setup.cpp
   eclipse/systems/setup.h
+  eclipse/systems/actions/bonus.cpp
+  eclipse/systems/actions/bonus.h
   eclipse/systems/actions/explore.cpp
   eclipse/systems/actions/explore.h
   eclipse/systems/actions/research.cpp

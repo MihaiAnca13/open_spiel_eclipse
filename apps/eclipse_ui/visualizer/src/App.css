@@ -824,3 +824,132 @@
 .color-mechanema { color: #cbd5e1; border-color: #cbd5e1; }
 .color-orion { color: #f43f5e; border-color: #f43f5e; }
 .color-terran { color: #60a5fa; border-color: #60a5fa; }
+
+/* ── Population Tracks ──────────────────────────────────────────── */
+.pop-tracks {
+  border-top: 1px solid #2d313f;
+  padding-top: 4px;
+  display: flex;
+  justify-content: center;
+}
+
+/* ── Colony Ships ────────────────────────────────────────────────── */
+.colony-ships {
+  border-top: 1px solid #2d313f;
+  padding-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.colony-ships-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.colony-ships-header.clickable {
+  cursor: pointer;
+}
+
+.colony-ships-header.clickable:hover {
+  color: #e2e8f0;
+}
+
+.colony-ships-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.colony-ships-icons {
+  display: flex;
+  gap: 3px;
+}
+
+.colony-ship-icon {
+  font-size: 13px;
+  line-height: 1;
+}
+
+.colony-ship-icon.available {
+  color: #38bdf8;
+  text-shadow: 0 0 5px rgba(56, 189, 248, 0.6);
+}
+
+.colony-ship-icon.used {
+  color: #334155;
+}
+
+.colony-ship-badge {
+  margin-left: auto;
+  font-size: 9px;
+  background: #1e3a5f;
+  color: #93c5fd;
+  padding: 1px 5px;
+  border-radius: 8px;
+}
+
+.colony-ship-targets {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.colony-ship-target-btn {
+  font-size: 10px;
+  padding: 3px 6px;
+  background: #0f172a;
+  border: 1px solid #38bdf8;
+  color: #bae6fd;
+  border-radius: 4px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.colony-ship-target-btn:hover {
+  background: #1e3a5f;
+}
+
+/* ── Trade Panel ─────────────────────────────────────────────────── */
+.trade-panel {
+  border-top: 1px solid #2d313f;
+  padding-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.trade-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #64748b;
+  white-space: nowrap;
+}
+
+.trade-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+
+.trade-btn {
+  font-size: 11px;
+  padding: 2px 5px;
+  background: #1e1b2e;
+  border: 1px solid #6d28d9;
+  color: #c4b5fd;
+  border-radius: 4px;
+  cursor: pointer;
+  line-height: 1.4;
+}
+
+.trade-btn:hover {
+  background: #2d1f4e;
+  border-color: #a78bfa;
+}

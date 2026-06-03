@@ -1,0 +1,2043 @@
+{
+  "101": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "ADV_MATERIALS",
+        "dx": -185,
+        "dy": -270,
+        "confidence": 0.351
+      },
+      {
+        "slot": 1,
+        "type": "MATERIALS",
+        "dx": -60,
+        "dy": -276,
+        "confidence": 0.397
+      },
+      {
+        "slot": 2,
+        "type": "MONEY",
+        "dx": 218,
+        "dy": -217,
+        "confidence": 0.557
+      }
+    ],
+    "monolith_anchor": {
+      "dx": -89,
+      "dy": 311
+    },
+    "orbital_anchor": {
+      "dx": 271,
+      "dy": 191
+    }
+  },
+  "1": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "ADV_MATERIALS",
+        "dx": -309,
+        "dy": -57,
+        "confidence": 0.375
+      },
+      {
+        "slot": 1,
+        "type": "MATERIALS",
+        "dx": -315,
+        "dy": 71,
+        "confidence": 0.418
+      },
+      {
+        "slot": 2,
+        "type": "ADV_SCIENCE",
+        "dx": 68,
+        "dy": -279,
+        "confidence": 0.493
+      },
+      {
+        "slot": 3,
+        "type": "SCIENCE",
+        "dx": 195,
+        "dy": -276,
+        "confidence": 0.585
+      },
+      {
+        "slot": 4,
+        "type": "ADV_MONEY",
+        "dx": 79,
+        "dy": 283,
+        "confidence": 0.478
+      },
+      {
+        "slot": 5,
+        "type": "MONEY",
+        "dx": 209,
+        "dy": 285,
+        "confidence": 0.572
+      }
+    ],
+    "monolith_anchor": {
+      "dx": -129,
+      "dy": 245
+    },
+    "orbital_anchor": {
+      "dx": -169,
+      "dy": -225
+    }
+  },
+  "102": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "SCIENCE",
+        "dx": -62,
+        "dy": 225,
+        "confidence": 0.593
+      },
+      {
+        "slot": 1,
+        "type": "SCIENCE",
+        "dx": -197,
+        "dy": 226,
+        "confidence": 0.488
+      }
+    ],
+    "monolith_anchor": {
+      "dx": 191,
+      "dy": -329
+    },
+    "orbital_anchor": {
+      "dx": -249,
+      "dy": -209
+    }
+  },
+  "103": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "SCIENCE",
+        "dx": 97,
+        "dy": -210,
+        "confidence": 0.485
+      },
+      {
+        "slot": 1,
+        "type": "MONEY",
+        "dx": -121,
+        "dy": 191,
+        "confidence": 0.562
+      }
+    ],
+    "monolith_anchor": {
+      "dx": 271,
+      "dy": 151
+    },
+    "orbital_anchor": {
+      "dx": -289,
+      "dy": -129
+    }
+  },
+  "104": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "ADV_MONEY",
+        "dx": 59,
+        "dy": -269,
+        "confidence": 0.735
+      },
+      {
+        "slot": 1,
+        "type": "MONEY",
+        "dx": 191,
+        "dy": -274,
+        "confidence": 0.489
+      },
+      {
+        "slot": 2,
+        "type": "ADV_SCIENCE",
+        "dx": -152,
+        "dy": 192,
+        "confidence": 0.416
+      },
+      {
+        "slot": 3,
+        "type": "SCIENCE",
+        "dx": -155,
+        "dy": 320,
+        "confidence": 0.521
+      }
+    ],
+    "monolith_anchor": {
+      "dx": 271,
+      "dy": 191
+    },
+    "orbital_anchor": {
+      "dx": -289,
+      "dy": -129
+    }
+  },
+  "105": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "MONEY",
+        "dx": 153,
+        "dy": -276,
+        "confidence": 0.515
+      },
+      {
+        "slot": 1,
+        "type": "SCIENCE",
+        "dx": -334,
+        "dy": 28,
+        "confidence": 0.501
+      },
+      {
+        "slot": 2,
+        "type": "ADV_MATERIALS",
+        "dx": 222,
+        "dy": 241,
+        "confidence": 0.318
+      }
+    ],
+    "monolith_anchor": {
+      "dx": -209,
+      "dy": -289
+    },
+    "orbital_anchor": {
+      "dx": -129,
+      "dy": 311
+    }
+  },
+  "106": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "SCIENCE",
+        "dx": -158,
+        "dy": -160,
+        "confidence": 0.538
+      },
+      {
+        "slot": 1,
+        "type": "MATERIALS",
+        "dx": 173,
+        "dy": -172,
+        "confidence": 0.401
+      }
+    ],
+    "monolith_anchor": {
+      "dx": 31,
+      "dy": 311
+    },
+    "orbital_anchor": {
+      "dx": -289,
+      "dy": 151
+    }
+  },
+  "107": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "ADV_SCIENCE",
+        "dx": 91,
+        "dy": -265,
+        "confidence": 0.508
+      },
+      {
+        "slot": 1,
+        "type": "MONEY",
+        "dx": -230,
+        "dy": 119,
+        "confidence": 0.553
+      },
+      {
+        "slot": 2,
+        "type": "ADV_MATERIALS",
+        "dx": 198,
+        "dy": 224,
+        "confidence": 0.329
+      }
+    ],
+    "monolith_anchor": {
+      "dx": -249,
+      "dy": -209
+    },
+    "orbital_anchor": {
+      "dx": 351,
+      "dy": -49
+    }
+  },
+  "108": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "ADV_MONEY",
+        "dx": -262,
+        "dy": -118,
+        "confidence": 0.496
+      },
+      {
+        "slot": 1,
+        "type": "SCIENCE",
+        "dx": 95,
+        "dy": -292,
+        "confidence": 0.484
+      },
+      {
+        "slot": 2,
+        "type": "ANY",
+        "dx": 104,
+        "dy": 260,
+        "confidence": 0.505
+      }
+    ],
+    "monolith_anchor": {
+      "dx": -249,
+      "dy": 191
+    },
+    "orbital_anchor": {
+      "dx": 351,
+      "dy": -49
+    }
+  },
+  "109": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "MATERIALS",
+        "dx": -114,
+        "dy": -309,
+        "confidence": 0.388
+      },
+      {
+        "slot": 1,
+        "type": "MONEY",
+        "dx": 139,
+        "dy": -264,
+        "confidence": 0.5
+      }
+    ],
+    "monolith_anchor": {
+      "dx": -169,
+      "dy": 311
+    },
+    "orbital_anchor": {
+      "dx": 271,
+      "dy": 191
+    }
+  },
+  "110": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "ADV_MONEY",
+        "dx": -319,
+        "dy": -74,
+        "confidence": 0.49
+      },
+      {
+        "slot": 1,
+        "type": "ADV_ANY",
+        "dx": 104,
+        "dy": 284,
+        "confidence": 0.503
+      }
+    ],
+    "monolith_anchor": {
+      "dx": 191,
+      "dy": -329
+    },
+    "orbital_anchor": {
+      "dx": 351,
+      "dy": -9
+    }
+  },
+  "201": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "MATERIALS",
+        "dx": -63,
+        "dy": -256,
+        "confidence": 0.398
+      },
+      {
+        "slot": 1,
+        "type": "MONEY",
+        "dx": -192,
+        "dy": 173,
+        "confidence": 0.508
+      }
+    ],
+    "monolith_anchor": {
+      "dx": 207,
+      "dy": 229
+    },
+    "orbital_anchor": {
+      "dx": 231,
+      "dy": -209
+    }
+  },
+  "202": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "ADV_SCIENCE",
+        "dx": -85,
+        "dy": 147,
+        "confidence": 0.623
+      },
+      {
+        "slot": 1,
+        "type": "SCIENCE",
+        "dx": -86,
+        "dy": 282,
+        "confidence": 0.439
+      }
+    ],
+    "monolith_anchor": {
+      "dx": 191,
+      "dy": -329
+    },
+    "orbital_anchor": {
+      "dx": -209,
+      "dy": -249
+    }
+  },
+  "203": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "MATERIALS",
+        "dx": -124,
+        "dy": -292,
+        "confidence": 0.385
+      },
+      {
+        "slot": 1,
+        "type": "MONEY",
+        "dx": -184,
+        "dy": 282,
+        "confidence": 0.434
+      },
+      {
+        "slot": 2,
+        "type": "SCIENCE",
+        "dx": 191,
+        "dy": 160,
+        "confidence": 0.469
+      }
+    ],
+    "monolith_anchor": {
+      "dx": 231,
+      "dy": -209
+    },
+    "orbital_anchor": {
+      "dx": -369,
+      "dy": -9
+    }
+  },
+  "204": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "ADV_MONEY",
+        "dx": -187,
+        "dy": -210,
+        "confidence": 0.518
+      },
+      {
+        "slot": 1,
+        "type": "ADV_MATERIALS",
+        "dx": -216,
+        "dy": 187,
+        "confidence": 0.266
+      },
+      {
+        "slot": 2,
+        "type": "ANY",
+        "dx": 213,
+        "dy": -195,
+        "confidence": 0.323
+      }
+    ],
+    "monolith_anchor": {
+      "dx": 279,
+      "dy": 134
+    },
+    "orbital_anchor": {
+      "dx": 91,
+      "dy": 315
+    }
+  },
+  "205": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "ADV_MONEY",
+        "dx": -151,
+        "dy": -212,
+        "confidence": 0.533
+      },
+      {
+        "slot": 1,
+        "type": "MONEY",
+        "dx": -14,
+        "dy": -209,
+        "confidence": 0.543
+      },
+      {
+        "slot": 2,
+        "type": "ADV_SCIENCE",
+        "dx": 180,
+        "dy": 232,
+        "confidence": 0.446
+      }
+    ],
+    "monolith_anchor": {
+      "dx": -212,
+      "dy": 170
+    },
+    "orbital_anchor": {
+      "dx": 240,
+      "dy": -192
+    }
+  },
+  "206": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "MATERIALS",
+        "dx": -193,
+        "dy": -203,
+        "confidence": 0.421
+      }
+    ],
+    "monolith_anchor": {
+      "dx": 191,
+      "dy": 311
+    },
+    "orbital_anchor": {
+      "dx": 271,
+      "dy": -169
+    }
+  },
+  "207": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [],
+    "monolith_anchor": {
+      "dx": -153,
+      "dy": -177
+    },
+    "orbital_anchor": {
+      "dx": -237,
+      "dy": 227
+    }
+  },
+  "208": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [],
+    "monolith_anchor": {
+      "dx": -162,
+      "dy": -234
+    },
+    "orbital_anchor": {
+      "dx": -192,
+      "dy": 234
+    }
+  },
+  "209": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "MONEY",
+        "dx": 104,
+        "dy": -199,
+        "confidence": 0.536
+      },
+      {
+        "slot": 1,
+        "type": "SCIENCE",
+        "dx": -253,
+        "dy": 50,
+        "confidence": 0.517
+      }
+    ],
+    "monolith_anchor": {
+      "dx": 191,
+      "dy": 311
+    },
+    "orbital_anchor": {
+      "dx": -209,
+      "dy": -289
+    }
+  },
+  "210": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "MONEY",
+        "dx": -76,
+        "dy": -262,
+        "confidence": 0.535
+      },
+      {
+        "slot": 1,
+        "type": "MATERIALS",
+        "dx": 160,
+        "dy": 241,
+        "confidence": 0.406
+      }
+    ],
+    "monolith_anchor": {
+      "dx": -329,
+      "dy": 71
+    },
+    "orbital_anchor": {
+      "dx": 228,
+      "dy": -200
+    }
+  },
+  "211": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "MONEY",
+        "dx": 107,
+        "dy": -276,
+        "confidence": 0.465
+      },
+      {
+        "slot": 1,
+        "type": "MATERIALS",
+        "dx": 184,
+        "dy": 274,
+        "confidence": 0.341
+      },
+      {
+        "slot": 2,
+        "type": "ANY",
+        "dx": -193,
+        "dy": 196,
+        "confidence": 0.361
+      }
+    ],
+    "monolith_anchor": {
+      "dx": -320,
+      "dy": -51
+    },
+    "orbital_anchor": {
+      "dx": -112,
+      "dy": -288
+    }
+  },
+  "214": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "ADV_ANY",
+        "dx": -158,
+        "dy": -249,
+        "confidence": 0.501
+      },
+      {
+        "slot": 1,
+        "type": "ADV_MATERIALS",
+        "dx": -187,
+        "dy": 239,
+        "confidence": 0.32
+      },
+      {
+        "slot": 2,
+        "type": "SCIENCE",
+        "dx": 201,
+        "dy": 303,
+        "confidence": 0.575
+      }
+    ],
+    "monolith_anchor": {
+      "dx": 271,
+      "dy": -169
+    },
+    "orbital_anchor": {
+      "dx": -369,
+      "dy": -9
+    }
+  },
+  "221": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "ADV_MONEY",
+        "dx": -38,
+        "dy": -237,
+        "confidence": 0.657
+      },
+      {
+        "slot": 1,
+        "type": "MONEY",
+        "dx": 93,
+        "dy": -235,
+        "confidence": 0.477
+      },
+      {
+        "slot": 2,
+        "type": "ADV_SCIENCE",
+        "dx": -191,
+        "dy": 210,
+        "confidence": 0.465
+      },
+      {
+        "slot": 3,
+        "type": "SCIENCE",
+        "dx": -55,
+        "dy": 217,
+        "confidence": 0.395
+      },
+      {
+        "slot": 4,
+        "type": "MATERIALS",
+        "dx": 154,
+        "dy": 249,
+        "confidence": 0.401
+      }
+    ],
+    "monolith_anchor": {
+      "dx": -329,
+      "dy": -89
+    },
+    "orbital_anchor": {
+      "dx": 317,
+      "dy": 108
+    }
+  },
+  "222": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "ADV_MONEY",
+        "dx": -57,
+        "dy": -225,
+        "confidence": 0.472
+      },
+      {
+        "slot": 1,
+        "type": "MONEY",
+        "dx": 77,
+        "dy": -217,
+        "confidence": 0.638
+      },
+      {
+        "slot": 2,
+        "type": "ADV_SCIENCE",
+        "dx": 100,
+        "dy": 203,
+        "confidence": 0.527
+      },
+      {
+        "slot": 3,
+        "type": "SCIENCE",
+        "dx": 231,
+        "dy": 202,
+        "confidence": 0.591
+      }
+    ],
+    "monolith_anchor": {
+      "dx": -369,
+      "dy": -9
+    },
+    "orbital_anchor": {
+      "dx": -147,
+      "dy": 230
+    }
+  },
+  "223": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "ADV_MONEY",
+        "dx": 12,
+        "dy": -239,
+        "confidence": 0.559
+      },
+      {
+        "slot": 1,
+        "type": "MONEY",
+        "dx": 139,
+        "dy": -241,
+        "confidence": 0.564
+      },
+      {
+        "slot": 2,
+        "type": "ADV_SCIENCE",
+        "dx": -324,
+        "dy": -29,
+        "confidence": 0.486
+      },
+      {
+        "slot": 3,
+        "type": "SCIENCE",
+        "dx": -195,
+        "dy": -22,
+        "confidence": 0.402
+      },
+      {
+        "slot": 4,
+        "type": "MATERIALS",
+        "dx": 96,
+        "dy": 251,
+        "confidence": 0.387
+      }
+    ],
+    "monolith_anchor": {
+      "dx": 351,
+      "dy": 31
+    },
+    "orbital_anchor": {
+      "dx": -209,
+      "dy": 271
+    }
+  },
+  "224": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "MONEY",
+        "dx": -22,
+        "dy": -251,
+        "confidence": 0.455
+      },
+      {
+        "slot": 1,
+        "type": "ADV_SCIENCE",
+        "dx": -293,
+        "dy": 12,
+        "confidence": 0.449
+      },
+      {
+        "slot": 2,
+        "type": "ADV_MATERIALS",
+        "dx": 218,
+        "dy": 255,
+        "confidence": 0.312
+      }
+    ],
+    "monolith_anchor": {
+      "dx": 210,
+      "dy": -249
+    },
+    "orbital_anchor": {
+      "dx": -169,
+      "dy": 311
+    }
+  },
+  "225": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "ADV_MONEY",
+        "dx": -168,
+        "dy": 154,
+        "confidence": 0.694
+      },
+      {
+        "slot": 1,
+        "type": "MONEY",
+        "dx": -165,
+        "dy": 283,
+        "confidence": 0.555
+      },
+      {
+        "slot": 2,
+        "type": "ADV_SCIENCE",
+        "dx": 104,
+        "dy": 202,
+        "confidence": 0.44
+      },
+      {
+        "slot": 3,
+        "type": "SCIENCE",
+        "dx": 245,
+        "dy": 197,
+        "confidence": 0.53
+      },
+      {
+        "slot": 4,
+        "type": "MATERIALS",
+        "dx": -164,
+        "dy": -189,
+        "confidence": 0.415
+      }
+    ],
+    "monolith_anchor": {
+      "dx": 231,
+      "dy": -249
+    },
+    "orbital_anchor": {
+      "dx": -369,
+      "dy": -9
+    }
+  },
+  "226": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "SCIENCE",
+        "dx": -111,
+        "dy": 211,
+        "confidence": 0.58
+      },
+      {
+        "slot": 1,
+        "type": "MATERIALS",
+        "dx": 137,
+        "dy": 254,
+        "confidence": 0.414
+      }
+    ],
+    "monolith_anchor": {
+      "dx": 191,
+      "dy": -329
+    },
+    "orbital_anchor": {
+      "dx": -249,
+      "dy": -209
+    }
+  },
+  "227": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "ADV_MONEY",
+        "dx": 162,
+        "dy": 164,
+        "confidence": 0.679
+      },
+      {
+        "slot": 1,
+        "type": "MONEY",
+        "dx": 162,
+        "dy": 295,
+        "confidence": 0.548
+      },
+      {
+        "slot": 2,
+        "type": "ADV_SCIENCE",
+        "dx": -146,
+        "dy": -234,
+        "confidence": 0.601
+      },
+      {
+        "slot": 3,
+        "type": "SCIENCE",
+        "dx": -11,
+        "dy": -224,
+        "confidence": 0.415
+      },
+      {
+        "slot": 4,
+        "type": "MATERIALS",
+        "dx": -193,
+        "dy": 218,
+        "confidence": 0.407
+      }
+    ],
+    "monolith_anchor": {
+      "dx": 271,
+      "dy": -129
+    },
+    "orbital_anchor": {
+      "dx": -369,
+      "dy": -9
+    }
+  },
+  "228": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "MONEY",
+        "dx": 19,
+        "dy": -246,
+        "confidence": 0.553
+      },
+      {
+        "slot": 1,
+        "type": "SCIENCE",
+        "dx": -113,
+        "dy": 219,
+        "confidence": 0.593
+      },
+      {
+        "slot": 2,
+        "type": "ADV_MATERIALS",
+        "dx": 154,
+        "dy": 260,
+        "confidence": 0.299
+      }
+    ],
+    "monolith_anchor": {
+      "dx": 191,
+      "dy": -329
+    },
+    "orbital_anchor": {
+      "dx": -294,
+      "dy": -103
+    }
+  },
+  "229": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "ADV_MONEY",
+        "dx": -165,
+        "dy": 155,
+        "confidence": 0.695
+      },
+      {
+        "slot": 1,
+        "type": "MONEY",
+        "dx": -162,
+        "dy": 283,
+        "confidence": 0.534
+      },
+      {
+        "slot": 2,
+        "type": "ADV_SCIENCE",
+        "dx": 89,
+        "dy": 217,
+        "confidence": 0.443
+      },
+      {
+        "slot": 3,
+        "type": "SCIENCE",
+        "dx": 215,
+        "dy": 215,
+        "confidence": 0.578
+      },
+      {
+        "slot": 4,
+        "type": "MATERIALS",
+        "dx": 110,
+        "dy": -210,
+        "confidence": 0.408
+      }
+    ],
+    "monolith_anchor": {
+      "dx": -249,
+      "dy": -209
+    },
+    "orbital_anchor": {
+      "dx": 351,
+      "dy": -49
+    }
+  },
+  "230": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "ADV_MONEY",
+        "dx": -102,
+        "dy": -219,
+        "confidence": 0.512
+      },
+      {
+        "slot": 1,
+        "type": "MONEY",
+        "dx": 35,
+        "dy": -222,
+        "confidence": 0.543
+      },
+      {
+        "slot": 2,
+        "type": "SCIENCE",
+        "dx": -172,
+        "dy": 277,
+        "confidence": 0.482
+      },
+      {
+        "slot": 3,
+        "type": "ADV_MATERIALS",
+        "dx": 163,
+        "dy": 221,
+        "confidence": 0.299
+      }
+    ],
+    "monolith_anchor": {
+      "dx": -369,
+      "dy": -9
+    },
+    "orbital_anchor": {
+      "dx": 351,
+      "dy": -49
+    }
+  },
+  "231": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "ADV_MONEY",
+        "dx": 105,
+        "dy": 200,
+        "confidence": 0.538
+      },
+      {
+        "slot": 1,
+        "type": "MONEY",
+        "dx": 229,
+        "dy": 197,
+        "confidence": 0.561
+      },
+      {
+        "slot": 2,
+        "type": "ADV_SCIENCE",
+        "dx": -68,
+        "dy": -224,
+        "confidence": 0.511
+      },
+      {
+        "slot": 3,
+        "type": "SCIENCE",
+        "dx": 68,
+        "dy": -226,
+        "confidence": 0.547
+      },
+      {
+        "slot": 4,
+        "type": "MATERIALS",
+        "dx": -170,
+        "dy": 263,
+        "confidence": 0.417
+      }
+    ],
+    "monolith_anchor": {
+      "dx": -369,
+      "dy": -9
+    },
+    "orbital_anchor": {
+      "dx": 311,
+      "dy": -89
+    }
+  },
+  "232": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "ADV_MONEY",
+        "dx": 48,
+        "dy": -213,
+        "confidence": 0.506
+      },
+      {
+        "slot": 1,
+        "type": "SCIENCE",
+        "dx": -269,
+        "dy": -12,
+        "confidence": 0.477
+      },
+      {
+        "slot": 2,
+        "type": "ADV_MATERIALS",
+        "dx": 83,
+        "dy": 226,
+        "confidence": 0.282
+      },
+      {
+        "slot": 3,
+        "type": "MATERIALS",
+        "dx": 208,
+        "dy": 221,
+        "confidence": 0.402
+      }
+    ],
+    "monolith_anchor": {
+      "dx": 311,
+      "dy": -89
+    },
+    "orbital_anchor": {
+      "dx": -209,
+      "dy": 271
+    }
+  },
+  "271": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "ADV_MATERIALS",
+        "dx": -257,
+        "dy": -144,
+        "confidence": 0.307
+      },
+      {
+        "slot": 1,
+        "type": "MONEY",
+        "dx": 211,
+        "dy": -210,
+        "confidence": 0.552
+      },
+      {
+        "slot": 2,
+        "type": "SCIENCE",
+        "dx": 126,
+        "dy": 277,
+        "confidence": 0.494
+      }
+    ],
+    "monolith_anchor": {
+      "dx": -249,
+      "dy": 231
+    },
+    "orbital_anchor": {
+      "dx": 301,
+      "dy": 155
+    }
+  },
+  "272": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "MONEY",
+        "dx": -138,
+        "dy": -197,
+        "confidence": 0.561
+      },
+      {
+        "slot": 1,
+        "type": "ADV_SCIENCE",
+        "dx": -207,
+        "dy": 226,
+        "confidence": 0.515
+      },
+      {
+        "slot": 2,
+        "type": "MATERIALS",
+        "dx": 127,
+        "dy": 281,
+        "confidence": 0.386
+      }
+    ],
+    "monolith_anchor": {
+      "dx": 271,
+      "dy": -129
+    },
+    "orbital_anchor": {
+      "dx": -369,
+      "dy": -9
+    }
+  },
+  "273": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "ADV_MATERIALS",
+        "dx": -207,
+        "dy": -256,
+        "confidence": 0.372
+      },
+      {
+        "slot": 1,
+        "type": "MATERIALS",
+        "dx": -82,
+        "dy": -261,
+        "confidence": 0.394
+      },
+      {
+        "slot": 2,
+        "type": "MONEY",
+        "dx": -131,
+        "dy": 256,
+        "confidence": 0.581
+      }
+    ],
+    "monolith_anchor": {
+      "dx": -329,
+      "dy": -15
+    },
+    "orbital_anchor": {
+      "dx": 191,
+      "dy": 311
+    }
+  },
+  "274": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "ADV_SCIENCE",
+        "dx": -282,
+        "dy": -89,
+        "confidence": 0.399
+      },
+      {
+        "slot": 1,
+        "type": "SCIENCE",
+        "dx": -277,
+        "dy": 58,
+        "confidence": 0.502
+      },
+      {
+        "slot": 2,
+        "type": "MONEY",
+        "dx": 225,
+        "dy": 237,
+        "confidence": 0.556
+      }
+    ],
+    "monolith_anchor": {
+      "dx": 191,
+      "dy": -329
+    },
+    "orbital_anchor": {
+      "dx": -160,
+      "dy": 256
+    }
+  },
+  "281": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "SCIENCE",
+        "dx": 136,
+        "dy": -267,
+        "confidence": 0.469
+      },
+      {
+        "slot": 1,
+        "type": "MONEY",
+        "dx": -190,
+        "dy": 284,
+        "confidence": 0.511
+      }
+    ],
+    "monolith_anchor": {
+      "dx": 271,
+      "dy": 191
+    },
+    "orbital_anchor": {
+      "dx": -289,
+      "dy": -129
+    }
+  },
+  "301": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "SCIENCE",
+        "dx": -248,
+        "dy": 23,
+        "confidence": 0.547
+      },
+      {
+        "slot": 1,
+        "type": "MONEY",
+        "dx": 214,
+        "dy": -213,
+        "confidence": 0.558
+      },
+      {
+        "slot": 2,
+        "type": "ADV_MATERIALS",
+        "dx": 165,
+        "dy": 285,
+        "confidence": 0.307
+      }
+    ],
+    "monolith_anchor": {
+      "dx": -129,
+      "dy": -329
+    },
+    "orbital_anchor": {
+      "dx": -169,
+      "dy": 311
+    }
+  },
+  "302": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "ADV_SCIENCE",
+        "dx": -222,
+        "dy": -167,
+        "confidence": 0.394
+      },
+      {
+        "slot": 1,
+        "type": "ADV_MONEY",
+        "dx": 129,
+        "dy": -270,
+        "confidence": 0.586
+      },
+      {
+        "slot": 2,
+        "type": "MATERIALS",
+        "dx": 174,
+        "dy": 287,
+        "confidence": 0.421
+      }
+    ],
+    "monolith_anchor": {
+      "dx": -249,
+      "dy": 231
+    },
+    "orbital_anchor": {
+      "dx": 351,
+      "dy": -9
+    }
+  },
+  "303": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "ADV_SCIENCE",
+        "dx": -143,
+        "dy": 202,
+        "confidence": 0.375
+      },
+      {
+        "slot": 1,
+        "type": "ADV_MONEY",
+        "dx": 147,
+        "dy": 206,
+        "confidence": 0.644
+      },
+      {
+        "slot": 2,
+        "type": "ANY",
+        "dx": 154,
+        "dy": -300,
+        "confidence": 0.376
+      }
+    ],
+    "monolith_anchor": {
+      "dx": -289,
+      "dy": -129
+    },
+    "orbital_anchor": {
+      "dx": 311,
+      "dy": -89
+    }
+  },
+  "304": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "ADV_MONEY",
+        "dx": -196,
+        "dy": -177,
+        "confidence": 0.5
+      },
+      {
+        "slot": 1,
+        "type": "MATERIALS",
+        "dx": -159,
+        "dy": 258,
+        "confidence": 0.408
+      }
+    ],
+    "monolith_anchor": {
+      "dx": 152,
+      "dy": -218
+    },
+    "orbital_anchor": {
+      "dx": 191,
+      "dy": 311
+    }
+  },
+  "305": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "SCIENCE",
+        "dx": -178,
+        "dy": -220,
+        "confidence": 0.473
+      },
+      {
+        "slot": 1,
+        "type": "MATERIALS",
+        "dx": 121,
+        "dy": 273,
+        "confidence": 0.413
+      }
+    ],
+    "monolith_anchor": {
+      "dx": 271,
+      "dy": -169
+    },
+    "orbital_anchor": {
+      "dx": -289,
+      "dy": 151
+    }
+  },
+  "306": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "MONEY",
+        "dx": 184,
+        "dy": -270,
+        "confidence": 0.517
+      },
+      {
+        "slot": 1,
+        "type": "MATERIALS",
+        "dx": 132,
+        "dy": 270,
+        "confidence": 0.411
+      }
+    ],
+    "monolith_anchor": {
+      "dx": -369,
+      "dy": -9
+    },
+    "orbital_anchor": {
+      "dx": -169,
+      "dy": -329
+    }
+  },
+  "307": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "MONEY",
+        "dx": -117,
+        "dy": -288,
+        "confidence": 0.488
+      },
+      {
+        "slot": 1,
+        "type": "ADV_SCIENCE",
+        "dx": -238,
+        "dy": 136,
+        "confidence": 0.5
+      }
+    ],
+    "monolith_anchor": {
+      "dx": 225,
+      "dy": -187
+    },
+    "orbital_anchor": {
+      "dx": 111,
+      "dy": 311
+    }
+  },
+  "308": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "SCIENCE",
+        "dx": 114,
+        "dy": -246,
+        "confidence": 0.462
+      },
+      {
+        "slot": 1,
+        "type": "ADV_MATERIALS",
+        "dx": -298,
+        "dy": 58,
+        "confidence": 0.304
+      }
+    ],
+    "monolith_anchor": {
+      "dx": 191,
+      "dy": 311
+    },
+    "orbital_anchor": {
+      "dx": 351,
+      "dy": -9
+    }
+  },
+  "309": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "MONEY",
+        "dx": 133,
+        "dy": -275,
+        "confidence": 0.547
+      },
+      {
+        "slot": 1,
+        "type": "ADV_SCIENCE",
+        "dx": -278,
+        "dy": 83,
+        "confidence": 0.518
+      }
+    ],
+    "monolith_anchor": {
+      "dx": 191,
+      "dy": 311
+    },
+    "orbital_anchor": {
+      "dx": 351,
+      "dy": -9
+    }
+  },
+  "310": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "SCIENCE",
+        "dx": 147,
+        "dy": -272,
+        "confidence": 0.496
+      },
+      {
+        "slot": 1,
+        "type": "MATERIALS",
+        "dx": -145,
+        "dy": 193,
+        "confidence": 0.424
+      }
+    ],
+    "monolith_anchor": {
+      "dx": 271,
+      "dy": 151
+    },
+    "orbital_anchor": {
+      "dx": -249,
+      "dy": -209
+    }
+  },
+  "311": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "MATERIALS",
+        "dx": 120,
+        "dy": 265,
+        "confidence": 0.408
+      }
+    ],
+    "monolith_anchor": {
+      "dx": -169,
+      "dy": -329
+    },
+    "orbital_anchor": {
+      "dx": 271,
+      "dy": -169
+    }
+  },
+  "312": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "MATERIALS",
+        "dx": 37,
+        "dy": -314,
+        "confidence": 0.415
+      }
+    ],
+    "monolith_anchor": {
+      "dx": -169,
+      "dy": 311
+    },
+    "orbital_anchor": {
+      "dx": 311,
+      "dy": 111
+    }
+  },
+  "313": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "ANY",
+        "dx": 200,
+        "dy": -282,
+        "confidence": 0.376
+      }
+    ],
+    "monolith_anchor": {
+      "dx": -169,
+      "dy": 311
+    },
+    "orbital_anchor": {
+      "dx": -289,
+      "dy": -129
+    }
+  },
+  "314": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "ANY",
+        "dx": -197,
+        "dy": 146,
+        "confidence": 0.33
+      }
+    ],
+    "monolith_anchor": {
+      "dx": 191,
+      "dy": -329
+    },
+    "orbital_anchor": {
+      "dx": 271,
+      "dy": 191
+    }
+  },
+  "315": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [],
+    "monolith_anchor": {
+      "dx": -205,
+      "dy": -209
+    },
+    "orbital_anchor": {
+      "dx": 168,
+      "dy": 269
+    }
+  },
+  "316": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [],
+    "monolith_anchor": {
+      "dx": -218,
+      "dy": -216
+    },
+    "orbital_anchor": {
+      "dx": 130,
+      "dy": 259
+    }
+  },
+  "317": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "ADV_MONEY",
+        "dx": -132,
+        "dy": 152,
+        "confidence": 0.63
+      },
+      {
+        "slot": 1,
+        "type": "MONEY",
+        "dx": -129,
+        "dy": 281,
+        "confidence": 0.538
+      }
+    ],
+    "monolith_anchor": {
+      "dx": -23,
+      "dy": -277
+    },
+    "orbital_anchor": {
+      "dx": 216,
+      "dy": 234
+    }
+  },
+  "318": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "ADV_MATERIALS",
+        "dx": -140,
+        "dy": 155,
+        "confidence": 0.305
+      },
+      {
+        "slot": 1,
+        "type": "ANY",
+        "dx": -28,
+        "dy": -285,
+        "confidence": 0.385
+      }
+    ],
+    "monolith_anchor": {
+      "dx": 351,
+      "dy": 31
+    },
+    "orbital_anchor": {
+      "dx": 151,
+      "dy": 311
+    }
+  },
+  "381": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "MATERIALS",
+        "dx": -214,
+        "dy": -244,
+        "confidence": 0.413
+      },
+      {
+        "slot": 1,
+        "type": "MONEY",
+        "dx": 142,
+        "dy": -193,
+        "confidence": 0.535
+      }
+    ],
+    "monolith_anchor": {
+      "dx": -129,
+      "dy": 311
+    },
+    "orbital_anchor": {
+      "dx": 271,
+      "dy": 191
+    }
+  },
+  "382": {
+    "influence_space": {
+      "dx": 0,
+      "dy": 0
+    },
+    "planets": [
+      {
+        "slot": 0,
+        "type": "SCIENCE",
+        "dx": -236,
+        "dy": 228,
+        "confidence": 0.475
+      },
+      {
+        "slot": 1,
+        "type": "MATERIALS",
+        "dx": 125,
+        "dy": 281,
+        "confidence": 0.413
+      }
+    ],
+    "monolith_anchor": {
+      "dx": 31,
+      "dy": -329
+    },
+    "orbital_anchor": {
+      "dx": 351,
+      "dy": -49
+    }
+  }
+}
