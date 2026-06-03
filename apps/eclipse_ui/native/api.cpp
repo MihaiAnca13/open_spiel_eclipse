@@ -107,6 +107,7 @@ std::string GetGameMetadataApi() {
     const auto& tech = TECH_TABLE[i];
     nlohmann::json tech_json = nlohmann::json::object();
     tech_json["category"] = tech.category;
+    tech_json["order"] = i;
     tech_json["base_cost"] = tech.base_cost;
     tech_json["min_cost"] = tech.min_cost;
     tech_json["copies"] = tech.copies;

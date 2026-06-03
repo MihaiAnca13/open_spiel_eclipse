@@ -24,6 +24,7 @@ export default function Root({ initialMetadata }: { initialMetadata: any }) {
   return (
     <LobbyScreen
       speciesList={initialMetadata.species ?? []}
+      techCatalog={initialMetadata.tech_catalog ?? {}}
       difficulties={initialMetadata.npc_difficulties ?? ['Easy', 'Medium', 'Hard']}
       onStart={(snapshot, mySeatIdx, playerNames) =>
         setView({ screen: 'game', snapshot, mySeatIdx, playerNames })}

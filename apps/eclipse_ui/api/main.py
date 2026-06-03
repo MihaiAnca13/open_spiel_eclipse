@@ -27,6 +27,7 @@ app.add_middleware(
 # UI can paint real art inside each hex (debug aid for the explore action).
 
 SECTORS_DIR = Path(__file__).resolve().parent.parent / "data" / "sectors"
+TECH_DIR = Path(__file__).resolve().parent.parent / "data" / "tech"
 
 
 def _build_sector_manifest() -> dict[str, str]:
@@ -49,6 +50,7 @@ def _build_sector_manifest() -> dict[str, str]:
 SECTOR_MANIFEST = _build_sector_manifest()
 
 app.mount("/assets/sectors", StaticFiles(directory=str(SECTORS_DIR)), name="sectors")
+app.mount("/assets/tech", StaticFiles(directory=str(TECH_DIR)), name="tech")
 
 
 @app.get("/sectors/manifest")

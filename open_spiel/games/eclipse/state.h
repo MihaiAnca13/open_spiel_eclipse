@@ -155,6 +155,7 @@ inline void to_json(nlohmann::json& j, const State& s) {
             nlohmann::json entry = nlohmann::json::object();
             entry["count"] = s.tech_tray[i];
             entry["category"] = tech.category;
+            entry["order"] = i;
             entry["base_cost"] = tech.base_cost;
             entry["min_cost"] = tech.min_cost;
             entry["copies"] = tech.copies;

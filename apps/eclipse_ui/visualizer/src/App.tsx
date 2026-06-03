@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import './App.css';
+import { ImageHoverPreview, useImageHoverPreview } from './ImageHoverPreview';
 import {
   SPECIES_THEME,
   UNOWNED_COLOR,
@@ -9,7 +10,15 @@ import {
 } from './theme';
 import ActionPanel, { ACTION, type ExploreState } from './ActionPanel';
 
-import { API_BASE, WS_BASE, SECTOR_ASSETS_BASE } from './types/lobby';
+import {
+  API_BASE,
+  WS_BASE,
+  SECTOR_ASSETS_BASE,
+  buildTechMarketRows,
+  techImageUrl,
+  TECH_CATEGORIES,
+  type TechMarketEntry,
+} from './types/lobby';
 
 interface HexCoord {
   q: number;
@@ -86,13 +95,7 @@ interface GameState {
   galaxy: Sector[][];
   reputation_tiles: string[];
   unit_registry: Unit[];
-  tech_tray: Record<string, {
-    count: number;
-    category: string;
-    base_cost: number;
-    min_cost: number;
-    copies: number;
-  }>;
+  tech_tray: Record<string, TechMarketEntry>;
   tech_bag: string[];
   gcds_difficulty: string;
   guardian_difficulty: string;
@@ -191,6 +194,7 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
   // sector_id -> image URL (real tile art painted inside each hex).
   const [sectorImages, setSectorImages] = useState<Record<number, string>>({});
   const [brokenImages, setBrokenImages] = useState<Set<number>>(new Set());
+  const { preview, beginPreview, clearPreview } = useImageHoverPreview();
   const [setupFinalized, setSetupFinalized] = useState<boolean>(initialSnapshot?.finalized ?? false);
   const [playerStartingSectors, setPlayerStartingSectors] = useState<Record<number, number>>({});
 
@@ -219,6 +223,9 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
   const getAiDefault = (playerId: number) => aiChoices[playerId] ?? (playerId !== 0);
 
   const gameState = snapshot?.state ?? null;
+  const techRows = gameState
+    ? buildTechMarketRows(gameMetadata.tech_catalog ?? {}, gameState.tech_tray)
+    : {};
 
   const getSpeciesOptions = (playerId: number) => {
     const selectedSpecies = Array.from({ length: numPlayers }, (_, i) => i)
@@ -757,8 +764,19 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
                   return (
                     <g
                       key={`${sector.sector_id}-${sector.coords.q}-${sector.coords.r}`}
-                      onMouseEnter={() => setHoveredSector(sector)}
-                      onMouseLeave={() => setHoveredSector(null)}
+                      onMouseEnter={() => {
+                        setHoveredSector(sector);
+                        if (imgUrl) {
+                          beginPreview({
+                            src: imgUrl,
+                            label: sector.sector_id === 1 ? '001 (Center)' : `Sector ${sector.sector_id}`,
+                          });
+                        }
+                      }}
+                      onMouseLeave={() => {
+                        setHoveredSector(null);
+                        clearPreview();
+                      }}
                     >
                       {imgUrl && (
                         <>
@@ -792,6 +810,7 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
                         stroke={stroke}
                         strokeWidth={strokeWidth}
                         className="hex-polygon"
+                        style={{ pointerEvents: 'all' }}
                       />
 
                       <text
@@ -898,24 +917,36 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
           {gameState && (
             <div className="panel">
               <h3 className="panel-title">Round 1 Technology Market</h3>
-              <div className="flex flex-col gap-4">
-                {['Military', 'Grid', 'Nano', 'Rare'].map((category) => {
-                  const categoryTechs = Object.entries(gameState.tech_tray).filter(([_, tech]) => tech.category === category);
-                  if (categoryTechs.length === 0) return null;
+              <div className="tech-market">
+                {TECH_CATEGORIES.map((category) => {
+                  const techs = techRows[category];
+                  if (!techs.length) return null;
                   return (
-                    <div key={category}>
-                      <h4 className="text-sm font-semibold text-[#94a3b8] mb-2 uppercase">{category} Track</h4>
-                      <div className="tech-grid">
-                        {categoryTechs.map(([techName, tech]) => (
-                          <div key={techName} className={`tech-card ${tech.category}`}>
-                            <div className="tech-name">{techName}</div>
+                    <div key={category} className="tech-row">
+                      {techs.map(([techName, tech]) => (
+                        <div
+                          key={techName}
+                          className={`tech-card ${tech.category} ${tech.count === 0 ? 'unavailable' : ''}`}
+                          onMouseEnter={() =>
+                            beginPreview({ src: techImageUrl(techName, tech.category), label: techName })
+                          }
+                          onMouseLeave={clearPreview}
+                        >
+                          <img
+                            className="tech-image"
+                            src={techImageUrl(techName, tech.category)}
+                            alt=""
+                            onError={(event) => {
+                              event.currentTarget.style.display = 'none';
+                            }}
+                          />
+                          <div className="tech-name">{techName}</div>
+                          <div className="tech-meta">
                             <span className={`tech-category-badge ${tech.category}`}>{tech.category}</span>
-                            <div className="tech-count mt-1.5">
-                              Qty Available: <strong>{tech.count}</strong>
-                            </div>
+                            <span className="tech-count">{tech.count}</span>
                           </div>
-                        ))}
-                      </div>
+                        </div>
+                      ))}
                     </div>
                   );
                 })}
@@ -938,6 +969,7 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
           )}
         </div>
       </div>
+      <ImageHoverPreview preview={preview} />
     </div>
   );
 }

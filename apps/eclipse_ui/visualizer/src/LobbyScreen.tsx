@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
-import { API_BASE, WS_BASE } from './types/lobby';
+import { ImageHoverPreview, useImageHoverPreview } from './ImageHoverPreview';
+import { API_BASE, WS_BASE, buildTechMarketRows, techImageUrl, TECH_CATEGORIES } from './types/lobby';
 import type { LobbyData, LobbySeat } from './types/lobby';
+import type { TechCatalog, TechMarketEntry } from './types/lobby';
 import { SPECIES_THEME } from './theme';
 import type { SetupSnapshot } from './App';
 
 interface Props {
   speciesList: string[];
+  techCatalog: TechCatalog;
   difficulties: string[];
   onStart: (snapshot: SetupSnapshot, mySeatIdx: number, playerNames: (string | null)[]) => void;
 }
@@ -33,7 +36,7 @@ async function post(path: string, body: object) {
 
 // ─── Root component ──────────────────────────────────────────────────────────
 
-export default function LobbyScreen({ speciesList, difficulties, onStart }: Props) {
+export default function LobbyScreen({ speciesList, techCatalog, difficulties, onStart }: Props) {
   const playerId = useRef(getOrCreatePlayerId()).current;
   const [playerName, setPlayerName] = useState(() => localStorage.getItem('eclipse_player_name') ?? '');
   const [joined, setJoined] = useState(false);
@@ -210,7 +213,7 @@ export default function LobbyScreen({ speciesList, difficulties, onStart }: Prop
     return (
       <SetupPhase
         lobby={lobby} playerId={playerId} mySeatIdx={mySeatIdx} isHost={isHost}
-        hasNoSeat={hasNoSeat} effectiveSpecies={effectiveSpecies} busy={busy} error={error}
+        hasNoSeat={hasNoSeat} effectiveSpecies={effectiveSpecies} techCatalog={techCatalog} busy={busy} error={error}
         onSpeciesChange={(idx, sp) => apiCall(`/lobby/seat/${idx}/species`, { species: sp })}
         onAiSpeciesChange={(idx, sp) => apiCall(`/lobby/seat/${idx}/species`, { species: sp })}
         onFinalize={() => apiCall('/lobby/finalize')}
@@ -364,21 +367,22 @@ function WaitingSeat({ seat, idx, isMe, isHost, lobbyHostId, canClaim, onSetAI, 
 
 interface SetupPhaseProps {
   lobby: LobbyData; playerId: string; mySeatIdx: number; isHost: boolean;
-  hasNoSeat: boolean; effectiveSpecies: string[]; busy: boolean; error: string | null;
+  hasNoSeat: boolean; effectiveSpecies: string[]; techCatalog: TechCatalog; busy: boolean; error: string | null;
   onSpeciesChange: (idx: number, species: string) => void;
   onAiSpeciesChange: (idx: number, species: string) => void;
   onFinalize: () => void; onReset: () => void; onClaimSeat: (idx: number) => void;
 }
 
 function SetupPhase({
-  lobby, mySeatIdx, isHost, hasNoSeat, effectiveSpecies, busy, error,
+  lobby, mySeatIdx, isHost, hasNoSeat, effectiveSpecies, techCatalog, busy, error,
   onSpeciesChange, onAiSpeciesChange, onFinalize, onReset, onClaimSeat,
 }: SetupPhaseProps) {
   const stage1 = lobby.stage1_snapshot as any;
   const rawTurnOrder: number[] = stage1?.state?.turn_order ?? [];
   const turnOrder = rawTurnOrder.filter((id: number) => id !== 255);
-  const techTray: Record<string, { count: number; category: string; base_cost: number }> =
-    stage1?.state?.tech_tray ?? {};
+  const techTray: Record<string, TechMarketEntry> = stage1?.state?.tech_tray ?? {};
+  const techRows = buildTechMarketRows(techCatalog, techTray);
+  const { preview, beginPreview, clearPreview } = useImageHoverPreview();
 
   const pickerOrder = lobby.picker_order;
   const currentPickerSeat = pickerOrder[lobby.current_picker_idx] ?? -1;
@@ -576,22 +580,36 @@ function SetupPhase({
           <div className="panel">
             <h3 className="panel-title">Round 1 Technology Market</h3>
             <span className="text-xs text-[#64748b]">Resolved from seed — available at game start</span>
-            <div className="flex flex-col gap-4 mt-3">
-              {(['Military', 'Grid', 'Nano', 'Rare'] as const).map((category) => {
-                const techs = Object.entries(techTray).filter(([, t]) => t.category === category);
+            <div className="tech-market mt-3">
+              {TECH_CATEGORIES.map((category) => {
+                const techs = techRows[category];
                 if (!techs.length) return null;
                 return (
-                  <div key={category}>
-                    <h4 className="text-sm font-semibold text-[#94a3b8] mb-2 uppercase tracking-wide">{category}</h4>
-                    <div className="tech-grid">
-                      {techs.map(([name, tech]) => (
-                        <div key={name} className={`tech-card ${tech.category}`}>
-                          <div className="tech-name">{name}</div>
+                  <div key={category} className="tech-row">
+                    {techs.map(([name, tech]) => (
+                      <div
+                        key={name}
+                        className={`tech-card ${tech.category} ${tech.count === 0 ? 'unavailable' : ''}`}
+                        onMouseEnter={() =>
+                          beginPreview({ src: techImageUrl(name, tech.category), label: name })
+                        }
+                        onMouseLeave={clearPreview}
+                      >
+                        <img
+                          className="tech-image"
+                          src={techImageUrl(name, tech.category)}
+                          alt=""
+                          onError={(event) => {
+                            event.currentTarget.style.display = 'none';
+                          }}
+                        />
+                        <div className="tech-name">{name}</div>
+                        <div className="tech-meta">
                           <span className={`tech-category-badge ${tech.category}`}>{tech.category}</span>
-                          <div className="tech-count mt-1.5">Qty: <strong>{tech.count}</strong></div>
+                          <span className="tech-count">{tech.count}</span>
                         </div>
-                      ))}
-                    </div>
+                      </div>
+                    ))}
                   </div>
                 );
               })}
@@ -599,6 +617,7 @@ function SetupPhase({
           </div>
         </div>
       </div>
+      <ImageHoverPreview preview={preview} />
     </div>
   );
 }
