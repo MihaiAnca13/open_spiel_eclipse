@@ -5,11 +5,11 @@ import {
   UNOWNED_COLOR,
   NPC_COLOR_GCDS,
   NPC_COLOR_GUARDIAN,
-  getSpeciesHexColor,
+  getPlayerColor,
 } from './theme';
 import ActionPanel, { ACTION, type ExploreState } from './ActionPanel';
 
-import { API_BASE, WS_BASE } from './types/lobby';
+import { API_BASE, WS_BASE, SECTOR_ASSETS_BASE } from './types/lobby';
 
 interface HexCoord {
   q: number;
@@ -188,6 +188,9 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
   const [jsonExpanded, setJsonExpanded] = useState<boolean>(false);
   const [actionInProgress, setActionInProgress] = useState<boolean>(false);
   const [hoveredSector, setHoveredSector] = useState<Sector | null>(null);
+  // sector_id -> image URL (real tile art painted inside each hex).
+  const [sectorImages, setSectorImages] = useState<Record<number, string>>({});
+  const [brokenImages, setBrokenImages] = useState<Set<number>>(new Set());
   const [setupFinalized, setSetupFinalized] = useState<boolean>(initialSnapshot?.finalized ?? false);
   const [playerStartingSectors, setPlayerStartingSectors] = useState<Record<number, number>>({});
 
@@ -354,6 +357,32 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
     };
   }, [setupFinalized]);
 
+  // Load the sector_id -> tile-art manifest once. Failure is non-fatal: hexes
+  // just fall back to their colored polygons.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/sectors/manifest`);
+        const manifest: Record<string, string> = await res.json();
+        if (cancelled) return;
+        const urls: Record<number, string> = {};
+        for (const [id, filename] of Object.entries(manifest)) {
+          urls[Number(id)] = `${SECTOR_ASSETS_BASE}/${filename}`;
+        }
+        setSectorImages(urls);
+      } catch {
+        /* keep empty map -> colored-polygon fallback */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const sectorImageUrl = (id: number): string | null =>
+    (!brokenImages.has(id) && sectorImages[id]) || null;
+
   const submitAction = async (actionId: number) => {
     if (actionInProgress) return;
     setActionInProgress(true);
@@ -378,15 +407,23 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
   };
 
   const hexSize = 35;
-  const viewBoxWidth = 600;
-  const viewBoxHeight = 520;
-  const centerX = viewBoxWidth / 2;
-  const centerY = viewBoxHeight / 2;
+  // The tile art is drawn as flat-top hexes, so the whole board is rendered
+  // flat-top to match it; only the game's own rotation (0-5, ×60°) is applied
+  // to each tile. Backend wormhole math is unchanged. Calibrate by eye against
+  // a rotation=0 wormhole edge if a tile's wormholes don't meet its neighbour.
+  const IMAGE_ROTATION_OFFSET = 0;
+  const SQRT3 = Math.sqrt(3);
+
+  // Axial (q,r) → pixel for a flat-top hex layout.
+  const axialToPixel = (q: number, r: number) => ({
+    cx: hexSize * (1.5 * q),
+    cy: hexSize * (SQRT3 / 2) * q + hexSize * SQRT3 * r,
+  });
 
   const getHexPoints = (cx: number, cy: number, r: number) => {
     const points = [];
     for (let i = 0; i < 6; i++) {
-      const angle = (Math.PI / 180) * (30 + 60 * i);
+      const angle = (Math.PI / 180) * (60 * i); // flat-top: vertices left/right
       points.push(`${cx + r * Math.cos(angle)},${cy + r * Math.sin(angle)}`);
     }
     return points.join(' ');
@@ -398,8 +435,7 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
       if (sectorId === 1) return NPC_COLOR_GCDS;
       return UNOWNED_COLOR;
     }
-    const player = gameState?.players[ownerId];
-    return getSpeciesHexColor(player?.species_id);
+    return getPlayerColor(ownerId);
   };
 
   const getUnitsInSector = (sectorId: number) => {
@@ -417,8 +453,7 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
         if (sector && sector.sector_id > 0) {
           const q = qIdx - offset;
           const r = rIdx - offset;
-          const cx = centerX + hexSize * (Math.sqrt(3) * q + (Math.sqrt(3) / 2) * r);
-          const cy = centerY + hexSize * (1.5 * r);
+          const { cx, cy } = axialToPixel(q, r);
           activeSectors.push({ sector, cx, cy });
         }
       }
@@ -451,15 +486,24 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
           const idx = a - ACTION.EXPLORE_ZONE_START;
           const q = Math.floor(idx / 15) - 7;
           const r = (idx % 15) - 7;
-          return {
-            action: a,
-            q,
-            r,
-            cx: centerX + hexSize * (Math.sqrt(3) * q + (Math.sqrt(3) / 2) * r),
-            cy: centerY + hexSize * (1.5 * r),
-          };
+          return { action: a, q, r, ...axialToPixel(q, r) };
         })
     : [];
+
+  // Auto-fit the SVG viewBox to the populated region (sectors + explore zones)
+  // so the board fills the panel and zooms in as the galaxy grows.
+  const fitCells = [...activeSectors, ...legalZones];
+  const viewBox = (() => {
+    if (fitCells.length === 0) return '0 0 600 520';
+    const xs = fitCells.map((c) => c.cx);
+    const ys = fitCells.map((c) => c.cy);
+    const pad = hexSize * 1.4;
+    const minX = Math.min(...xs) - hexSize - pad;
+    const minY = Math.min(...ys) - hexSize - pad;
+    const w = Math.max(...xs) - Math.min(...xs) + 2 * (hexSize + pad);
+    const h = Math.max(...ys) - Math.min(...ys) + 2 * (hexSize + pad);
+    return `${minX} ${minY} ${w} ${h}`;
+  })();
 
   return (
     <div className="w-[95%] mx-auto app-container">
@@ -602,7 +646,7 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
                 return (
                   <div key={playerId} className={`turn-badge ${isActive ? 'active' : ''} ${passed ? 'passed' : ''}`}>
                     <span className="turn-num">{idx + 1}</span>
-                    <span className={SPECIES_THEME[player?.species_id ?? '']?.cssClass ?? ''}>{playerLabel(playerId)} ({player?.species_id || 'Choosing...'})</span>
+                    <span style={{ color: getPlayerColor(playerId) }}>{playerLabel(playerId)} ({player?.species_id || 'Choosing...'})</span>
                     {player?.is_ai && <span className="text-[9px] bg-[#334155] text-[#93c5fd] px-1 py-0.5 rounded">AI</span>}
                     {passed && <span className="text-[9px] text-[#94a3b8]">✓ passed</span>}
                   </div>
@@ -656,7 +700,7 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
                           className={`economy-card ${isMine ? 'mine' : ''} ${pid === gameState.current_player ? 'active' : ''}`}
                         >
                           <div className="economy-name">
-                            <span className={SPECIES_THEME[p.species_id ?? '']?.cssClass ?? ''}>{playerLabel(pid)}</span>
+                            <span style={{ color: getPlayerColor(pid) }}>{playerLabel(pid)}</span>
                             <span className="economy-score">⭐ {p.score}</span>
                           </div>
                           <div className="economy-resources">
@@ -682,7 +726,7 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
 
           <div className="map-viewport">
             {gameState ? (
-              <svg width="100%" height="100%" viewBox={`0 0 ${viewBoxWidth} ${viewBoxHeight}`}>
+              <svg width="100%" height="100%" viewBox={viewBox} preserveAspectRatio="xMidYMid meet">
                 {activeSectors.map(({ sector, cx, cy }) => {
                   const fillColor = getPlayerHexColor(sector.owner_id, sector.sector_id);
                   const isCenter = sector.sector_id === 1;
@@ -694,12 +738,21 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
                   const hasHostiles = units.some((u) => u.player_id === 255);
                   const stroke = isCenter
                     ? '#eab308'
-                    : hasHostiles
-                      ? '#ef4444'
-                      : owned
-                        ? '#f8fafc'
+                    : owned
+                      ? getPlayerColor(sector.owner_id)
+                      : hasHostiles
+                        ? '#ef4444'
                         : '#475569';
                   const strokeWidth = isCenter || hasHostiles || owned ? '2.5' : '1.5';
+
+                  const imgUrl = sectorImageUrl(sector.sector_id);
+                  const r = hexSize - 1.5;
+                  const clipId = `hexclip-${sector.sector_id}-${sector.coords.q}-${sector.coords.r}`;
+                  // Tile art (square) sized to cover the hex's circumdiameter.
+                  const imgSize = 2 * r;
+                  // Backend rotates wormholes CCW through the E,NE,NW,W,SW,SE
+                  // edge order (galaxy.h); SVG rotate() is CW, so negate.
+                  const imgDeg = IMAGE_ROTATION_OFFSET - 60 * (sector.rotation ?? 0);
 
                   return (
                     <g
@@ -707,10 +760,35 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
                       onMouseEnter={() => setHoveredSector(sector)}
                       onMouseLeave={() => setHoveredSector(null)}
                     >
+                      {imgUrl && (
+                        <>
+                          <clipPath id={clipId}>
+                            <polygon points={getHexPoints(cx, cy, r)} />
+                          </clipPath>
+                          {/* clipPath lives on the (unrotated) group so the hex
+                              clip stays put while only the image rotates. */}
+                          <g clipPath={`url(#${clipId})`}>
+                            <image
+                              href={imgUrl}
+                              x={cx - imgSize / 2}
+                              y={cy - imgSize / 2}
+                              width={imgSize}
+                              height={imgSize}
+                              preserveAspectRatio="xMidYMid slice"
+                              transform={`rotate(${imgDeg} ${cx} ${cy})`}
+                              onError={() =>
+                                setBrokenImages((prev) => new Set(prev).add(sector.sector_id))
+                              }
+                              style={{ pointerEvents: 'none' }}
+                            />
+                          </g>
+                        </>
+                      )}
+
                       <polygon
-                        points={getHexPoints(cx, cy, hexSize - 1.5)}
-                        fill={fillColor}
-                        fillOpacity={owned || hasHostiles ? 1 : 0.65}
+                        points={getHexPoints(cx, cy, r)}
+                        fill={imgUrl ? 'none' : fillColor}
+                        fillOpacity={imgUrl ? 0 : owned || hasHostiles ? 1 : 0.65}
                         stroke={stroke}
                         strokeWidth={strokeWidth}
                         className="hex-polygon"

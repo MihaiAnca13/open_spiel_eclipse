@@ -167,7 +167,8 @@
   background-color: #0c0d12;
   border: 1px solid #272a37;
   border-radius: 12px;
-  height: 520px;
+  height: min(82vh, 1000px);
+  min-height: 520px;
   display: flex;
   align-items: center;
   justify-content: center;

@@ -1,10 +1,13 @@
 import json
 import random
+import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import List, Literal, Optional
 
 from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from . import eclipse_ui_native
 
@@ -17,6 +20,40 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ─── sector tile art ─────────────────────────────────────────────────────────
+# Serve the raw sector tile images and a sector_id -> filename manifest so the
+# UI can paint real art inside each hex (debug aid for the explore action).
+
+SECTORS_DIR = Path(__file__).resolve().parent.parent / "data" / "sectors"
+
+
+def _build_sector_manifest() -> dict[str, str]:
+    """Map sector_id -> image filename by parsing the 3-digit id out of each name.
+
+    Trap: `sector_394_simeis_147.png` has two 3-digit groups; the id is the one
+    right after the `sector_` prefix (394). All other prefixes carry the id as
+    the trailing group (`galactic_center_001`->1, `starting_procyon_221`->221).
+    """
+    manifest: dict[str, str] = {}
+    for p in sorted(SECTORS_DIR.glob("*.png")):
+        m = re.match(r"^sector_(\d{3})_", p.name) or re.search(r"(\d{3})\.png$", p.name)
+        if not m:
+            print(f"[sector manifest] could not parse sector_id from {p.name}")
+            continue
+        manifest[str(int(m.group(1)))] = p.name
+    return manifest
+
+
+SECTOR_MANIFEST = _build_sector_manifest()
+
+app.mount("/assets/sectors", StaticFiles(directory=str(SECTORS_DIR)), name="sectors")
+
+
+@app.get("/sectors/manifest")
+async def sectors_manifest() -> dict[str, str]:
+    return SECTOR_MANIFEST
 
 
 # ─── existing setup endpoints ────────────────────────────────────────────────
