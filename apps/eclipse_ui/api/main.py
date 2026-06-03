@@ -150,6 +150,82 @@ def _apply(blob: dict, action_id: int) -> dict:
     return json.loads(eclipse_ui_native.apply_action(json.dumps(blob), action_id))
 
 
+def _require_debug_host(player_id: str) -> None:
+    if player_id != lobby.host_player_id:
+        raise HTTPException(status_code=403, detail="Only host can use debug state controls")
+    if lobby.phase != "started" or lobby.game_blob is None:
+        raise HTTPException(status_code=400, detail="Game not started")
+
+
+def _validate_debug_game_blob(blob: dict, expected_players: int | None = None) -> int:
+    if not isinstance(blob, dict):
+        raise HTTPException(status_code=400, detail="game_blob must be an object")
+
+    for key in ("setup_config", "state", "pending_random_event"):
+        if key not in blob:
+            raise HTTPException(status_code=400, detail=f"game_blob missing {key}")
+
+    setup_config = blob["setup_config"]
+    if not isinstance(setup_config, dict):
+        raise HTTPException(status_code=400, detail="game_blob.setup_config must be an object")
+
+    players = setup_config.get("players")
+    if not isinstance(players, int):
+        raise HTTPException(status_code=400, detail="game_blob.setup_config.players must be an integer")
+    if players < 2 or players > 6:
+        raise HTTPException(status_code=400, detail="game_blob.setup_config.players must be 2-6")
+    if expected_players is not None and players != expected_players:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Loaded state has {players} players, current lobby has {expected_players}",
+        )
+
+    if not isinstance(blob["state"], dict):
+        raise HTTPException(status_code=400, detail="game_blob.state must be an object")
+    if not isinstance(blob["pending_random_event"], int):
+        raise HTTPException(status_code=400, detail="game_blob.pending_random_event must be an integer")
+
+    try:
+        _legal_info(blob)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid game state blob: {exc}") from exc
+    return players
+
+
+def _snapshot_from_game_blob(blob: dict) -> dict:
+    return {
+        "config": blob["setup_config"],
+        "state": blob["state"],
+        "finalized": True,
+    }
+
+
+def _seat_species(blob: dict, player_idx: int) -> str:
+    state_players = blob.get("state", {}).get("players", [])
+    if player_idx < len(state_players):
+        species = state_players[player_idx].get("species_id")
+        if isinstance(species, str) and species:
+            return species
+
+    staged_players = blob.get("setup_config", {}).get("staged_players", [])
+    if player_idx < len(staged_players):
+        species = staged_players[player_idx].get("species")
+        if isinstance(species, str) and species:
+            return species
+
+    return TERRAN_SPECIES
+
+
+def _core_player_is_ai(blob: dict, player_idx: int) -> bool:
+    state_players = blob.get("state", {}).get("players", [])
+    if player_idx < len(state_players):
+        return bool(state_players[player_idx].get("is_ai", False))
+    staged_players = blob.get("setup_config", {}).get("staged_players", [])
+    if player_idx < len(staged_players):
+        return bool(staged_players[player_idx].get("is_ai", False))
+    return False
+
+
 def _all_humans_passed(blob: dict) -> bool:
     players = blob.get("state", {}).get("players", [])
     for idx, seat in enumerate(lobby.seats):
@@ -373,6 +449,12 @@ async def lobby_claim_seat(idx: int, body: dict = Body(...)):
             raise HTTPException(status_code=400, detail="Already have a seat")
 
     seat = lobby.seats[idx]
+    if lobby.phase == "started":
+        if seat.state == "ai":
+            raise HTTPException(status_code=400, detail="Cannot claim an AI seat")
+        if seat.player_id is not None and seat.player_id != player_id:
+            raise HTTPException(status_code=409, detail="Seat is already claimed")
+
     seat.state = "human"
     seat.player_id = player_id
     seat.player_name = player_name
@@ -540,6 +622,85 @@ async def game_action(body: dict = Body(...)):
 
     await broadcast_lobby()
     return serialize_lobby(lobby).get("snapshot")
+
+
+@app.post("/debug/state/dump")
+async def debug_state_dump(body: dict = Body(...)):
+    player_id: str = body.get("player_id", "")
+    _require_debug_host(player_id)
+    return {"game_blob": lobby.game_blob}
+
+
+@app.post("/debug/state/load")
+async def debug_state_load(body: dict = Body(...)):
+    player_id: str = body.get("player_id", "")
+    _require_debug_host(player_id)
+
+    game_blob = body.get("game_blob")
+    _validate_debug_game_blob(game_blob, expected_players=lobby.num_players)
+
+    lobby.game_blob = game_blob
+    lobby.snapshot = _snapshot_from_game_blob(game_blob)
+    for idx, seat in enumerate(lobby.seats):
+        seat.species = _seat_species(game_blob, idx)
+    _autoplay_ai()
+
+    await broadcast_lobby()
+    return serialize_lobby(lobby).get("snapshot")
+
+
+@app.post("/debug/state/start")
+async def debug_state_start(body: dict = Body(...)):
+    player_id: str = body.get("player_id", "")
+    player_name: str = body.get("player_name") or "Player"
+
+    if lobby.phase != "waiting":
+        raise HTTPException(status_code=400, detail="Can only start from state before setup")
+    if lobby.host_player_id is not None and player_id != lobby.host_player_id:
+        raise HTTPException(status_code=403, detail="Only host can start from debug state")
+
+    game_blob = body.get("game_blob")
+    players = _validate_debug_game_blob(game_blob)
+    host_seat_idx = next(
+        (idx for idx in range(players) if not _core_player_is_ai(game_blob, idx)),
+        0,
+    )
+
+    seats: list[Seat] = []
+    for idx in range(players):
+        is_ai = _core_player_is_ai(game_blob, idx)
+        seat = Seat(
+            state="ai" if is_ai else "human",
+            species=_seat_species(game_blob, idx),
+        )
+        if idx == host_seat_idx:
+            seat.state = "human"
+            seat.player_id = player_id
+            seat.player_name = player_name
+            seat.last_player_id = player_id
+        seats.append(seat)
+
+    lobby.host_player_id = player_id
+    lobby.num_players = players
+    lobby.seats = seats
+    lobby.difficulty = game_blob["state"].get("gcds_difficulty", lobby.difficulty)
+    lobby.rng_seed = int(game_blob["setup_config"].get("rng_seed", lobby.rng_seed))
+    lobby.phase = "started"
+    lobby.stage1_snapshot = None
+    lobby.snapshot = _snapshot_from_game_blob(game_blob)
+    lobby.game_blob = game_blob
+    lobby.picker_order = []
+    lobby.current_picker_idx = 0
+
+    _autoplay_ai()
+
+    await broadcast_lobby()
+    serialized = serialize_lobby(lobby)
+    return {
+        "lobby": serialized,
+        "snapshot": serialized.get("snapshot"),
+        "seat": host_seat_idx,
+    }
 
 
 @app.post("/lobby/reset")

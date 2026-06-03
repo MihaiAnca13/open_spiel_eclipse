@@ -390,6 +390,54 @@
   border: 1px solid #1e293b;
 }
 
+.debug-state-panel {
+  gap: 12px;
+}
+
+.debug-state-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.debug-state-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.debug-state-textarea {
+  width: 100%;
+  min-height: 180px;
+  resize: vertical;
+  box-sizing: border-box;
+  background-color: #0f1015;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  color: #38bdf8;
+  font-family: monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  padding: 12px;
+  outline: none;
+}
+
+.debug-state-textarea:focus {
+  border-color: #a855f7;
+}
+
+@media (max-width: 720px) {
+  .debug-state-header {
+    flex-direction: column;
+  }
+
+  .debug-state-actions {
+    justify-content: flex-start;
+  }
+}
+
 .turn-order-bar {
   display: flex;
   gap: 8px;

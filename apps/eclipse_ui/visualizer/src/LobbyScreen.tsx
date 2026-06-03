@@ -10,7 +10,7 @@ interface Props {
   speciesList: string[];
   techCatalog: TechCatalog;
   difficulties: string[];
-  onStart: (snapshot: SetupSnapshot, mySeatIdx: number, playerNames: (string | null)[]) => void;
+  onStart: (snapshot: SetupSnapshot, mySeatIdx: number, playerNames: (string | null)[], isHost: boolean) => void;
 }
 
 function getOrCreatePlayerId(): string {
@@ -43,6 +43,7 @@ export default function LobbyScreen({ speciesList, techCatalog, difficulties, on
   const [lobby, setLobby] = useState<LobbyData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [debugStartText, setDebugStartText] = useState('');
   const wsRef = useRef<WebSocket | null>(null);
   const startedRef = useRef(false);
   const nameSyncedRef = useRef(false);
@@ -69,9 +70,19 @@ export default function LobbyScreen({ speciesList, techCatalog, difficulties, on
           setJoined(false);
           wsRef.current?.close();
         }
-        if (newLobby.phase === 'started' && newLobby.snapshot && !startedRef.current) {
+        if (
+          newLobby.phase === 'started' &&
+          newLobby.snapshot &&
+          mySeatIdxRef.current >= 0 &&
+          !startedRef.current
+        ) {
           startedRef.current = true;
-          onStart(newLobby.snapshot as SetupSnapshot, mySeatIdxRef.current, playerNamesRef.current);
+          onStart(
+            newLobby.snapshot as SetupSnapshot,
+            mySeatIdxRef.current,
+            playerNamesRef.current,
+            newLobby.host_player_id === playerId
+          );
         }
       }
     };
@@ -136,6 +147,40 @@ export default function LobbyScreen({ speciesList, techCatalog, difficulties, on
     } catch (e: any) { setError(e.message); }
   }
 
+  async function handleStartFromDebugState() {
+    const name = playerName.trim();
+    if (!name) { setError('Enter a name first'); return; }
+    if (!debugStartText.trim()) { setError('Paste a dumped game state first'); return; }
+
+    setBusy(true); setError(null);
+    try {
+      const gameBlob = JSON.parse(debugStartText);
+      localStorage.setItem('eclipse_player_name', name);
+      const res = await post('/debug/state/start', {
+        player_id: playerId,
+        player_name: name,
+        game_blob: gameBlob,
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail ?? 'Failed to start from state');
+      }
+
+      const data = await res.json();
+      const startedLobby = data.lobby as LobbyData;
+      const playerNames = startedLobby.seats.map((s) =>
+        s.state === 'ai' ? 'AI Bot' : s.player_name
+      );
+      setJoined(true);
+      startedRef.current = true;
+      onStart(data.snapshot as SetupSnapshot, data.seat ?? 0, playerNames, true);
+    } catch (e: any) {
+      setError(e.message ?? 'Failed to start from state');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function apiCall(path: string, extra: object = {}) {
     setBusy(true); setError(null);
     try {
@@ -148,7 +193,12 @@ export default function LobbyScreen({ speciesList, techCatalog, difficulties, on
         const data = await res.json();
         if (data.snapshot && !startedRef.current) {
           startedRef.current = true;
-          onStart(data.snapshot as SetupSnapshot, mySeatIdxRef.current, playerNamesRef.current);
+          onStart(
+            data.snapshot as SetupSnapshot,
+            mySeatIdxRef.current,
+            playerNamesRef.current,
+            lobby?.host_player_id === playerId
+          );
         }
       }
     } catch (e: any) { setError(e.message); }
@@ -192,6 +242,23 @@ export default function LobbyScreen({ speciesList, techCatalog, difficulties, on
           <button className="btn-primary" onClick={handleJoin}>
             Enter Lobby
           </button>
+          <details className="flex flex-col gap-3 text-left">
+            <summary className="cursor-pointer text-xs font-semibold text-[#94a3b8]">
+              Start from dumped state
+            </summary>
+            <div className="flex flex-col gap-3 pt-3">
+              <textarea
+                className="debug-state-textarea min-h-[140px]"
+                value={debugStartText}
+                onChange={(event) => setDebugStartText(event.target.value)}
+                placeholder="Paste canonical game blob"
+                spellCheck={false}
+              />
+              <button className="btn-secondary" onClick={handleStartFromDebugState} disabled={busy}>
+                {busy ? 'Starting…' : 'Start Game From State'}
+              </button>
+            </div>
+          </details>
         </div>
       </div>
     );
@@ -208,6 +275,18 @@ export default function LobbyScreen({ speciesList, techCatalog, difficulties, on
   const mySeatIdx = lobby.seats.findIndex((s) => s.player_id === playerId);
   const isHost = lobby.host_player_id === playerId;
   const hasNoSeat = mySeatIdx === -1;
+
+  if (lobby.phase === 'started' && hasNoSeat) {
+    return (
+      <StartedClaimScreen
+        lobby={lobby}
+        playerId={playerId}
+        busy={busy}
+        error={error}
+        onClaimSeat={handleClaimSeat}
+      />
+    );
+  }
 
   if (lobby.phase === 'setup') {
     return (
@@ -309,6 +388,76 @@ export default function LobbyScreen({ speciesList, techCatalog, difficulties, on
         ) : (
           <p className="text-center text-xs text-[#64748b] py-1">Waiting for host to initialize the game…</p>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Started game seat claim ────────────────────────────────────────────────
+
+interface StartedClaimScreenProps {
+  lobby: LobbyData;
+  playerId: string;
+  busy: boolean;
+  error: string | null;
+  onClaimSeat: (idx: number) => void;
+}
+
+function StartedClaimScreen({ lobby, playerId, busy, error, onClaimSeat }: StartedClaimScreenProps) {
+  const claimedSeatIdx = lobby.seats.findIndex((seat) => seat.player_id === playerId);
+
+  return (
+    <div className="min-h-screen bg-[#0f1015] flex justify-center py-10 px-4">
+      <div className="w-full max-w-[560px] min-w-[340px] flex flex-col gap-4">
+        <div>
+          <h1 className="text-lg font-bold text-[#f1f5f9]">Eclipse — Claim Seat</h1>
+          <p className="text-xs text-[#64748b] mt-0.5">
+            This game was started from a saved state. Pick your player seat to join.
+          </p>
+        </div>
+
+        {error && <p className="text-sm text-[#f87171] bg-[#7f1d1d]/30 border border-[#f87171]/30 rounded-lg px-3 py-2">{error}</p>}
+
+        <div className="bg-[#1a1c23] border border-[#2d313f] rounded-xl overflow-hidden">
+          <div className="px-4 py-3 border-b border-[#2d313f] flex items-center justify-between">
+            <h3 className="text-xs font-semibold text-[#64748b] uppercase tracking-wider">Seats</h3>
+            {claimedSeatIdx >= 0 && <span className="text-xs text-[#60a5fa]">Seat {claimedSeatIdx + 1} claimed</span>}
+          </div>
+          <div className="divide-y divide-[#2d313f]">
+            {lobby.seats.map((seat, idx) => {
+              const isUnclaimedHuman = seat.state === 'human' && !seat.player_id;
+              const isClaimed = seat.player_id === playerId;
+              const name = seat.state === 'ai'
+                ? 'AI Bot'
+                : seat.player_name || (isUnclaimedHuman ? 'Unclaimed player' : 'Human player');
+              const species = seat.species || 'Unknown species';
+              return (
+                <button
+                  key={idx}
+                  type="button"
+                  disabled={busy || !isUnclaimedHuman}
+                  onClick={() => onClaimSeat(idx)}
+                  className={[
+                    'w-full flex items-center gap-3 px-4 py-3 text-left transition-colors',
+                    isUnclaimedHuman ? 'hover:bg-[#1e3a5f]/20 cursor-pointer' : 'cursor-default opacity-70',
+                    isClaimed ? 'bg-[#1e3a5f]/30' : '',
+                  ].filter(Boolean).join(' ')}
+                >
+                  <span className="text-xs text-[#475569] font-mono w-4 flex-shrink-0">{idx + 1}</span>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-[#f1f5f9]">{name}</span>
+                      {isUnclaimedHuman && <span className="text-[10px] text-[#3b82f6] font-semibold">claim</span>}
+                      {seat.state === 'ai' && <span className="text-[10px] text-[#64748b] font-medium">AI</span>}
+                      {isClaimed && <span className="text-[10px] text-[#60a5fa] font-semibold">YOU</span>}
+                    </div>
+                    <p className="text-xs text-[#475569] mt-0.5">{species}</p>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
       </div>
     </div>
   );

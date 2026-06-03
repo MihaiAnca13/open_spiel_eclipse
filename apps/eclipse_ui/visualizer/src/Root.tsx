@@ -5,7 +5,7 @@ import LobbyScreen from './LobbyScreen';
 
 type View =
   | { screen: 'lobby' }
-  | { screen: 'game'; snapshot: SetupSnapshot; mySeatIdx: number; playerNames: (string | null)[] };
+  | { screen: 'game'; snapshot: SetupSnapshot; mySeatIdx: number; playerNames: (string | null)[]; isHost: boolean };
 
 export default function Root({ initialMetadata }: { initialMetadata: any }) {
   const [view, setView] = useState<View>({ screen: 'lobby' });
@@ -17,6 +17,7 @@ export default function Root({ initialMetadata }: { initialMetadata: any }) {
         initialSnapshot={view.snapshot}
         mySeatIdx={view.mySeatIdx}
         playerNames={view.playerNames}
+        isHost={view.isHost}
       />
     );
   }
@@ -26,8 +27,8 @@ export default function Root({ initialMetadata }: { initialMetadata: any }) {
       speciesList={initialMetadata.species ?? []}
       techCatalog={initialMetadata.tech_catalog ?? {}}
       difficulties={initialMetadata.npc_difficulties ?? ['Easy', 'Medium', 'Hard']}
-      onStart={(snapshot, mySeatIdx, playerNames) =>
-        setView({ screen: 'game', snapshot, mySeatIdx, playerNames })}
+      onStart={(snapshot, mySeatIdx, playerNames, isHost) =>
+        setView({ screen: 'game', snapshot, mySeatIdx, playerNames, isHost })}
     />
   );
 }

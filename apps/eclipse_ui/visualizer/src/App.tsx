@@ -182,7 +182,19 @@ function InfluenceTrack({ onSectors, onActions }: { onSectors: number; onActions
   );
 }
 
-function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [] }: { initialMetadata: any; initialSnapshot?: SetupSnapshot; mySeatIdx?: number; playerNames?: (string | null)[] }) {
+function App({
+  initialMetadata,
+  initialSnapshot,
+  mySeatIdx = -1,
+  playerNames = [],
+  isHost = false,
+}: {
+  initialMetadata: any;
+  initialSnapshot?: SetupSnapshot;
+  mySeatIdx?: number;
+  playerNames?: (string | null)[];
+  isHost?: boolean;
+}) {
   const playerLabel = (pid: number) => playerNames[pid] || `Player ${pid + 1}`;
   const [rngSeed, setRngSeed] = useState<number>(initialSnapshot?.config.rng_seed ?? 42);
   const [numPlayers, setNumPlayers] = useState<number>(initialSnapshot?.config.players ?? 4);
@@ -195,6 +207,8 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
   const [actionInProgress, setActionInProgress] = useState<boolean>(false);
   const [previewRotation, setPreviewRotation] = useState<number | null>(null);
   const [hoveredSector, setHoveredSector] = useState<Sector | null>(null);
+  const [debugStateText, setDebugStateText] = useState<string>('');
+  const [debugBusy, setDebugBusy] = useState<boolean>(false);
   // sector_id -> image URL (real tile art painted inside each hex).
   const [sectorImages, setSectorImages] = useState<Record<number, string>>({});
   const [brokenImages, setBrokenImages] = useState<Set<number>>(new Set());
@@ -414,6 +428,59 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
       setError(err.message || 'Action failed');
     } finally {
       setActionInProgress(false);
+    }
+  };
+
+  const getPlayerId = () => sessionStorage.getItem('eclipse_player_id') ?? '';
+
+  const dumpDebugState = async () => {
+    if (debugBusy) return;
+    setDebugBusy(true);
+    setError(null);
+    try {
+      const response = await fetch(`${API_BASE}/debug/state/dump`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ player_id: getPlayerId() }),
+      });
+      if (!response.ok) {
+        const detail = await response.json().catch(() => null);
+        throw new Error(detail?.detail || `Dump failed (${response.status})`);
+      }
+      const data = await response.json();
+      setDebugStateText(JSON.stringify(data.game_blob, null, 2));
+    } catch (err: any) {
+      setError(err.message || 'Dump failed');
+    } finally {
+      setDebugBusy(false);
+    }
+  };
+
+  const loadDebugState = async () => {
+    if (debugBusy) return;
+    setDebugBusy(true);
+    setError(null);
+    try {
+      if (!debugStateText.trim()) {
+        throw new Error('Paste a dumped game state first');
+      }
+      const gameBlob = JSON.parse(debugStateText);
+      const response = await fetch(`${API_BASE}/debug/state/load`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ player_id: getPlayerId(), game_blob: gameBlob }),
+      });
+      if (!response.ok) {
+        const detail = await response.json().catch(() => null);
+        throw new Error(detail?.detail || `Load failed (${response.status})`);
+      }
+      const updated = await response.json();
+      if (updated) setSnapshot(updated as SetupSnapshot);
+      setDebugStateText(JSON.stringify(gameBlob, null, 2));
+    } catch (err: any) {
+      setError(err.message || 'Load failed');
+    } finally {
+      setDebugBusy(false);
     }
   };
 
@@ -1076,6 +1143,32 @@ function App({ initialMetadata, initialSnapshot, mySeatIdx = -1, playerNames = [
                   );
                 })}
               </div>
+            </div>
+          )}
+
+          {isStarted && isHost && (
+            <div className="panel debug-state-panel">
+              <div className="debug-state-header">
+                <div>
+                  <h3 className="panel-title">Debug State</h3>
+                  <span className="text-xs text-[#94a3b8]">Canonical backend game blob</span>
+                </div>
+                <div className="debug-state-actions">
+                  <button className="btn-secondary" onClick={dumpDebugState} disabled={debugBusy}>
+                    Dump State
+                  </button>
+                  <button className="btn-primary" onClick={loadDebugState} disabled={debugBusy}>
+                    Load State
+                  </button>
+                </div>
+              </div>
+              <textarea
+                className="debug-state-textarea"
+                value={debugStateText}
+                onChange={(event) => setDebugStateText(event.target.value)}
+                placeholder="Dump or paste a canonical game blob"
+                spellCheck={false}
+              />
             </div>
           )}
 
