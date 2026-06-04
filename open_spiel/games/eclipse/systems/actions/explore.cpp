@@ -346,7 +346,7 @@ void apply_explore_draw(State& state, uint8_t ring_bit) {
         es.phase = ExplorePhase::select_drawn_tile;
         return;
     }
-    // Exactly one tile flipped. Draco may flip a second if the bag still has one.
+    // Exactly one tile flipped. Draco may draw a second if the bag still has one.
     if (is_draco(state, es.player_id) && ring_bag_value(state, es.ring) != 0) {
         es.phase = ExplorePhase::draw_again_decision;
     } else {
@@ -358,7 +358,7 @@ void apply_explore_draw(State& state, uint8_t ring_bit) {
 bool draw_again(State& state, uint8_t player_id) {
     ExploreState& es = state.explore_state;
     if (es.phase != ExplorePhase::draw_again_decision) return false;
-    es.phase = ExplorePhase::draw_tile;  // arms another chance draw
+    es.phase = ExplorePhase::draw_tile;
     return true;
 }
 

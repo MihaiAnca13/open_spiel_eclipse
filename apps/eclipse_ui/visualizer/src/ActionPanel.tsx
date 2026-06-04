@@ -28,6 +28,9 @@ interface Props {
   currentPlayerLabel: string;
   ancientsOnSelected: boolean;
   previewRotation: number | null;
+  sectorImages: Record<number, string>;
+  onPreviewDrawnTile: (sectorId: number, index: number) => void;
+  onClearPreviewDrawnTile: () => void;
   onConfirmPreviewRotation: () => void;
   onAction: (actionId: number) => void;
 }
@@ -41,6 +44,9 @@ export default function ActionPanel({
   currentPlayerLabel,
   ancientsOnSelected,
   previewRotation,
+  sectorImages,
+  onPreviewDrawnTile,
+  onClearPreviewDrawnTile,
   onConfirmPreviewRotation,
   onAction,
 }: Props) {
@@ -184,17 +190,72 @@ export default function ActionPanel({
 
       {phase === 'select_drawn_tile' && (
         <>
-          <span className="text-xs text-[#94a3b8]">Keep one of the drawn tiles.</span>
-          <div className="action-row">
-            {renderActionButton(ACTION.EXPLORE_SELECT_TILE_START, `Keep #${explore?.drawn_sector_ids?.[0] ?? 0}`)}
-            {renderActionButton(ACTION.EXPLORE_SELECT_TILE_START + 1, `Keep #${explore?.drawn_sector_ids?.[1] ?? 0}`)}
+          <span className="text-xs text-[#94a3b8]">Choose one of the two drawn tiles to keep.</span>
+          <div className="drawn-tiles-grid">
+            {explore?.drawn_sector_ids?.filter(id => id > 0).map((sectorId, idx) => {
+              const imgUrl = sectorImages[sectorId];
+              return (
+                <div
+                  key={idx}
+                  className={`drawn-tile-card ${legal.has(ACTION.EXPLORE_SELECT_TILE_START + idx) ? 'clickable' : 'disabled'}`}
+                  onClick={() => {
+                    if (legal.has(ACTION.EXPLORE_SELECT_TILE_START + idx)) {
+                      onAction(ACTION.EXPLORE_SELECT_TILE_START + idx);
+                      onClearPreviewDrawnTile();
+                    }
+                  }}
+                  onMouseEnter={() => onPreviewDrawnTile(sectorId, idx)}
+                  onMouseLeave={onClearPreviewDrawnTile}
+                >
+                  <div className="drawn-tile-card-thumb">
+                    {imgUrl ? (
+                      <img src={imgUrl} alt={`Sector ${sectorId}`} className="drawn-tile-card-img" />
+                    ) : (
+                      <div className="drawn-tile-card-placeholder">
+                        <span className="text-2xl">🌌</span>
+                      </div>
+                    )}
+                    <div className="drawn-tile-card-badge">Tile {idx + 1}</div>
+                  </div>
+                  <div className="drawn-tile-card-info">
+                    <span className="drawn-tile-card-id">Sector {sectorId}</span>
+                    <span className="text-xs text-[#64748b]">{legal.has(ACTION.EXPLORE_SELECT_TILE_START + idx) ? 'Click to keep' : 'Unavailable'}</span>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </>
       )}
 
       {phase === 'draw_again_decision' && (
         <>
-          <span className="text-xs text-[#94a3b8]">Draw a second tile or proceed with this one?</span>
+          {(() => {
+            const firstSectorId = explore?.drawn_sector_ids?.[0] ?? 0;
+            const imgUrl = firstSectorId > 0 ? sectorImages[firstSectorId] : null;
+            return (
+              <div
+                className="drawn-tile-card-draw-again"
+                onMouseEnter={() => firstSectorId > 0 && onPreviewDrawnTile(firstSectorId, 0)}
+                onMouseLeave={onClearPreviewDrawnTile}
+              >
+                <div className="drawn-tile-card-draw-again-thumb">
+                  {imgUrl ? (
+                    <img src={imgUrl} alt={`Sector ${firstSectorId}`} className="drawn-tile-card-draw-again-img" />
+                  ) : (
+                    <div className="drawn-tile-card-draw-again-placeholder">
+                      <span className="text-4xl">🌌</span>
+                    </div>
+                  )}
+                  <div className="drawn-tile-card-draw-again-badge">Your Tile</div>
+                </div>
+                <div className="drawn-tile-card-draw-again-info">
+                  <span className="drawn-tile-card-draw-again-id">Sector {firstSectorId}</span>
+                  <span className="text-xs text-[#64748b]">Draw again for a second tile or proceed with this one.</span>
+                </div>
+              </div>
+            );
+          })()}
           <div className="action-row">
             {renderActionButton(ACTION.EXPLORE_DRAW_AGAIN, 'Draw again')}
             {renderActionButton(ACTION.EXPLORE_SKIP_SECOND, 'Proceed', 'secondary')}

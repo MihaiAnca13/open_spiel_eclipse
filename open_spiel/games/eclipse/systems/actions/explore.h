@@ -20,7 +20,7 @@ enum class ExplorePhase : uint8_t {
     inactive = 0,
     choose_zone,         // player picks an adjacent unexplored hex (zone), or stops
     draw_tile,           // chance node: flip a tile from the zone's ring bag
-    draw_again_decision, // Descendants of Draco only: flip a second tile, or not
+    draw_again_decision, // Draco may stop after the first tile or draw a second
     select_drawn_tile,   // Descendants of Draco only: keep one of two drawn tiles
     place_or_discard,    // player keeps or discards the (selected) tile
     choose_rotation,     // player picks a rotation that forms a wormhole connection
@@ -113,11 +113,11 @@ bool choose_explore_zone(::State& state, uint8_t player_id, ::HexCoord zone);
 void stop_exploring(::State& state);
 
 // Resolve a single chance draw: record the drawn tile, remove it from the bag,
-// and advance the phase (Draco branches to draw_again_decision after one tile).
+// and advance the phase (Draco may decide whether to draw a second tile).
 void apply_explore_draw(::State& state, uint8_t ring_bit);
 
-// Descendants of Draco, after the first tile: flip a second tile (draw_again) or
-// proceed with just the one (skip_second_draw).
+// Descendants of Draco, after the first tile: flip a second tile (draw_again)
+// or proceed with just the one (skip_second_draw).
 bool draw_again(::State& state, uint8_t player_id);
 bool skip_second_draw(::State& state, uint8_t player_id);
 

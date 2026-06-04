@@ -199,6 +199,7 @@ function InfluenceTrack({ onSectors, onActions }: { onSectors: number; onActions
 // Production table: index = cubes remaining on track (12=full=0 prod, 0=empty=28 prod)
 const POPULATION_PRODUCTION_TABLE = [28, 24, 21, 18, 15, 12, 10, 8, 6, 4, 3, 2, 0] as const;
 const POP_TRACK_MAX = 12;
+const POP_TRACK_STEPS = POP_TRACK_MAX - 1;
 
 // Three population tracks arranged as arcs in a circle (like the control board).
 // cubesOnTrack[n] = cubes remaining on track n (12=full, 0=empty).
@@ -230,7 +231,7 @@ function PopulationTracks({ resources, playerColor }: { resources: Resources; pl
 
           // Place 12 dots along the arc
           const dots = Array.from({ length: POP_TRACK_MAX }, (_, i) => {
-            const frac = POP_TRACK_MAX === 1 ? 0.5 : i / (POP_TRACK_MAX - 1);
+            const frac = i / POP_TRACK_STEPS;
             const deg  = startDeg + frac * ARC_SPAN;
             const rad  = (deg * Math.PI) / 180;
             const x    = CX + OUTER_R * Math.cos(rad);
@@ -303,7 +304,6 @@ function ColonyShips({
   onPlace: (actionId: number) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const used = total - available;
 
   if (total === 0) return null;
 
@@ -352,32 +352,111 @@ function TradePanel({
   tradeRate,
   legalTradeActions,
   onTrade,
+  resources,
 }: {
   tradeRate: number;
   legalTradeActions: number[];
   onTrade: (actionId: number) => void;
+  resources: Resources;
 }) {
-  if (legalTradeActions.length === 0) return null;
+  const [open, setOpen] = useState(false);
+  const allConversions = Array.from({ length: 6 }, (_, i) => i);
+
+  const canAfford = (conv: number): boolean => {
+    switch (conv) {
+      case 0: case 1: return resources.gold >= tradeRate;
+      case 2: case 3: return resources.science >= tradeRate;
+      case 4: case 5: return resources.materials >= tradeRate;
+      default: return false;
+    }
+  };
+
+  const handleTrade = (conv: number) => {
+    if (!canAfford(conv)) return;
+    onTrade(ACTION.TRADE_START + conv);
+  };
+
+  const handleOverlayKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      setOpen(false);
+    }
+  };
+
   return (
-    <div className="trade-panel">
-      <span className="trade-label">Trade (×{tradeRate})</span>
-      <div className="trade-buttons">
-        {legalTradeActions.map(actionId => {
-          const conv = actionId - ACTION.TRADE_START;
-          const info = TRADE_LABELS[conv];
-          return info ? (
-            <button
-              key={actionId}
-              className="trade-btn"
-              onClick={() => onTrade(actionId)}
-              title={`Pay ${tradeRate} ${info.from} → 1 ${info.to}`}
-            >
-              {info.emoji}
-            </button>
-          ) : null;
-        })}
+    <>
+      <div className="trade-panel">
+        <span className="trade-label">Trade (×{tradeRate})</span>
+        <button
+          className="trade-btn"
+          onClick={() => setOpen(!open)}
+          title={open ? 'Close trade modal' : 'Open trade modal'}
+          aria-label={open ? 'Close trade modal' : 'Open trade modal'}
+        >
+          ⇄
+        </button>
       </div>
-    </div>
+
+      {open && (
+        <div
+          className="trade-modal-overlay"
+          onClick={() => setOpen(false)}
+          onKeyDown={handleOverlayKeyDown}
+          role="dialog"
+          aria-label="Trade resources"
+        >
+          <div className="trade-modal" onClick={e => e.stopPropagation()}>
+            <div className="trade-modal-header">
+              <span>Trade (×{tradeRate})</span>
+              <button
+                className="trade-modal-close"
+                onClick={() => setOpen(false)}
+                aria-label="Close trade modal"
+              >✕</button>
+            </div>
+            <div className="trade-modal-body">
+              {allConversions.map(conv => {
+                const info = TRADE_LABELS[conv];
+                if (!info) return null;
+                const affordable = canAfford(conv);
+                const isLegal = legalTradeActions.includes(ACTION.TRADE_START + conv);
+                const unavailable = !isLegal || !affordable;
+                return (
+                  <button
+                    key={conv}
+                    className={`trade-modal-option ${unavailable ? 'trade-modal-disabled' : ''}`}
+                    onClick={() => handleTrade(conv)}
+                    disabled={unavailable}
+                    title={isLegal
+                      ? affordable
+                        ? `Pay ${tradeRate} ${info.from} → 1 ${info.to}`
+                        : `Need ${tradeRate} ${info.from} (have ${
+                            conv === 0 || conv === 1 ? resources.gold
+                            : conv === 2 || conv === 3 ? resources.science
+                            : resources.materials
+                          })`
+                      : 'Not available this turn'
+                    }
+                  >
+                    <span className="trade-modal-emoji">{info.emoji}</span>
+                    <div className="trade-modal-info">
+                      <span className="trade-modal-from">{info.from}</span>
+                      <span className="trade-modal-arrow">→</span>
+                      <span className="trade-modal-to">{info.to}</span>
+                    </div>
+                    <span className="trade-modal-cost">
+                      {isLegal
+                        ? affordable ? `−${tradeRate}` : `Need ${tradeRate}`
+                        : '—'}
+                      {info.from}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -405,6 +484,8 @@ function App({
   const [jsonExpanded, setJsonExpanded] = useState<boolean>(false);
   const [actionInProgress, setActionInProgress] = useState<boolean>(false);
   const [previewRotation, setPreviewRotation] = useState<number | null>(null);
+  const [previewingDrawnTile, setPreviewingDrawnTile] = useState<number | null>(null);
+  const [previewingDrawnTileIndex, setPreviewingDrawnTileIndex] = useState<number | null>(null);
   const [hoveredSector, setHoveredSector] = useState<Sector | null>(null);
   const [debugStateText, setDebugStateText] = useState<string>('');
   const [debugBusy, setDebugBusy] = useState<boolean>(false);
@@ -844,9 +925,29 @@ function App({
         }
       : null;
 
+  // Floating preview for drawn tiles during select_drawn_tile phase.
+  const inSelectDrawnTile = isMyTurn && explorePhase === 'select_drawn_tile';
+  const drawnTilePreviewZone = inSelectDrawnTile && exploreState && previewingDrawnTile !== null && previewingDrawnTileIndex !== null
+    ? {
+        q: exploreState.zone_q,
+        r: exploreState.zone_r,
+        ...axialToPixel(exploreState.zone_q, exploreState.zone_r),
+        previewSectorId: previewingDrawnTile,
+        previewTileIndex: previewingDrawnTileIndex,
+      }
+    : null;
+
+  // Clear drawn tile preview state when it's no longer the select_drawn_tile phase.
+  useEffect(() => {
+    if (!inSelectDrawnTile) {
+      setPreviewingDrawnTile(null);
+      setPreviewingDrawnTileIndex(null);
+    }
+  }, [inSelectDrawnTile]);
+
   // Auto-fit the SVG viewBox to the populated region (sectors + explore zones)
   // so the board fills the panel and zooms in as the galaxy grows.
-  const fitCells = previewZone ? [...activeSectors, ...legalZones, previewZone] : [...activeSectors, ...legalZones];
+  const fitCells = previewZone ? [...activeSectors, ...legalZones, previewZone] : drawnTilePreviewZone ? [...activeSectors, ...legalZones, drawnTilePreviewZone] : [...activeSectors, ...legalZones];
   const viewBox = (() => {
     if (fitCells.length === 0) return '0 0 600 520';
     const xs = fitCells.map((c) => c.cx);
@@ -1035,6 +1136,15 @@ function App({
                 currentPlayerLabel={currentPlayerLabel}
                 ancientsOnSelected={ancientsOnSelected}
                 previewRotation={currentPreviewRotation}
+                sectorImages={sectorImages}
+                onPreviewDrawnTile={(id, idx) => {
+                  setPreviewingDrawnTile(id);
+                  setPreviewingDrawnTileIndex(idx);
+                }}
+                onClearPreviewDrawnTile={() => {
+                  setPreviewingDrawnTile(null);
+                  setPreviewingDrawnTileIndex(null);
+                }}
                 onConfirmPreviewRotation={confirmPreviewRotation}
                 onAction={submitAction}
               />
@@ -1087,6 +1197,7 @@ function App({
                                 tradeRate={p.trade_rate}
                                 legalTradeActions={legalTradeActions}
                                 onTrade={submitAction}
+                                resources={p.resources}
                               />
                             </>
                           ) : (
@@ -1391,6 +1502,61 @@ function App({
                         <circle cx={rightControlX} cy={previewZone.cy} r="14" />
                         <text x={rightControlX} y={previewZone.cy + 5} textAnchor="middle">&gt;</text>
                       </g>
+                    </g>
+                  );
+                })()}
+
+                {drawnTilePreviewZone && (() => {
+                  const sectorId = drawnTilePreviewZone.previewSectorId!;
+                  const tileIndex = drawnTilePreviewZone.previewTileIndex!;
+                  const imgUrl = sectorImageUrl(sectorId);
+                  const r = hexSize - 1.5;
+                  const imgSize = 2 * r;
+                  const clipId = `drawn-preview-clip-${sectorId}-${tileIndex}-${drawnTilePreviewZone.q}-${drawnTilePreviewZone.r}`;
+
+                  return (
+                    <g className="drawn-tile-preview">
+                      {imgUrl && (
+                        <>
+                          <clipPath id={clipId}>
+                            <polygon points={getHexPoints(drawnTilePreviewZone.cx, drawnTilePreviewZone.cy, r)} />
+                          </clipPath>
+                          <g clipPath={`url(#${clipId})`}>
+                            <image
+                              href={imgUrl}
+                              x={drawnTilePreviewZone.cx - imgSize / 2}
+                              y={drawnTilePreviewZone.cy - imgSize / 2}
+                              width={imgSize}
+                              height={imgSize}
+                              preserveAspectRatio="xMidYMid slice"
+                              style={{ pointerEvents: 'none' }}
+                            />
+                          </g>
+                        </>
+                      )}
+
+                      <polygon
+                        points={getHexPoints(drawnTilePreviewZone.cx, drawnTilePreviewZone.cy, r)}
+                        fill={imgUrl ? 'none' : UNOWNED_COLOR}
+                        fillOpacity={imgUrl ? 0 : 0.75}
+                        className="drawn-tile-preview-hex"
+                      />
+                      <text
+                        x={drawnTilePreviewZone.cx}
+                        y={drawnTilePreviewZone.cy - 6}
+                        textAnchor="middle"
+                        className="drawn-tile-preview-id"
+                      >
+                        {sectorId}
+                      </text>
+                      <text
+                        x={drawnTilePreviewZone.cx}
+                        y={drawnTilePreviewZone.cy + 9}
+                        textAnchor="middle"
+                        className="drawn-tile-preview-label"
+                      >
+                        Tile {tileIndex + 1}
+                      </text>
                     </g>
                   );
                 })()}

@@ -337,7 +337,7 @@ void ExploreStopAndDracoDrawTest() {
     SPIEL_CHECK_TRUE(s.explore_state.phase == ExplorePhase::inactive);
   }
 
-  // Draco draws one tile, is offered a second, and may proceed with just one.
+  // Draco draws one tile, may stop there, or draw a second and choose one.
   {
     ::State s = MakeSinglePlayerState(Species::DESCENDANTS_OF_DRACO);
     s.sector_bag_outer = 0b11;  // two outer tiles available (bits 0 and 1)
@@ -350,6 +350,26 @@ void ExploreStopAndDracoDrawTest() {
     SPIEL_CHECK_TRUE(s.explore_state.phase == ExplorePhase::draw_again_decision);
 
     SPIEL_CHECK_TRUE(skip_second_draw(s, 0));
+    SPIEL_CHECK_TRUE(s.explore_state.phase == ExplorePhase::place_or_discard);
+    SPIEL_CHECK_EQ(s.explore_state.selected_sector_id, 301);
+  }
+
+  {
+    ::State s = MakeSinglePlayerState(Species::DESCENDANTS_OF_DRACO);
+    s.sector_bag_outer = 0b11;  // two outer tiles available (bits 0 and 1)
+    s.explore_state.player_id = 0;
+    s.explore_state.ring = SectorType::OUTER;
+    s.explore_state.phase = ExplorePhase::draw_tile;
+
+    apply_explore_draw(s, /*ring_bit=*/0);  // flips outer bit 0 -> sector 301
+    SPIEL_CHECK_TRUE(s.explore_state.phase == ExplorePhase::draw_again_decision);
+    SPIEL_CHECK_TRUE(draw_again(s, 0));
+    SPIEL_CHECK_TRUE(s.explore_state.phase == ExplorePhase::draw_tile);
+
+    apply_explore_draw(s, /*ring_bit=*/1);  // flips outer bit 1 -> sector 302
+    SPIEL_CHECK_EQ(s.explore_state.drawn_count, 2);
+    SPIEL_CHECK_TRUE(s.explore_state.phase == ExplorePhase::select_drawn_tile);
+    SPIEL_CHECK_TRUE(select_drawn_tile(s, 0, 0));
     SPIEL_CHECK_TRUE(s.explore_state.phase == ExplorePhase::place_or_discard);
     SPIEL_CHECK_EQ(s.explore_state.selected_sector_id, 301);
   }
