@@ -234,6 +234,25 @@
   background-color: #11131a;
 }
 
+.tech-card.researchable {
+  cursor: pointer;
+  border-color: #fbbf24;
+  box-shadow: 0 0 0 1px #fbbf24;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.tech-card.researchable:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 0 12px rgba(251, 191, 36, 0.4);
+  background-color: #242735;
+}
+
+.tech-card.selected-research {
+  border-color: #f59e0b;
+  box-shadow: 0 0 0 2px #f59e0b, 0 0 16px rgba(245, 158, 11, 0.5);
+  background-color: #242735;
+}
+
 .tech-image {
   width: min(70px, 100%);
   aspect-ratio: 1;

@@ -19,8 +19,17 @@ export interface ExploreState {
   chosen_rotation: number;
 }
 
+export interface ResearchState {
+  phase: string;
+  player_id: number;
+  activations_remaining: number;
+}
+
 interface Props {
   explore: ExploreState | undefined;
+  research: ResearchState | undefined;
+  selectedRareTech: { name: string; order: number } | null;
+  onClearSelectedRareTech: () => void;
   legalActions: number[];
   isMyTurn: boolean;
   isTerminal: boolean;
@@ -37,6 +46,9 @@ interface Props {
 
 export default function ActionPanel({
   explore,
+  research,
+  selectedRareTech,
+  onClearSelectedRareTech,
   legalActions,
   isMyTurn,
   isTerminal,
@@ -51,7 +63,7 @@ export default function ActionPanel({
   onAction,
 }: Props) {
   const legal = new Set(legalActions);
-  const phase = explore?.phase ?? 'inactive';
+  const phase = research?.phase === 'choose_tech' ? 'choose_tech' : (explore?.phase ?? 'inactive');
 
   const renderActionButton = (id: number, label: string, kind: 'primary' | 'secondary' | 'danger' = 'primary') =>
     legal.has(id) ? (
@@ -97,10 +109,10 @@ export default function ActionPanel({
           </span>
           <div className="action-row">
             {renderActionButton(ACTION.EXPLORE, '🔭 Explore')}
-            {renderActionButton(ACTION.PASS, '✋ Pass', 'secondary')}
+            {renderActionButton(ACTION.RESEARCH, '🔬 Research')}
           </div>
           <div className="action-row">
-            <button className="action-btn secondary" disabled title="Not implemented yet">Research (soon)</button>
+            {renderActionButton(ACTION.PASS, '✋ Pass', 'secondary')}
             <button className="action-btn secondary" disabled title="Not implemented yet">Build (soon)</button>
           </div>
         </>
@@ -260,6 +272,56 @@ export default function ActionPanel({
             {renderActionButton(ACTION.EXPLORE_DRAW_AGAIN, 'Draw again')}
             {renderActionButton(ACTION.EXPLORE_SKIP_SECOND, 'Proceed', 'secondary')}
           </div>
+        </>
+      )}
+
+      {phase === 'choose_tech' && (
+        <>
+          {selectedRareTech ? (
+            <>
+              <span className="text-xs text-[#94a3b8]">
+                Choose which track to place the Rare Tech <strong>{selectedRareTech.name}</strong> on:
+              </span>
+              <div className="action-row flex-col gap-2 mt-2">
+                {(() => {
+                  const rareIdx = selectedRareTech.order - 24;
+                  return (
+                    <>
+                      {renderActionButton(
+                        ACTION.RESEARCH_RARE_START + rareIdx * 3 + 0,
+                        '⚔️ Military Track'
+                      )}
+                      {renderActionButton(
+                        ACTION.RESEARCH_RARE_START + rareIdx * 3 + 1,
+                        '🔬 Grid Track'
+                      )}
+                      {renderActionButton(
+                        ACTION.RESEARCH_RARE_START + rareIdx * 3 + 2,
+                        '⚙️ Nano Track'
+                      )}
+                    </>
+                  );
+                })()}
+                <button
+                  className="action-btn secondary mt-1"
+                  disabled={busy}
+                  onClick={onClearSelectedRareTech}
+                >
+                  Back to Tech Market
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <span className="text-xs text-[#94a3b8]">
+                Select a technology card in the market below to research.
+                {research ? ` Activations left: ${research.activations_remaining}.` : ''}
+              </span>
+              <div className="action-row mt-2">
+                {renderActionButton(ACTION.RESEARCH_STOP, 'Stop researching', 'secondary')}
+              </div>
+            </>
+          )}
         </>
       )}
     </div>

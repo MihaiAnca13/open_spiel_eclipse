@@ -8,7 +8,7 @@ import {
   NPC_COLOR_GUARDIAN,
   getPlayerColor,
 } from './theme';
-import ActionPanel, { type ExploreState } from './ActionPanel';
+import ActionPanel, {type ExploreState, type ResearchState} from './ActionPanel';
 import { ACTION, TRADE_LABELS, POP_TRACK_LABELS } from './actionTypes';
 
 import {
@@ -121,6 +121,7 @@ interface GameState {
   turn_order: number[];
   pass_order: number[];
   explore_state?: ExploreState;
+  research_state?: ResearchState;
   sector_bag_inner: number;
   sector_bag_middle: number;
   sector_bag_outer: number;
@@ -497,6 +498,7 @@ function App({
   const { preview, beginPreview, clearPreview } = useImageHoverPreview();
   const [setupFinalized, setSetupFinalized] = useState<boolean>(initialSnapshot?.finalized ?? false);
   const [playerStartingSectors, setPlayerStartingSectors] = useState<Record<number, number>>({});
+  const [selectedRareTech, setSelectedRareTech] = useState<{ name: string; order: number } | null>(null);
 
   const speciesList: string[] = gameMetadata.species ?? Object.keys(SPECIES_THEME);
   const [speciesChoices, setSpeciesChoices] = useState<Record<number, string>>(() => {
@@ -840,9 +842,11 @@ function App({
   const legalActions = snapshot?.legal_actions ?? EMPTY_LEGAL_ACTIONS;
   const exploreState = gameState?.explore_state;
   const explorePhase = exploreState?.phase ?? 'inactive';
+  const researchState = gameState?.research_state;
   const isTerminal = snapshot?.is_terminal ?? false;
   const isStarted = setupFinalized && snapshot?.current_player !== undefined;
   const isMyTurn = isStarted && snapshot?.current_player === mySeatIdx && !isTerminal;
+  const isResearchPhase = isMyTurn && researchState?.phase === 'choose_tech';
   const inZoneSelect = isMyTurn && explorePhase === 'choose_zone';
   const currentPlayerLabel =
     snapshot?.current_player !== undefined ? playerLabel(snapshot.current_player) : '';
@@ -944,6 +948,13 @@ function App({
       setPreviewingDrawnTileIndex(null);
     }
   }, [inSelectDrawnTile]);
+
+  // Clear selected rare tech when no longer in the choose_tech research phase.
+  useEffect(() => {
+    if (!isResearchPhase) {
+      setSelectedRareTech(null);
+    }
+  }, [isResearchPhase]);
 
   // Auto-fit the SVG viewBox to the populated region (sectors + explore zones)
   // so the board fills the panel and zooms in as the galaxy grows.
@@ -1129,6 +1140,9 @@ function App({
             <div className="game-hud">
               <ActionPanel
                 explore={exploreState}
+                research={researchState}
+                selectedRareTech={selectedRareTech}
+                onClearSelectedRareTech={() => setSelectedRareTech(null)}
                 legalActions={legalActions}
                 isMyTurn={isMyTurn}
                 isTerminal={isTerminal}
@@ -1636,30 +1650,57 @@ function App({
                   if (!techs.length) return null;
                   return (
                     <div key={category} className="tech-row">
-                      {techs.map(([techName, tech]) => (
-                        <div
-                          key={techName}
-                          className={`tech-card ${tech.category} ${tech.count === 0 ? 'unavailable' : ''}`}
-                          onMouseEnter={() =>
-                            beginPreview({ src: techImageUrl(techName, tech.category), label: techName })
+                      {techs.map(([techName, tech]) => {
+                        let isResearchable = false;
+                        let onTechClick: (() => void) | undefined = undefined;
+
+                        if (isResearchPhase) {
+                          if (tech.category !== 'Rare') {
+                            const actionId = ACTION.RESEARCH_STANDARD_START + (tech.order ?? 0);
+                            if (legalActions.includes(actionId)) {
+                              isResearchable = true;
+                              onTechClick = () => submitAction(actionId);
+                            }
+                          } else {
+                            const rareIdx = (tech.order ?? 0) - 24;
+                            const isAnyTrackLegal = [0, 1, 2].some((track) =>
+                              legalActions.includes(ACTION.RESEARCH_RARE_START + rareIdx * 3 + track)
+                            );
+                            if (isAnyTrackLegal) {
+                              isResearchable = true;
+                              onTechClick = () => setSelectedRareTech({ name: techName, order: tech.order ?? 0 });
+                            }
                           }
-                          onMouseLeave={clearPreview}
-                        >
-                          <img
-                            className="tech-image"
-                            src={techImageUrl(techName, tech.category)}
-                            alt=""
-                            onError={(event) => {
-                              event.currentTarget.style.display = 'none';
-                            }}
-                          />
-                          <div className="tech-name">{techName}</div>
-                          <div className="tech-meta">
-                            <span className={`tech-category-badge ${tech.category}`}>{tech.category}</span>
-                            <span className="tech-count">{tech.count}</span>
+                        }
+
+                        return (
+                          <div
+                            key={techName}
+                            className={`tech-card ${tech.category} ${tech.count === 0 ? 'unavailable' : ''} ${
+                              isResearchable ? 'researchable' : ''
+                            } ${selectedRareTech?.order === tech.order ? 'selected-research' : ''}`}
+                            onClick={onTechClick}
+                            onMouseEnter={() =>
+                              beginPreview({ src: techImageUrl(techName, tech.category), label: techName })
+                            }
+                            onMouseLeave={clearPreview}
+                          >
+                            <img
+                              className="tech-image"
+                              src={techImageUrl(techName, tech.category)}
+                              alt=""
+                              onError={(event) => {
+                                event.currentTarget.style.display = 'none';
+                              }}
+                            />
+                            <div className="tech-name">{techName}</div>
+                            <div className="tech-meta">
+                              <span className={`tech-category-badge ${tech.category}`}>{tech.category}</span>
+                              <span className="tech-count">{tech.count}</span>
+                            </div>
                           </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   );
                 })}
