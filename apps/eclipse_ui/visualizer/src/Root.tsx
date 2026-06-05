@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import App from './App';
-import type { SetupSnapshot } from './App';
+import type { SetupSnapshot } from './types/game';
 import LobbyScreen from './LobbyScreen';
 
 type View =

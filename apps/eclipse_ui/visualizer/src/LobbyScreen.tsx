@@ -4,7 +4,7 @@ import { API_BASE, WS_BASE, buildTechMarketRows, techImageUrl, TECH_CATEGORIES }
 import type { LobbyData, LobbySeat } from './types/lobby';
 import type { TechCatalog, TechMarketEntry } from './types/lobby';
 import { SPECIES_THEME } from './theme';
-import type { SetupSnapshot } from './App';
+import type { SetupSnapshot } from './types/game';
 
 interface Props {
   speciesList: string[];
