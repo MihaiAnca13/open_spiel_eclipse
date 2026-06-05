@@ -1,58 +1,23 @@
 .app-container {
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  height: 100vh;
   background-color: #0f1015;
   color: #e2e8f0;
   font-family: system-ui, -apple-system, sans-serif;
-  padding: 20px;
   box-sizing: border-box;
-}
-
-.header {
-  text-align: center;
-  margin-bottom: 24px;
-  border-bottom: 1px solid #1e293b;
-  padding-bottom: 16px;
-}
-
-.header h1 {
-  font-size: 32px;
-  color: #f8fafc;
-  margin: 0 0 8px 0;
-  text-transform: uppercase;
-  letter-spacing: 2px;
-  text-shadow: 0 0 10px rgba(168, 85, 247, 0.4);
-}
-
-.header p {
-  font-size: 14px;
-  color: #94a3b8;
-  margin: 0;
-}
-
-.main-layout {
-  display: grid;
-  grid-template-columns: 350px 1fr;
-  gap: 24px;
-  flex-grow: 1;
-}
-
-@media (max-width: 1024px) {
-  .main-layout {
-    grid-template-columns: 1fr;
-  }
+  overflow: hidden;
 }
 
 .panel {
   background-color: #1a1c23;
   border: 1px solid #2d313f;
-  border-radius: 12px;
-  padding: 20px;
+  border-radius: 10px;
+  padding: 14px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 10px;
 }
 
 .panel-title {
@@ -165,16 +130,305 @@
 
 .map-viewport {
   background-color: #0c0d12;
-  border: 1px solid #272a37;
-  border-radius: 12px;
-  height: min(82vh, 1000px);
-  min-height: 520px;
+  border: none;
+  border-radius: 0;
+  flex: 1;
+  min-height: 0;
   display: flex;
   align-items: center;
   justify-content: center;
   position: relative;
   overflow: hidden;
   box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.8);
+}
+
+/* Galaxy main area fills remaining space below header */
+.galaxy-main {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* Floating action panel over galaxy */
+.action-float {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 20;
+  max-width: 260px;
+  min-width: 200px;
+  padding: 10px 12px;
+  background-color: rgba(26, 28, 35, 0.92);
+  backdrop-filter: blur(8px);
+  border: 1px solid #2d313f;
+  border-radius: 10px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+
+.action-float .panel-title {
+  font-size: 13px;
+  margin: 0 0 6px 0;
+  border-left-width: 3px;
+  padding-left: 8px;
+}
+
+.action-float .text-xs {
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.action-float .action-row {
+  gap: 4px;
+}
+
+.action-float .action-btn {
+  padding: 5px 8px;
+  font-size: 11px;
+  border-radius: 6px;
+}
+
+/* Player info modal */
+.player-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 500;
+  animation: fadeIn 0.12s ease;
+}
+
+.player-modal {
+  background: #1a1c23;
+  border: 1px solid #334155;
+  border-radius: 12px;
+  padding: 20px;
+  width: min(380px, 90vw);
+  max-height: 80vh;
+  overflow-y: auto;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
+  animation: slideUp 0.15s ease;
+}
+
+.player-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.player-modal-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: #f8fafc;
+}
+
+.player-modal-close {
+  background: none;
+  border: none;
+  color: #94a3b8;
+  font-size: 20px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  line-height: 1;
+}
+
+.player-modal-close:hover {
+  background: #2d313f;
+  color: #e2e8f0;
+}
+
+/* Tech market modal */
+.tech-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 500;
+  animation: fadeIn 0.12s ease;
+}
+
+.tech-modal {
+  background: #1a1c23;
+  border: 1px solid #334155;
+  border-radius: 12px;
+  padding: 16px;
+  width: min(900px, 90vw);
+  max-height: 80vh;
+  overflow-y: auto;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
+  animation: slideUp 0.15s ease;
+}
+
+.tech-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.tech-modal-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: #f8fafc;
+}
+
+.tech-modal-close {
+  background: none;
+  border: none;
+  color: #94a3b8;
+  font-size: 20px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  line-height: 1;
+}
+
+.tech-modal-close:hover {
+  background: #2d313f;
+  color: #e2e8f0;
+}
+
+/* Tech market compact grid for modal */
+.tech-modal .tech-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.tech-modal .tech-card {
+  padding: 5px 4px 6px;
+}
+
+.tech-modal .tech-image {
+  width: 56px;
+}
+
+.tech-modal .tech-name {
+  font-size: 10px;
+}
+
+.tech-modal .tech-count {
+  font-size: 11px;
+}
+
+.tech-modal .tech-category-badge {
+  font-size: 8px;
+}
+
+/* Economy grid compact for player modal */
+.player-modal .economy-grid {
+  grid-template-columns: 1fr;
+}
+
+.player-modal .economy-card {
+  padding: 10px;
+}
+
+/* Galaxy info overlay */
+.galaxy-info-overlay {
+  position: absolute;
+  bottom: 10px;
+  left: 10px;
+  background-color: rgba(26, 28, 35, 0.88);
+  backdrop-filter: blur(6px);
+  border: 1px solid #2d313f;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 11px;
+  display: flex;
+  gap: 14px;
+  pointer-events: none;
+  z-index: 15;
+}
+
+.galaxy-info-item {
+  display: flex;
+  flex-direction: column;
+}
+
+.galaxy-info-item span:first-child {
+  color: #94a3b8;
+  font-size: 9px;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.galaxy-info-item span:last-child {
+  color: #f1f5f9;
+  font-weight: 600;
+}
+
+/* Zoom controls */
+.zoom-controls {
+  position: absolute;
+  bottom: 10px;
+  right: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  z-index: 15;
+}
+
+.zoom-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  background-color: rgba(26, 28, 35, 0.88);
+  backdrop-filter: blur(6px);
+  border: 1px solid #2d313f;
+  color: #e2e8f0;
+  font-size: 16px;
+  font-weight: 700;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.15s;
+}
+
+.zoom-btn:hover {
+  background-color: rgba(45, 49, 63, 0.95);
+}
+
+/* Tech button in header */
+.tech-btn {
+  background: none;
+  border: 1px solid #334155;
+  color: #94a3b8;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.tech-btn:hover {
+  border-color: #64748b;
+  color: #e2e8f0;
+  background-color: #1e293b;
+}
+
+/* Economy panel compact */
+.game-hud {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) 2fr;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.action-panel,
+.economy-panel {
+  gap: 10px;
 }
 
 .map-viewport::before {
@@ -522,76 +776,105 @@
 
 .turn-order-bar {
   display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
+  gap: 6px;
   align-items: center;
   background-color: #1a1c23;
-  border: 1px solid #2d313f;
-  padding: 8px 16px;
-  border-radius: 8px;
+  border-bottom: 1px solid #2d313f;
+  padding: 6px 12px;
+  flex-shrink: 0;
+  height: 42px;
+  overflow: hidden;
+}
+
+.turn-order-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  color: #94a3b8;
+  font-weight: 700;
+  white-space: nowrap;
+  margin-right: 4px;
 }
 
 .turn-badge {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   background-color: #0f1015;
   border: 1px solid #334155;
-  padding: 4px 10px;
-  border-radius: 6px;
-  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: 5px;
+  font-size: 11px;
   font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.15s, background-color 0.15s;
+  flex-shrink: 0;
+}
+
+.turn-badge:hover {
+  border-color: #64748b;
+  background-color: #1e293b;
 }
 
 .turn-badge.active {
   border-color: #a855f7;
-  background-color: rgba(168, 85, 247, 0.1);
+  background-color: rgba(168, 85, 247, 0.15);
   color: #c084fc;
 }
 
-.turn-num {
-  font-size: 10px;
-  background-color: #334155;
-  color: #e2e8f0;
-  border-radius: 9999px;
-  width: 16px;
-  height: 16px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+.turn-badge.active:hover {
+  background-color: rgba(168, 85, 247, 0.25);
 }
 
 .turn-badge.passed {
   opacity: 0.55;
 }
 
+.turn-num {
+  font-size: 9px;
+  background-color: #334155;
+  color: #e2e8f0;
+  border-radius: 9999px;
+  width: 15px;
+  height: 15px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.turn-badge.active .turn-num {
+  background-color: #7c3aed;
+}
+
 /* Sector stack (ring bag) remaining-tile counts */
 .stacks-bar {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 12px;
-  flex-wrap: wrap;
+  gap: 6px;
+  flex-wrap: nowrap;
+  white-space: nowrap;
 }
 
 .stack-pill {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   background-color: #0f1015;
   border: 1px solid #334155;
-  border-radius: 6px;
-  padding: 4px 10px;
-  font-size: 13px;
+  border-radius: 4px;
+  padding: 2px 7px;
+  font-size: 11px;
   font-weight: 700;
   color: #e2e8f0;
+  flex-shrink: 0;
 }
 
 .stack-ring {
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 800;
-  border-radius: 4px;
-  padding: 1px 5px;
+  border-radius: 3px;
+  padding: 1px 4px;
   background-color: #1e293b;
 }
 
@@ -724,6 +1007,25 @@
 
 .economy-card.mine {
   box-shadow: inset 0 0 0 1px #60a5fa;
+}
+
+/* Compact economy card for player modal */
+.player-modal .economy-card {
+  padding: 8px;
+  gap: 5px;
+}
+
+.player-modal .economy-name {
+  font-size: 13px;
+}
+
+.player-modal .economy-resources {
+  font-size: 11px;
+  gap: 6px;
+}
+
+.player-modal .economy-resources .res em {
+  font-size: 9px;
 }
 
 .economy-name {

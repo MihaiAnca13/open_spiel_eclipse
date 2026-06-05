@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, useCallback } from 'react';
 import './App.css';
 import { ImageHoverPreview, useImageHoverPreview } from './ImageHoverPreview';
 import { SPECIES_THEME, getPlayerColor } from './theme';
 import ActionPanel from './ActionPanel';
 import { ACTION } from './actionTypes';
-import { API_BASE, buildTechMarketRows } from './types/lobby';
-import type { SetupSnapshot } from './types/game';
+import { API_BASE, buildTechMarketRows, TECH_CATEGORIES, techImageUrl, type TechMarketEntry } from './types/lobby';
+import type { SetupSnapshot, Player } from './types/game';
 
 // Custom Hooks
 import { useGameSocket } from './hooks/useGameSocket';
@@ -13,15 +13,19 @@ import { useSectorAssets } from './hooks/useSectorAssets';
 import { useSectorLayouts } from './hooks/useSectorLayouts';
 
 // Utils
-import { bagCount, EMPTY_LEGAL_ACTIONS } from './utils/game';
+import { bagCount, EMPTY_LEGAL_ACTIONS, INFLUENCE_TOTAL, POPULATION_PRODUCTION_TABLE, POP_TRACK_MAX } from './utils/game';
 
 // Components
 import SetupPanel from './components/setup/SetupPanel';
 import GalaxyMap from './components/game/GalaxyMap';
-import EconomyPanel from './components/game/EconomyPanel';
 import TechMarket from './components/game/TechMarket';
 import DebugPanel from './components/overlays/DebugPanel';
 import JsonInspector from './components/overlays/JsonInspector';
+import PopulationTracks from './components/ui/PopulationTracks';
+import InfluenceTrack from './components/ui/InfluenceTrack';
+import ColonyShips from './components/ui/ColonyShips';
+import TradePanel from './components/ui/TradePanel';
+import ResearchTracks from './ResearchTracks';
 
 export interface AppProps {
   initialMetadata: any;
@@ -359,77 +363,134 @@ function App({
     }
   }, [isResearchPhase]);
 
-  return (
-    <div className="w-[95%] mx-auto app-container">
-      <header className="header">
-        <h1>Eclipse setup & map visualizer</h1>
-        <p>Interactive staged setup backed by the shared OpenSpiel Eclipse core</p>
-        {mySeatIdx >= 0 && (
-          <span className="text-xs text-[#60a5fa] font-semibold">
-            You are Player {mySeatIdx + 1} — {playerLabel(mySeatIdx)}
-          </span>
-        )}
-      </header>
+  // Player info modal state
+  const [selectedPlayerId, setSelectedPlayerId] = useState<number | null>(null);
+  const [showTechModal, setShowTechModal] = useState(false);
 
+  const openPlayerModal = useCallback((pid: number) => setSelectedPlayerId(pid), []);
+  const closePlayerModal = useCallback(() => setSelectedPlayerId(null), []);
+
+  // Compact player card for modal
+  const CompactPlayerCard = useCallback((player: Player, playerId: number) => {
+    const onSectors = player.disks_on_sectors ?? 0;
+    const onActions = player.disks_on_actions ?? 0;
+    const discsLeft = Math.max(0, INFLUENCE_TOTAL - onSectors - onActions);
+    const isActive = playerId === gameState?.current_player;
+
+    return (
+      <div key={playerId} className={`economy-card ${isActive ? 'active' : ''}`}>
+        <div className="economy-name">
+          <span style={{ color: getPlayerColor(playerId) }}>{playerLabel(playerId)}</span>
+          <span className="economy-score">⭐ {player.score}</span>
+        </div>
+        <div className="economy-resources">
+          <span className="res gold">
+            💰 {player.resources.gold}<em> +{POPULATION_PRODUCTION_TABLE[Math.min(player.resources.gold_prod, POP_TRACK_MAX)]}</em>
+          </span>
+          <span className="res science">
+            🔬 {player.resources.science}<em> +{POPULATION_PRODUCTION_TABLE[Math.min(player.resources.science_prod, POP_TRACK_MAX)]}</em>
+          </span>
+          <span className="res materials">
+            ⚙️ {player.resources.materials}<em> +{POPULATION_PRODUCTION_TABLE[Math.min(player.resources.materials_prod, POP_TRACK_MAX)]}</em>
+          </span>
+        </div>
+        <PopulationTracks resources={player.resources} playerColor={getPlayerColor(playerId)} />
+        {playerId === mySeatIdx ? (
+          <>
+            <InfluenceTrack onSectors={onSectors} onActions={onActions} />
+            <ColonyShips
+              total={player.colony_ships_total}
+              available={player.colony_ships_available}
+              legalPlacements={colonyShipPlacements}
+              onPlace={submitAction}
+            />
+            <TradePanel
+              tradeRate={player.trade_rate}
+              legalTradeActions={legalTradeActions}
+              onTrade={submitAction}
+              resources={player.resources}
+            />
+            <ResearchTracks
+              militaryMask={player.researched_techs_military}
+              gridMask={player.researched_techs_grid}
+              nanoMask={player.researched_techs_nano}
+              techCatalog={gameMetadata.tech_catalog ?? {}}
+            />
+          </>
+        ) : (
+          <div className="economy-meta">
+            <span title="Influence discs available">🔵 {discsLeft} discs</span>
+            {player.colony_ships_total > 0 && (
+              <span>◎ {player.colony_ships_available}/{player.colony_ships_total}</span>
+            )}
+          </div>
+        )}
+        {player.has_passed && <div className="economy-meta"><span className="economy-passed">passed</span></div>}
+      </div>
+    );
+  }, [gameState?.current_player, mySeatIdx, playerLabel, colonyShipPlacements, legalTradeActions, submitAction, gameMetadata]);
+
+  return (
+    <div className="app-container">
       {error && (
-        <div className="bg-[#7f1d1d] border border-[#f87171] p-3 rounded-lg mb-4 text-sm">
+        <div className="bg-[#7f1d1d] border border-[#f87171] p-3 mx-3 mt-2 rounded-lg text-sm" style={{ zIndex: 600, position: 'relative' }}>
           <strong>Error connecting to backend:</strong> {error}
         </div>
       )}
 
-      <div className={`main-layout ${setupFinalized ? '!grid-cols-1' : ''}`}>
-        {!setupFinalized && (
-          <SetupPanel
-            rngSeed={rngSeed}
-            setRngSeed={setRngSeed}
-            numPlayers={numPlayers}
-            setNumPlayers={setNumPlayers}
-            difficulty={difficulty}
-            setDifficulty={setDifficulty}
-            gameMetadata={gameMetadata}
-            speciesChoices={speciesChoices}
-            handleSpeciesChange={handleSpeciesChange}
-            getAiDefault={getAiDefault}
-            handleAiChange={handleAiChange}
-            playerIds={playerIds}
-            playerLabel={playerLabel}
-            gameState={gameState}
-            loading={loading}
-            handleInitializeStage1={handleInitializeStage1}
-            handleFinalizeStage2={handleFinalizeStage2}
-            snapshot={snapshot}
-            getSpeciesOptions={getSpeciesOptions}
-            playerStartingSectors={playerStartingSectors}
-            speciesList={speciesList}
-          />
-        )}
+      {!setupFinalized && (
+        <SetupPanel
+          rngSeed={rngSeed}
+          setRngSeed={setRngSeed}
+          numPlayers={numPlayers}
+          setNumPlayers={setNumPlayers}
+          difficulty={difficulty}
+          setDifficulty={setDifficulty}
+          gameMetadata={gameMetadata}
+          speciesChoices={speciesChoices}
+          handleSpeciesChange={handleSpeciesChange}
+          getAiDefault={getAiDefault}
+          handleAiChange={handleAiChange}
+          playerIds={playerIds}
+          playerLabel={playerLabel}
+          gameState={gameState}
+          loading={loading}
+          handleInitializeStage1={handleInitializeStage1}
+          handleFinalizeStage2={handleFinalizeStage2}
+          snapshot={snapshot}
+          getSpeciesOptions={getSpeciesOptions}
+          playerStartingSectors={playerStartingSectors}
+          speciesList={speciesList}
+        />
+      )}
 
-        <div className="board-container">
-          {gameState && (
-            <div className="turn-order-bar">
-              <span className="text-xs uppercase text-[#94a3b8] font-bold mr-2">
-                {isStarted ? `Round ${gameState.current_round} · Turn Order:` : 'Active Turn Order:'}
-              </span>
-              {gameState.turn_order.map((playerId, idx) => {
-                if (playerId === 255) return null;
-                const player = gameState.players[playerId];
-                const isActive = gameState.current_player === playerId;
-                const passed = player?.has_passed;
-                return (
-                  <div key={playerId} className={`turn-badge ${isActive ? 'active' : ''} ${passed ? 'passed' : ''}`}>
-                    <span className="turn-num">{idx + 1}</span>
-                    <span style={{ color: getPlayerColor(playerId) }}>{playerLabel(playerId)} ({player?.species_id || 'Choosing...'})</span>
-                    {player?.is_ai && <span className="text-[9px] bg-[#334155] text-[#93c5fd] px-1 py-0.5 rounded">AI</span>}
-                    {passed && <span className="text-[9px] text-[#94a3b8]">✓ passed</span>}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-
-          {isStarted && gameState && (
-            <div className="stacks-bar">
-              <span className="text-xs uppercase text-[#94a3b8] font-bold mr-1">Sector stacks left:</span>
+      {gameState && (
+        <>
+          {/* ── Header: turn order ── */}
+          <div className="turn-order-bar">
+            <span className="turn-order-label">
+              {isStarted ? `R${gameState.current_round}` : 'Active:'}
+            </span>
+            {gameState.turn_order.map((playerId, idx) => {
+              if (playerId === 255) return null;
+              const player = gameState.players[playerId];
+              const isActive = gameState.current_player === playerId;
+              const passed = player?.has_passed;
+              return (
+                <div
+                  key={playerId}
+                  className={`turn-badge ${isActive ? 'active' : ''} ${passed ? 'passed' : ''}`}
+                  onClick={() => openPlayerModal(playerId)}
+                  title={`Click for ${playerLabel(playerId)} details`}
+                >
+                  <span className="turn-num">{idx + 1}</span>
+                  <span style={{ color: getPlayerColor(playerId) }}>{playerLabel(playerId)}</span>
+                  {player?.is_ai && <span className="text-[9px] bg-[#334155] text-[#93c5fd] px-1 py-0.5 rounded">AI</span>}
+                  {passed && <span className="text-[9px] text-[#94a3b8]">✓</span>}
+                </div>
+              );
+            })}
+            <span className="stacks-bar" style={{ marginLeft: 'auto' }}>
               <span className="stack-pill inner" title="Ring I (Inner) tiles remaining">
                 <span className="stack-ring">I</span> {bagCount(gameState.sector_bag_inner)}
               </span>
@@ -439,79 +500,191 @@ function App({
               <span className="stack-pill outer" title="Ring III (Outer) tiles remaining">
                 <span className="stack-ring">III</span> {bagCount(gameState.sector_bag_outer)}
               </span>
-            </div>
-          )}
+            </span>
+            <button
+              className="tech-btn"
+              onClick={() => setShowTechModal(true)}
+              title="View technology market"
+            >
+              🔬 Tech
+            </button>
+          </div>
 
-          {isStarted && gameState && (
-            <div className="game-hud">
-              <ActionPanel
-                explore={exploreState}
-                research={researchState}
-                selectedRareTech={selectedRareTech}
-                onClearSelectedRareTech={() => setSelectedRareTech(null)}
-                legalActions={legalActions}
-                isMyTurn={isMyTurn}
-                isTerminal={isTerminal}
-                busy={actionInProgress}
-                currentPlayerLabel={currentPlayerLabel}
-                ancientsOnSelected={ancientsOnSelected}
-                previewRotation={currentPreviewRotation}
-                sectorImages={sectorImages}
-                onPreviewDrawnTile={(id, idx) => {
-                  setPreviewingDrawnTile(id);
-                  setPreviewingDrawnTileIndex(idx);
-                }}
-                onClearPreviewDrawnTile={() => {
-                  setPreviewingDrawnTile(null);
-                  setPreviewingDrawnTileIndex(null);
-                }}
-                onConfirmPreviewRotation={confirmPreviewRotation}
-                onAction={submitAction}
-              />
-              <EconomyPanel
-                gameState={gameState}
-                mySeatIdx={mySeatIdx}
-                playerLabel={playerLabel}
-                colonyShipPlacements={colonyShipPlacements}
-                legalTradeActions={legalTradeActions}
-                submitAction={submitAction}
-                gameMetadata={gameMetadata}
-              />
-            </div>
-          )}
-
-          <GalaxyMap
-            gameState={gameState}
-            sectorImages={sectorImages}
-            sectorLayouts={sectorLayouts}
-            legalActions={legalActions}
-            isMyTurn={isMyTurn}
-            explorePhase={explorePhase}
-            selectedSectorId={selectedSectorId}
-            previewRotation={previewRotation}
-            setPreviewRotation={setPreviewRotation}
-            previewingDrawnTile={previewingDrawnTile}
-            previewingDrawnTileIndex={previewingDrawnTileIndex}
-            inSelectDrawnTile={inSelectDrawnTile}
-            submitAction={submitAction}
-            playerLabel={playerLabel}
-            beginPreview={beginPreview}
-            clearPreview={clearPreview}
-          />
-
-          {gameState && (
-            <TechMarket
-              techRows={techRows}
-              isResearchPhase={isResearchPhase}
+          {/* ── Galaxy main area ── */}
+          <div className="galaxy-main">
+            <GalaxyMap
+              gameState={gameState}
+              sectorImages={sectorImages}
+              sectorLayouts={sectorLayouts}
               legalActions={legalActions}
-              selectedRareTech={selectedRareTech}
-              setSelectedRareTech={setSelectedRareTech}
+              isMyTurn={isMyTurn}
+              explorePhase={explorePhase}
+              selectedSectorId={selectedSectorId}
+              previewRotation={previewRotation}
+              setPreviewRotation={setPreviewRotation}
+              previewingDrawnTile={previewingDrawnTile}
+              previewingDrawnTileIndex={previewingDrawnTileIndex}
+              inSelectDrawnTile={inSelectDrawnTile}
               submitAction={submitAction}
+              playerLabel={playerLabel}
               beginPreview={beginPreview}
               clearPreview={clearPreview}
             />
-          )}
 
+            {/* Floating action panel — only show when it's my turn */}
+            {isStarted && isMyTurn && (
+              <div className="action-float">
+                <ActionPanel
+                  explore={exploreState}
+                  research={researchState}
+                  selectedRareTech={selectedRareTech}
+                  onClearSelectedRareTech={() => setSelectedRareTech(null)}
+                  legalActions={legalActions}
+                  isMyTurn={isMyTurn}
+                  isTerminal={isTerminal}
+                  busy={actionInProgress}
+                  currentPlayerLabel={currentPlayerLabel}
+                  ancientsOnSelected={ancientsOnSelected}
+                  previewRotation={currentPreviewRotation}
+                  sectorImages={sectorImages}
+                  onPreviewDrawnTile={(id, idx) => {
+                    setPreviewingDrawnTile(id);
+                    setPreviewingDrawnTileIndex(idx);
+                  }}
+                  onClearPreviewDrawnTile={() => {
+                    setPreviewingDrawnTile(null);
+                    setPreviewingDrawnTileIndex(null);
+                  }}
+                  onConfirmPreviewRotation={confirmPreviewRotation}
+                  onAction={submitAction}
+                />
+              </div>
+            )}
+
+            {/* Waiting message */}
+            {isStarted && !isMyTurn && !isTerminal && (
+              <div
+                className="action-float"
+                style={{ top: '8px', left: '50%', transform: 'translateX(-50%)', maxWidth: '300px', textAlign: 'center' }}
+              >
+                <div className="action-waiting">
+                  <span className="action-spinner" />
+                  Waiting for {currentPlayerLabel}…
+                </div>
+              </div>
+            )}
+
+            {/* Terminal screen */}
+            {isTerminal && (
+              <div
+                className="action-float"
+                style={{ top: '8px', left: '50%', transform: 'translateX(-50%)', maxWidth: '300px', textAlign: 'center' }}
+              >
+                <h3 className="panel-title" style={{ textAlign: 'center' }}>Game Over</h3>
+                <span className="text-xs text-[#94a3b8]">Final scores determine the winner.</span>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {gameState && !isStarted && (
+        <div className="galaxy-main" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <span className="text-xs text-[#64748b]">Starting game…</span>
+        </div>
+      )}
+
+      {/* ── Player info modal ── */}
+      {selectedPlayerId !== null && gameState && (
+        <div className="player-modal-overlay" onClick={closePlayerModal}>
+          <div className="player-modal" onClick={e => e.stopPropagation()}>
+            <div className="player-modal-header">
+              <span className="player-modal-title" style={{ color: getPlayerColor(selectedPlayerId) }}>
+                {playerLabel(selectedPlayerId)}
+              </span>
+              <button className="player-modal-close" onClick={closePlayerModal}>×</button>
+            </div>
+            {CompactPlayerCard(gameState.players[selectedPlayerId], selectedPlayerId)}
+          </div>
+        </div>
+      )}
+
+      {/* ── Tech market modal ── */}
+      {showTechModal && gameState && (
+        <div className="tech-modal-overlay" onClick={() => setShowTechModal(false)}>
+          <div className="tech-modal" onClick={e => e.stopPropagation()}>
+            <div className="tech-modal-header">
+              <span className="tech-modal-title">Technology Market</span>
+              <button className="tech-modal-close" onClick={() => setShowTechModal(false)}>×</button>
+            </div>
+            <div className="tech-market">
+              {TECH_CATEGORIES.map((category) => {
+                const techs = techRows[category];
+                if (!techs || !techs.length) return null;
+                return (
+                  <div key={category} className="tech-row">
+                    {techs.map(([techName, tech]) => {
+                      let isResearchable = false;
+                      let onTechClick: (() => void) | undefined = undefined;
+
+                      if (isResearchPhase) {
+                        if (tech.category !== 'Rare') {
+                          const actionId = ACTION.RESEARCH_STANDARD_START + (tech.order ?? 0);
+                          if (legalActions.includes(actionId)) {
+                            isResearchable = true;
+                            onTechClick = () => submitAction(actionId);
+                          }
+                        } else {
+                          const rareIdx = (tech.order ?? 0) - 24;
+                          const isAnyTrackLegal = [0, 1, 2].some((track) =>
+                            legalActions.includes(ACTION.RESEARCH_RARE_START + rareIdx * 3 + track)
+                          );
+                          if (isAnyTrackLegal) {
+                            isResearchable = true;
+                            onTechClick = () => setSelectedRareTech({ name: techName, order: tech.order ?? 0 });
+                          }
+                        }
+                      }
+
+                      return (
+                        <div
+                          key={techName}
+                          className={`tech-card ${tech.category} ${tech.count === 0 ? 'unavailable' : ''} ${
+                            isResearchable ? 'researchable' : ''
+                          } ${selectedRareTech?.order === tech.order ? 'selected-research' : ''}`}
+                          onClick={onTechClick}
+                          onMouseEnter={() =>
+                            beginPreview({ src: techImageUrl(techName, tech.category), label: techName })
+                          }
+                          onMouseLeave={clearPreview}
+                        >
+                          <img
+                            className="tech-image"
+                            src={techImageUrl(techName, tech.category)}
+                            alt=""
+                            onError={(event) => {
+                              event.currentTarget.style.display = 'none';
+                            }}
+                          />
+                          <div className="tech-name">{techName}</div>
+                          <div className="tech-meta">
+                            <span className={`tech-category-badge ${tech.category}`}>{tech.category}</span>
+                            <span className="tech-count">{tech.count}</span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Debug panel — host only */}
+      {isHost && isStarted && (
+        <div style={{ padding: '4px 12px', flexShrink: 0 }}>
           <DebugPanel
             isStarted={isStarted}
             isHost={isHost}
@@ -521,10 +694,10 @@ function App({
             dumpDebugState={dumpDebugState}
             loadDebugState={loadDebugState}
           />
-
           <JsonInspector snapshot={snapshot} />
         </div>
-      </div>
+      )}
+
       <ImageHoverPreview preview={preview} />
     </div>
   );

@@ -1,10 +1,13 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, useCallback, useRef, useEffect } from 'react';
 import type { GameState, Sector, SectorLayout } from '../../types/game';
 import { ACTION } from '../../actionTypes';
 import { UNOWNED_COLOR } from '../../theme';
 import { getPlayerHexColor } from '../../utils/game';
 import { axialToPixel, getHexPoints, hexSize, IMAGE_ROTATION_OFFSET } from '../../utils/hex';
 import { getPlayerColor } from '../../theme';
+
+
+const INITIAL_SCALE = 1;
 
 interface GalaxyMapProps {
   gameState: GameState | null;
@@ -46,6 +49,93 @@ export default function GalaxyMap({
   const [hoveredSector, setHoveredSector] = useState<Sector | null>(null);
   const [brokenImages, setBrokenImages] = useState<Set<number>>(new Set());
 
+  // Pan/zoom state
+  const [viewTransform, setViewTransform] = useState({ x: 0, y: 0, scale: INITIAL_SCALE });
+  const isPanning = useRef(false);
+  const panStart = useRef({ x: 0, y: 0, tx: 0, ty: 0 });
+  const svgRef = useRef<SVGSVGElement>(null);
+
+  // ── Zoom limits ──
+  const ZOOM_MIN = 0.3;
+  const ZOOM_MAX = 3;
+  // ─────────────────
+
+  // Convert CSS pixel coords to SVG user-space using getScreenCTM
+  const screenToSVG = useCallback((clientX: number, clientY: number) => {
+    const svg = svgRef.current;
+    if (!svg) return { x: 0, y: 0 };
+    const pt = svg.createSVGPoint();
+    pt.x = clientX;
+    pt.y = clientY;
+    const ctm = svg.getScreenCTM();
+    if (!ctm) return { x: 0, y: 0 };
+    return pt.matrixTransform(ctm.inverse());
+  }, []);
+
+  const zoomIn = useCallback(() => {
+    setViewTransform(prev => ({ ...prev, scale: Math.min(ZOOM_MAX, prev.scale * 1.3) }));
+  }, []);
+
+  const zoomOut = useCallback(() => {
+    setViewTransform(prev => ({ ...prev, scale: Math.max(ZOOM_MIN, prev.scale / 1.3) }));
+  }, []);
+
+  const resetView = useCallback(() => {
+    setViewTransform({ x: 0, y: 0, scale: INITIAL_SCALE });
+  }, []);
+
+  // Zoom at center of viewport
+  const handleWheel = useCallback((e: React.WheelEvent) => {
+    e.preventDefault();
+    const svg = svgRef.current;
+    if (!svg) return;
+    const rect = svg.getBoundingClientRect();
+    const cx = rect.width / 2;
+    const cy = rect.height / 2;
+    const centerSVG = screenToSVG(cx, cy);
+    setViewTransform(prev => {
+      const delta = e.deltaY > 0 ? 0.9 : 1.1;
+      const newScale = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, prev.scale * delta));
+      const ratio = newScale / prev.scale;
+      return {
+        x: centerSVG.x - (centerSVG.x - prev.x) * ratio,
+        y: centerSVG.y - (centerSVG.y - prev.y) * ratio,
+        scale: newScale,
+      };
+    });
+  }, [screenToSVG]);
+
+  // Pan: user-space deltas from screen coords
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    isPanning.current = true;
+    const pt = screenToSVG(e.clientX, e.clientY);
+    panStart.current = { x: pt.x, y: pt.y, tx: viewTransform.x, ty: viewTransform.y };
+  }, [viewTransform, screenToSVG]);
+
+  const handleMouseMove = useCallback((e: React.MouseEvent) => {
+    if (!isPanning.current) return;
+    const pt = screenToSVG(e.clientX, e.clientY);
+    const dx = pt.x - panStart.current.x;
+    const dy = pt.y - panStart.current.y;
+    setViewTransform(prev => ({
+      ...prev,
+      x: panStart.current.tx + dx,
+      y: panStart.current.ty + dy,
+    }));
+  }, [screenToSVG]);
+
+  const handleMouseUp = useCallback(() => { isPanning.current = false; }, []);
+
+  // Non-passive wheel listener
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg) return;
+    const onWheel = (e: WheelEvent) => { e.preventDefault(); };
+    svg.addEventListener('wheel', onWheel, { passive: false });
+    return () => svg.removeEventListener('wheel', onWheel);
+  }, []);
+
   const sectorImageUrl = (id: number): string | null =>
     (!brokenImages.has(id) && sectorImages[id]) || null;
 
@@ -76,7 +166,6 @@ export default function GalaxyMap({
 
   const inZoneSelect = isMyTurn && explorePhase === 'choose_zone';
 
-  // Legal explore zones → clickable hexes (action id 35 + hex_to_index(q,r)).
   const legalZones = useMemo(() => {
     return inZoneSelect
       ? legalActions
@@ -130,7 +219,6 @@ export default function GalaxyMap({
         }
       : null;
 
-  // Floating preview for drawn tiles during select_drawn_tile phase.
   const drawnTilePreviewZone = inSelectDrawnTile && exploreState && previewingDrawnTile !== null && previewingDrawnTileIndex !== null
     ? {
         q: exploreState.zone_q,
@@ -141,7 +229,8 @@ export default function GalaxyMap({
       }
     : null;
 
-  // Auto-fit the SVG viewBox to the populated region (sectors + explore zones)
+  const transformStr = `translate(${viewTransform.x},${viewTransform.y}) scale(${viewTransform.scale})`;
+
   const viewBox = useMemo(() => {
     const fitCells = previewZone
       ? [...activeSectors, ...legalZones, previewZone]
@@ -174,8 +263,21 @@ export default function GalaxyMap({
 
   return (
     <div className="map-viewport">
-      <svg width="100%" height="100%" viewBox={viewBox} preserveAspectRatio="xMidYMid meet">
-        {activeSectors.map(({ sector, cx, cy }) => {
+      <svg
+        ref={svgRef}
+        width="100%"
+        height="100%"
+        viewBox={viewBox}
+        preserveAspectRatio="xMidYMid meet"
+        onWheel={handleWheel}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseUp}
+        style={{ cursor: isPanning.current ? 'grabbing' : 'grab' }}
+      >
+        <g transform={transformStr}>
+          {activeSectors.map(({ sector, cx, cy }) => {
           const fillColor = getPlayerHexColor(sector.owner_id, sector.sector_id);
           const isCenter = sector.sector_id === 1;
           const units = getUnitsInSector(sector.sector_id);
@@ -526,8 +628,17 @@ export default function GalaxyMap({
             </text>
           </g>
         ))}
+        </g>
       </svg>
 
+      {/* Zoom controls */}
+      <div className="zoom-controls">
+        <button className="zoom-btn" onClick={zoomIn} title="Zoom in">+</button>
+        <button className="zoom-btn" onClick={zoomOut} title="Zoom out">-</button>
+        <button className="zoom-btn" onClick={resetView} title="Reset view" style={{ fontSize: '11px' }}>⟲</button>
+      </div>
+
+      {/* Hover info overlay */}
       {hoveredSector && (
         <div className="galaxy-info-overlay">
           <div className="galaxy-info-item">
