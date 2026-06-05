@@ -252,9 +252,29 @@ void FinalizeGameSetup(State& state,
         player.trade_rate = species_data.trade_rate;
         player.disks_on_sectors = 1;
         player.disks_on_actions = 0;
+        player.extra_influence_discs = 0;
         player.orbitals = 0;
         player.monoliths = 0;
-        player.researched_techs = species_data.starting_techs;
+        player.researched_techs_military = 0;
+        player.researched_techs_grid = 0;
+        player.researched_techs_nano = 0;
+        // Distribute starting techs into the appropriate track mask(s).
+        for (size_t i = 0; i < TECH_TOTAL; ++i) {
+            TechBit bit = TECH_TABLE[i].bit;
+            if (species_data.starting_techs & static_cast<uint64_t>(bit)) {
+                uint64_t b = static_cast<uint64_t>(bit);
+                switch (TECH_TABLE[i].category) {
+                    case TechCategory::RARE:
+                        player.researched_techs_military |= b;
+                        player.researched_techs_grid |= b;
+                        player.researched_techs_nano |= b;
+                        break;
+                    case TechCategory::MILITARY: player.researched_techs_military |= b; break;
+                    case TechCategory::GRID:     player.researched_techs_grid |= b; break;
+                    case TechCategory::NANO:     player.researched_techs_nano |= b; break;
+                }
+            }
+        }
         player.colony_ships_total = species_data.starting_colony_ships;
         player.colony_ships_available = species_data.starting_colony_ships;
         // All cubes start on their respective tracks (index 12 = full track = 0 production).

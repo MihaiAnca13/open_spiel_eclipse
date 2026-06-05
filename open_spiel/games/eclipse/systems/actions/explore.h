@@ -67,12 +67,6 @@ namespace open_spiel::eclipse {
 // chance draws. They follow the research.cpp pattern: free functions taking a
 // ::State& and returning bool/containers, with no OpenSpiel dependency.
 
-// Total influence discs an Eclipse player owns (influence-track capacity).
-constexpr int total_influence_discs = 12;
-
-// Influence discs still available to drop (not already on sectors/actions),
-// accounting for a species' starting disk penalty (Eridani).
-uint8_t available_influence_discs(const ::Player& player);
 
 // True if `sector` is one the player Controls or has a (unpinned) ship in, so it
 // can anchor an Explore zone. Pinning is ignored until movement/combat exists.

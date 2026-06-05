@@ -16,7 +16,9 @@
 #include "resources.h"
 #include "npc.h"
 #include "fixed_vector.h"
+#include "species.h"
 #include "systems/actions/explore.h"
+#include "systems/actions/research.h"
 #include "absl/container/fixed_array.h"
 
 using open_spiel::eclipse::FixedVector;
@@ -36,6 +38,7 @@ NLOHMANN_JSON_SERIALIZE_ENUM( ShipType, {
 });
 
 constexpr uint8_t NPC_PLAYER_ID = 255;
+constexpr int total_influence_discs = 12;
 
 struct Unit {
     uint8_t player_id; // NPC_PLAYER_ID for non-player units
@@ -71,11 +74,26 @@ struct Player {
     std::array<Blueprint, 4> blueprints;
     FixedVector<ReputationTiles, 5> reputation_tiles;
     uint8_t trade_rate;
-    uint64_t researched_techs = 0; // The actual bitmask
+    uint8_t extra_influence_discs = 0;
+    uint64_t researched_techs_military = 0;  // standard MIL bits + rare bits
+    uint64_t researched_techs_grid = 0;      // standard GRID bits + rare bits
+    uint64_t researched_techs_nano = 0;      // standard NANO bits + rare bits
 
-    // Helper to check if a tech is owned
+    // Helper to check if a tech is owned (checks all 3 track masks).
     [[nodiscard]] bool has_tech(TechBit tech) const {
-        return (researched_techs & static_cast<uint64_t>(tech)) != 0;
+        uint64_t b = static_cast<uint64_t>(tech);
+        return (researched_techs_military & b) ||
+               (researched_techs_grid & b) ||
+               (researched_techs_nano & b);
+    }
+
+    // Helper to calculate available influence discs.
+    [[nodiscard]] uint8_t available_influence_discs() const {
+        int penalty = SPECIES_TABLE[static_cast<size_t>(species_id)].starting_disk_penalty;
+        int available = total_influence_discs + static_cast<int>(extra_influence_discs) - penalty -
+                        static_cast<int>(disks_on_sectors) -
+                        static_cast<int>(disks_on_actions);
+        return available > 0 ? static_cast<uint8_t>(available) : 0;
     }
 };
 
@@ -88,7 +106,7 @@ NLOHMANN_JSON_SERIALIZE_ENUM(ReputationTiles, {
     {FOUR, "Four"}
 });
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Player, id, score, species_id, is_ai, has_passed, disks_on_sectors, disks_on_actions, resources, colony_ships_total, colony_ships_available, orbitals, monoliths, blueprints, reputation_tiles, trade_rate, researched_techs);
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Player, id, score, species_id, is_ai, has_passed, disks_on_sectors, disks_on_actions, resources, colony_ships_total, colony_ships_available, orbitals, monoliths, blueprints, reputation_tiles, trade_rate, extra_influence_discs, researched_techs_military, researched_techs_grid, researched_techs_nano);
 
 struct State {
     FixedVector<Player, MAX_PLAYERS> players;
@@ -116,34 +134,29 @@ struct State {
     // In-flight Explore action (inactive when no Explore is being resolved).
     ExploreState explore_state;
 
+    // In-flight Research action (inactive when no Research is being resolved).
+    // ResearchState tracks multi-activation research actions (e.g., Hydran's 2 activations).
+    // Unlike Explore, Research does not require a multi-step sub-state machine:
+    // each activation is a single choice of a tech (and track for Rare Techs).
+    ResearchState research_state;
+
     // Helper functions for tech market tray (allocation-free representation)
     uint8_t get_tech_tray_count(TechBit tech) const {
-        for (size_t i = 0; i < 40; ++i) {
-            if (TECH_TABLE[i].bit == tech) {
-                return tech_tray[i];
-            }
-        }
-        return 0;
+        if (tech == TechBit::NONE) return 0;
+        return tech_tray[__builtin_ctzll(static_cast<uint64_t>(tech)) - 1];
     }
 
     void add_to_tech_tray(TechBit tech, uint8_t count = 1) {
-        for (size_t i = 0; i < 40; ++i) {
-            if (TECH_TABLE[i].bit == tech) {
-                tech_tray[i] += count;
-                return;
-            }
-        }
+        if (tech == TechBit::NONE) return;
+        tech_tray[__builtin_ctzll(static_cast<uint64_t>(tech)) - 1] += count;
     }
 
     bool remove_from_tech_tray(TechBit tech, uint8_t count = 1) {
-        for (size_t i = 0; i < 40; ++i) {
-            if (TECH_TABLE[i].bit == tech) {
-                if (tech_tray[i] >= count) {
-                    tech_tray[i] -= count;
-                    return true;
-                }
-                return false;
-            }
+        if (tech == TechBit::NONE) return false;
+        uint8_t& slot = tech_tray[__builtin_ctzll(static_cast<uint64_t>(tech)) - 1];
+        if (slot >= count) {
+            slot -= count;
+            return true;
         }
         return false;
     }
@@ -183,7 +196,8 @@ inline void to_json(nlohmann::json& j, const State& s) {
         {"current_round", s.current_round},
         {"turn_order", s.turn_order},
         {"pass_order", s.pass_order},
-        {"explore_state", s.explore_state}
+        {"explore_state", s.explore_state},
+        {"research_state", s.research_state}
     };
 }
 
@@ -242,6 +256,8 @@ inline void from_json(const nlohmann::json& j, State& s) {
     } else {
         s.explore_state = ExploreState{};
     }
+
+    j.at("research_state").get_to(s.research_state);
 }
 
 #endif //ECLIPSE_STATE_H

@@ -189,13 +189,6 @@ void end_explore_activation(State& state) {
 
 }  // namespace
 
-uint8_t available_influence_discs(const Player& player) {
-    int penalty = SPECIES_TABLE[static_cast<size_t>(player.species_id)].starting_disk_penalty;
-    int available = total_influence_discs - penalty -
-                    static_cast<int>(player.disks_on_sectors) -
-                    static_cast<int>(player.disks_on_actions);
-    return available > 0 ? static_cast<uint8_t>(available) : 0;
-}
 
 bool is_explore_anchor(const State& state, uint8_t player_id, const Sector& sector) {
     if (sector.sector_id == 0) return false;
@@ -439,7 +432,7 @@ bool claim_explore_control(State& state, uint8_t player_id, bool take_control) {
 
     // Cannot take Control of an Ancient sector, except Descendants of Draco.
     bool may_control = !has_ancients || is_draco(state, player_id);
-    if (take_control && may_control && available_influence_discs(player) > 0) {
+    if (take_control && may_control && player.available_influence_discs() > 0) {
         cell.owner_id = player_id;
         ++player.disks_on_sectors;
     }

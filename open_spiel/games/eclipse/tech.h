@@ -76,6 +76,18 @@ struct TechDefinition {
     uint8_t copies;
 };
 
+// Count techs by category (derived from TECH_TABLE so they stay in sync).
+static constexpr size_t TECH_TABLE_SIZE = 24;  // 8 military + 8 grid + 8 nano
+static constexpr size_t TECH_RARE_COUNT = 16;
+static constexpr size_t TECH_TOTAL = TECH_TABLE_SIZE + TECH_RARE_COUNT;
+
+// Bitmask ranges for each tech category (covers standard tech bits + rare bits).
+// Used for O(1) track tile count and discount calculations.
+static constexpr uint64_t RARE_BITMASK = 0x000001FFFE000000ULL;  // bits 25-40
+static constexpr uint64_t MIL_STANDARD_RANGE = 0x00000000000001FEULL;  // bits 1-8
+static constexpr uint64_t GRID_STANDARD_RANGE = 0x000000000001FE00ULL;  // bits 9-16
+static constexpr uint64_t NANO_STANDARD_RANGE = 0x0000000001FE0000ULL;  // bits 17-24
+
 static const TechDefinition TECH_TABLE[] = {
     // MILITARY TECHNOLOGIES
     { TechBit::NEUTRON_BOMBS,   "Neutron Bombs",   TechCategory::MILITARY, 2, 2, 5 },
@@ -125,6 +137,15 @@ static const TechDefinition TECH_TABLE[] = {
     { TechBit::ZERO_POINT_SOURCE,   "Zero Point Source",   TechCategory::RARE, 15, 10, 1 },
     { TechBit::RIFT_CANNON,         "Rift Cannon",         TechCategory::RARE, 9, 7, 1 }
 };
+
+// Lookup TechCategory for a TechBit value by mask
+inline TechCategory get_tech_category_from_bit(const TechBit bit) {
+    const uint64_t b = static_cast<uint64_t>(bit);
+    if (b & MIL_STANDARD_RANGE)  return TechCategory::MILITARY;
+    if (b & GRID_STANDARD_RANGE) return TechCategory::GRID;
+    if (b & NANO_STANDARD_RANGE) return TechCategory::NANO;
+    return TechCategory::RARE;
+}
 
 enum class ShipPartId : uint8_t {
     NONE = 0,

@@ -88,7 +88,9 @@ class EclipseState : public State {
   std::shared_ptr<const EclipseGame> eclipse_game_;
   void ResolveChanceEvent(Action action_id);
   std::vector<Action> ExploreLegalActions() const;
+  std::vector<Action> ResearchLegalActions() const;
   void ApplyExploreSubAction(Action action_id);
+  void ApplyResearchSubAction(Action action_id);
   void AdvanceTurn();
 
   ::State eclipse_state_;

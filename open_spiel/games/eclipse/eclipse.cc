@@ -8,8 +8,10 @@
 #include <sstream>
 #include <stdexcept>
 
+#include "open_spiel/games/eclipse/species.h"
 #include "open_spiel/games/eclipse/systems/actions/bonus.h"
 #include "open_spiel/games/eclipse/systems/actions/explore.h"
+#include "open_spiel/games/eclipse/systems/actions/research.h"
 #include "open_spiel/games/eclipse/systems/setup.h"
 #include "open_spiel/json/include/nlohmann/json.hpp"
 #include "open_spiel/observer.h"
@@ -23,38 +25,44 @@ constexpr Action chance_resolve = 0;
 
 // Action layout:
 //   0        = PASS  (also the no-op chance-resolve token)
-//   1-8      = RESEARCH (index 0-7)
-//   9-16     = BUILD (index 0-7)
-//   17       = start an EXPLORE action
-//   18 / 19  = explore: place / discard the drawn tile
-//   20-25    = explore: place with rotation 0-5
-//   26 / 27  = explore: take control / decline
-//   28 / 29  = explore: discovery reward / 2 VP
-//   30 / 31  = explore (Draco): keep drawn tile 0 / 1
-//   32 / 33  = explore (Draco): flip a second tile / proceed with one
-//   34       = explore: stop (decline remaining activations)
-//   35..259  = explore: choose zone == galaxy cell index (one id per hex)
-constexpr Action action_pass = 0;
-constexpr Action action_research_start = 1;
-constexpr Action action_build_start = 9;
-constexpr Action action_explore = 17;
-constexpr Action explore_place = 18;
-constexpr Action explore_discard = 19;
-constexpr Action explore_rotation_start = 20;
-constexpr Action explore_claim_yes = 26;
-constexpr Action explore_claim_no = 27;
-constexpr Action explore_discovery_reward = 28;
-constexpr Action explore_discovery_vp = 29;
-constexpr Action explore_select_tile_start = 30;
-constexpr Action explore_draw_again = 32;
-constexpr Action explore_skip_second = 33;
-constexpr Action explore_stop = 34;
-constexpr Action explore_zone_start = 35;  // + galaxy cell index (0..224)
-//   260-265 = TRADE (index into TradeConversion enum)
-//   266+    = COLONY_SHIP: cell_idx*(SLOTS*TRACKS) + slot_idx*TRACKS + track
+//   1        = start RESEARCH action
+//   2        = stop RESEARCH action (for multi-activation species)
+//   3-26     = standard techs (24 indices, 0-23 of TECH_TABLE)
+//   27-74    = rare techs (16 rare techs * 3 tracks = 48 indices)
+//   75-82    = BUILD (index 0-7)
+//   83       = start an EXPLORE action
+//   84 / 85  = explore: place / discard the drawn tile
+//   86-91    = explore: place with rotation 0-5
+//   92 / 93  = explore: take control / decline
+//   94 / 95  = explore: discovery reward / 2 VP
+//   96 / 97  = explore (Draco): keep drawn tile 0 / 1
+//   98 / 99  = explore (Draco): flip a second tile / proceed with one
+//   100      = explore: stop (decline remaining activations)
+//   101..325 = explore: choose zone == galaxy cell index (one id per hex)
+//   326-331  = TRADE (index into TradeConversion enum)
+//   332+     = COLONY_SHIP: cell_idx*(SLOTS*TRACKS) + slot_idx*TRACKS + track
 //             track: 0=Money, 1=Science, 2=Materials
-constexpr Action action_trade_start        = 260;
-constexpr Action action_colony_ship_start  = 266;
+constexpr Action action_pass = 0;
+constexpr Action action_research = 1;
+constexpr Action action_research_stop = 2;
+constexpr Action action_research_standard_start = 3;
+constexpr Action action_research_rare_start = 27;
+constexpr Action action_build_start = 75;
+constexpr Action action_explore = 83;
+constexpr Action explore_place = 84;
+constexpr Action explore_discard = 85;
+constexpr Action explore_rotation_start = 86;
+constexpr Action explore_claim_yes = 92;
+constexpr Action explore_claim_no = 93;
+constexpr Action explore_discovery_reward = 94;
+constexpr Action explore_discovery_vp = 95;
+constexpr Action explore_select_tile_start = 96;
+constexpr Action explore_draw_again = 98;
+constexpr Action explore_skip_second = 99;
+constexpr Action explore_stop = 100;
+constexpr Action explore_zone_start = 101;  // + galaxy cell index (0..224)
+constexpr Action action_trade_start        = 326;
+constexpr Action action_colony_ship_start  = 332;
 constexpr int COLONY_SHIP_SLOTS_PER_CELL   = 8;
 constexpr int COLONY_SHIP_TRACKS           = POP_TRACK_COUNT;  // 3
 constexpr int COLONY_SHIP_CODES_PER_CELL   =
@@ -231,6 +239,11 @@ std::vector<Action> EclipseState::LegalActions() const {
     return ExploreLegalActions();
   }
 
+  // Mid-Research: only tech choices are legal.
+  if (s.research_state.phase != ::ResearchState::Phase::inactive) {
+    return ResearchLegalActions();
+  }
+
   std::vector<Action> actions;
   actions.push_back(action_pass);
 
@@ -238,14 +251,12 @@ std::vector<Action> EclipseState::LegalActions() const {
   if (current_player < eclipse_state_.players.size() &&
       !eclipse_state_.players[current_player].has_passed) {
     const auto& player = eclipse_state_.players[current_player];
-    const bool has_action_disk = available_influence_discs(player) > 0;
+    const bool has_action_disk = player.available_influence_discs() > 0;
     if (has_action_disk && player.resources.science >= 2) {
-      for (int i = 0; i < 8; ++i) {
-        actions.push_back(action_research_start + i);
-      }
+      actions.push_back(action_research);
     }
     if (has_action_disk && player.resources.materials >= 3) {
-      for (int i = 0; i < 4; ++i) {
+      for (int i = 0; i < 8; ++i) {
         actions.push_back(action_build_start + i);
       }
     }
@@ -317,7 +328,7 @@ std::vector<Action> EclipseState::ExploreLegalActions() const {
                    Species::DESCENDANTS_OF_DRACO;
       bool may_control = !has_ancients || draco;
       if (may_control &&
-          available_influence_discs(s.players[es.player_id]) > 0) {
+          s.players[es.player_id].available_influence_discs() > 0) {
         actions.push_back(explore_claim_yes);
       }
       actions.push_back(explore_claim_no);
@@ -333,6 +344,72 @@ std::vector<Action> EclipseState::ExploreLegalActions() const {
   }
   // OpenSpiel requires LegalActions sorted ascending; zone ids are emitted in
   // grid-discovery order and explore_stop trails the zone block numerically.
+  std::sort(actions.begin(), actions.end());
+  return actions;
+}
+
+std::vector<Action> EclipseState::ResearchLegalActions() const {
+  const ::State& s = eclipse_state_;
+  const ::ResearchState& rs = s.research_state;
+  std::vector<Action> actions;
+
+  if (rs.phase != ::ResearchState::Phase::choose_tech) {
+    return actions;
+  }
+
+  const ::Player& player = s.players[rs.player_id];
+
+  // Standard techs (indices 0 to TECH_TABLE_SIZE-1 of TECH_TABLE)
+  for (size_t i = 0; i < TECH_TABLE_SIZE; ++i) {
+    const TechDefinition& def = TECH_TABLE[i];
+    if (def.category == TechCategory::RARE) continue; // Skip rare techs here
+
+    // Check if already owned
+    if (player.has_tech(def.bit)) continue;
+
+    // Check availability in tech tray
+    if (s.get_tech_tray_count(def.bit) == 0) continue;
+
+    // Check track capacity
+    if (get_track_tile_count(player, def.category) >= 8) continue;
+
+    // Check affordability
+    uint8_t cost = calculate_research_cost(player, def, def.category);
+    if (player.resources.science < cost) continue;
+
+    actions.push_back(action_research_standard_start + i);
+  }
+
+  // Rare techs (TECH_RARE_COUNT rare techs * 3 tracks = 48 indices)
+  // Rare techs start at index TECH_TABLE_SIZE in TECH_TABLE
+  for (size_t rare_idx = 0; rare_idx < TECH_RARE_COUNT; ++rare_idx) {
+    const TechDefinition& def = TECH_TABLE[TECH_TABLE_SIZE + rare_idx];
+    if (def.category != TechCategory::RARE) continue;
+
+    // Check if already owned
+    if (player.has_tech(def.bit)) continue;
+
+    // Check availability in tech tray
+    if (s.get_tech_tray_count(def.bit) == 0) continue;
+
+    // For each track, check if placement is legal
+    for (int track = 0; track < 3; ++track) {
+      TechCategory target_track = static_cast<TechCategory>(track);
+
+      // Check track capacity
+      if (get_track_tile_count(player, target_track) >= 8) continue;
+
+      // Check affordability
+      uint8_t cost = calculate_research_cost(player, def, target_track);
+      if (player.resources.science < cost) continue;
+
+      actions.push_back(action_research_rare_start + rare_idx * 3 + track);
+    }
+  }
+
+  // Option to stop early (for multi-activation species)
+  actions.push_back(action_research_stop);
+
   std::sort(actions.begin(), actions.end());
   return actions;
 }
@@ -354,11 +431,30 @@ std::string EclipseState::ActionToString(Player player, Action action_id) const 
   if (action_id == action_pass) {
     return "PASS";
   }
+  if (action_id == action_research) {
+    return "RESEARCH";
+  }
+  if (action_id == action_research_stop) {
+    return "RESEARCH_STOP";
+  }
+  if (action_id >= action_research_standard_start && action_id < action_research_rare_start) {
+    size_t tech_idx = action_id - action_research_standard_start;
+    if (tech_idx < TECH_TABLE_SIZE) {
+      return "RESEARCH_" + std::string(TECH_TABLE[tech_idx].name);
+    }
+  }
+  if (action_id >= action_research_rare_start && action_id < action_build_start) {
+    size_t offset = action_id - action_research_rare_start;
+    size_t rare_idx = offset / 3;
+    size_t track = offset % 3;
+    if (rare_idx < TECH_RARE_COUNT) {
+      const TechDefinition& def = TECH_TABLE[TECH_TABLE_SIZE + rare_idx];
+      static const char* kTrackNames[3] = {"MILITARY", "GRID", "NANO"};
+      return "RESEARCH_" + std::string(def.name) + "_ON_" + kTrackNames[track];
+    }
+  }
   if (action_id == action_explore) {
     return "EXPLORE";
-  }
-  if (action_id >= action_research_start && action_id < action_build_start) {
-    return "RESEARCH_" + std::to_string(action_id - action_research_start);
   }
   if (action_id >= action_build_start && action_id < action_explore) {
     return "BUILD_" + std::to_string(action_id - action_build_start);
@@ -686,6 +782,64 @@ void EclipseState::ApplyExploreSubAction(Action action_id) {
   }
 }
 
+void EclipseState::ApplyResearchSubAction(Action action_id) {
+  ::State& s = eclipse_state_;
+  const uint8_t player = s.research_state.player_id;
+
+  if (action_id == action_research_stop) {
+    // Stop early, don't use remaining activations
+    s.research_state.phase = ::ResearchState::Phase::inactive;
+    s.research_state.player_id = 255;
+    s.research_state.activations_remaining = 0;
+    return;
+  }
+
+  const TechDefinition* tech_def = nullptr;
+  TechCategory target_track;
+
+  if (action_id >= action_research_standard_start && action_id < action_research_rare_start) {
+    // Standard tech
+    size_t tech_idx = action_id - action_research_standard_start;
+    if (tech_idx >= TECH_TABLE_SIZE) return; // Invalid index
+    tech_def = &TECH_TABLE[tech_idx];
+    target_track = tech_def->category;
+  } else if (action_id >= action_research_rare_start && action_id < action_build_start) {
+    // Rare tech
+    size_t offset = action_id - action_research_rare_start;
+    size_t rare_idx = offset / 3;
+    size_t track = offset % 3;
+    if (rare_idx >= TECH_RARE_COUNT) return; // Invalid index
+    tech_def = &TECH_TABLE[TECH_TABLE_SIZE + rare_idx];
+    target_track = static_cast<TechCategory>(track);
+  } else {
+    return; // Invalid action
+  }
+
+  // Attempt to research the tech
+  bool success = research_tech(s, player, *tech_def, target_track);
+  if (!success) {
+    // If research failed (shouldn't happen if LegalActions is correct), just decrement and continue
+  }
+
+  // Handle immediate tech benefits
+  if (success) {
+    if (tech_def->bit == TechBit::ADVANCED_ROBOTICS) {
+      // Advanced Robotics: gain 1 influence disc
+      s.players[player].extra_influence_discs += 1;
+    } else if (tech_def->bit == TechBit::QUANTUM_GRID) {
+      // Quantum Grid: gain 2 influence discs
+      s.players[player].extra_influence_discs += 2;
+    }
+  }
+
+  // Decrement activations remaining
+  s.research_state.activations_remaining--;
+  if (s.research_state.activations_remaining == 0) {
+    s.research_state.phase = ::ResearchState::Phase::inactive;
+    s.research_state.player_id = 255;
+  }
+}
+
 void EclipseState::DoApplyAction(Action action_id) {
   if (pending_random_event_ != PendingRandomEvent::none) {
     bool was_explore_draw =
@@ -718,6 +872,17 @@ void EclipseState::DoApplyAction(Action action_id) {
     return;
   }
 
+  // Resolve a step of an in-flight Research action without advancing the turn,
+  // until all activations are done (phase returns to inactive).
+  if (eclipse_state_.research_state.phase != ::ResearchState::Phase::inactive) {
+    ApplyResearchSubAction(action_id);
+    if (eclipse_state_.research_state.phase != ::ResearchState::Phase::inactive) {
+      return;
+    }
+    AdvanceTurn();
+    return;
+  }
+
   uint8_t current_player = eclipse_state_.current_player;
 
   if (action_id == action_pass) {
@@ -736,22 +901,25 @@ void EclipseState::DoApplyAction(Action action_id) {
         return;
       }
     }
-  } else if (action_id >= action_research_start &&
-             action_id < action_build_start) {
-    // NOTE: PLACEHOLDER - research is not wired to research_tech() yet.
+  } else if (action_id == action_research) {
     if (current_player < eclipse_state_.players.size()) {
-      auto& player = eclipse_state_.players[current_player];
-      if (available_influence_discs(player) > 0 && player.resources.science >= 2) {
-        ++player.disks_on_actions;
-        player.resources.science -= 2;
-        player.score += 2;
+      const auto& player = eclipse_state_.players[current_player];
+      if (player.available_influence_discs() > 0 && player.resources.science >= 2) {
+        // Start research action
+        eclipse_state_.research_state.phase = ::ResearchState::Phase::choose_tech;
+        eclipse_state_.research_state.player_id = current_player;
+        // Get number of research activations from species
+        const SpeciesData& species_data = SPECIES_TABLE[static_cast<size_t>(player.species_id)];
+        eclipse_state_.research_state.activations_remaining = species_data.activations.research;
+        ++eclipse_state_.players[current_player].disks_on_actions;
+        return;
       }
     }
   } else if (action_id >= action_build_start && action_id < action_explore) {
     // NOTE: PLACEHOLDER - build is not implemented yet.
     if (current_player < eclipse_state_.players.size()) {
       auto& player = eclipse_state_.players[current_player];
-      if (available_influence_discs(player) > 0 && player.resources.materials >= 3) {
+      if (player.available_influence_discs() > 0 && player.resources.materials >= 3) {
         ++player.disks_on_actions;
         player.resources.materials -= 3;
         player.score += 3;

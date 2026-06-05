@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "open_spiel/games/eclipse/systems/actions/explore.h"
+#include "open_spiel/games/eclipse/systems/actions/research.h"
 #include "open_spiel/json/include/nlohmann/json.hpp"
 #include "open_spiel/spiel.h"
 #include "open_spiel/spiel_utils.h"
@@ -145,6 +146,15 @@ void AppConfigSnapshotTest() {
   player.disks_on_actions = 0;
   s.players.push_back(player);
   return s;
+}
+
+Action FindActionByName(const State& state, const std::string& name) {
+  for (Action action : state.LegalActions()) {
+    if (state.ActionToString(state.CurrentPlayer(), action) == name) {
+      return action;
+    }
+  }
+  return -1;
 }
 
 void ExplorePureHelpersTest() {
@@ -385,9 +395,8 @@ void ExploreFullActionViaApiTest() {
   auto* eclipse_state = dynamic_cast<EclipseState*>(state.get());
   SPIEL_CHECK_TRUE(eclipse_state != nullptr);
 
-  std::vector<Action> legal = state->LegalActions();
-  const Action explore_start = 17;
-  if (std::find(legal.begin(), legal.end(), explore_start) == legal.end()) {
+  const Action explore_start = FindActionByName(*state, "EXPLORE");
+  if (explore_start < 0) {
     return;  // no legal explore zones at game start (not expected, but safe)
   }
 
@@ -435,6 +444,156 @@ void ExploreFullActionViaApiTest() {
   SPIEL_CHECK_EQ(eclipse_state->RawState().players[0].disks_on_actions, 1);
 }
 
+void ResearchRareTechTrackTest() {
+  ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+  ::Player& player = s.players[0];
+  player.resources.science = 20;
+  player.researched_techs_military = static_cast<uint64_t>(TechBit::NEUTRON_BOMBS);
+  player.researched_techs_grid = static_cast<uint64_t>(TechBit::GAUSS_SHIELD);
+  player.researched_techs_nano = 0;
+  s.add_to_tech_tray(TechBit::ABSORPTION_SHIELD);
+
+  const TechDefinition& rare = TECH_TABLE[TECH_TABLE_SIZE];
+  SPIEL_CHECK_EQ(static_cast<uint64_t>(rare.bit),
+                 static_cast<uint64_t>(TechBit::ABSORPTION_SHIELD));
+  SPIEL_CHECK_TRUE(research_tech(s, 0, rare, TechCategory::GRID));
+
+  const uint64_t rare_bit = static_cast<uint64_t>(TechBit::ABSORPTION_SHIELD);
+  SPIEL_CHECK_FALSE((player.researched_techs_military & rare_bit) != 0);
+  SPIEL_CHECK_TRUE((player.researched_techs_grid & rare_bit) != 0);
+  SPIEL_CHECK_FALSE((player.researched_techs_nano & rare_bit) != 0);
+  SPIEL_CHECK_EQ(get_track_tile_count(player, TechCategory::MILITARY), 1);
+  SPIEL_CHECK_EQ(get_track_tile_count(player, TechCategory::GRID), 2);
+  SPIEL_CHECK_EQ(get_track_tile_count(player, TechCategory::NANO), 0);
+}
+
+void ResearchInfluenceDiscRewardsTest() {
+  std::shared_ptr<const Game> game = LoadEclipseGame(2, 7);
+  std::unique_ptr<State> state = game->NewInitialState();
+  state->ApplyAction(0);
+
+  auto* eclipse_state = static_cast<EclipseState*>(state.get());
+  ::State raw = eclipse_state->RawState();
+  raw.current_player = 0;
+  raw.players[0].has_passed = false;
+  raw.players[0].resources.science = 20;
+  raw.players[0].disks_on_actions = 0;
+  raw.players[0].extra_influence_discs = 0;
+  raw.players[0].researched_techs_grid = 0;
+  raw.tech_tray.fill(0);
+  raw.add_to_tech_tray(TechBit::QUANTUM_GRID);
+
+  const auto eclipse_game = std::static_pointer_cast<const EclipseGame>(game);
+  eclipse_state->RestoreFromSnapshot(eclipse_game->InitialSetupConfig(), raw,
+                                     EclipseState::PendingRandomEvent::none);
+
+  const uint8_t initial_available =
+      eclipse_state->RawState().players[0].available_influence_discs();
+  const Action research_action = FindActionByName(*state, "RESEARCH");
+  SPIEL_CHECK_GE(research_action, 0);
+  state->ApplyAction(research_action);
+
+  const Action quantum_grid_action = FindActionByName(*state, "RESEARCH_Quantum Grid");
+  SPIEL_CHECK_GE(quantum_grid_action, 0);
+  state->ApplyAction(quantum_grid_action);
+
+  const ::Player& player = eclipse_state->RawState().players[0];
+  SPIEL_CHECK_EQ(player.disks_on_sectors, raw.players[0].disks_on_sectors);
+  SPIEL_CHECK_EQ(player.extra_influence_discs, 2);
+  SPIEL_CHECK_EQ(player.available_influence_discs(), initial_available + 1);
+}
+
+void ResearchActionTest() {
+  std::shared_ptr<const Game> game = LoadGame("eclipse");
+  std::unique_ptr<State> state = game->NewInitialState();
+
+  // Run through initial setup
+  while (state->IsChanceNode()) {
+    const ActionsAndProbs outcomes = state->ChanceOutcomes();
+    state->ApplyAction(outcomes[0].first);
+  }
+
+  auto* eclipse_state = static_cast<EclipseState*>(state.get());
+  const ::State& s = eclipse_state->RawState();
+  uint8_t acting_player = state->CurrentPlayer();
+
+  // Acting player should have some starting science
+  SPIEL_CHECK_GT(s.players[acting_player].resources.science, 0);
+
+  // Get legal actions - should include RESEARCH if player has >=2 science
+  std::vector<Action> legal = state->LegalActions();
+  bool has_research = false;
+  for (Action a : legal) {
+    std::string name = state->ActionToString(state->CurrentPlayer(), a);
+    if (name == "RESEARCH") {
+      has_research = true;
+      break;
+    }
+  }
+  SPIEL_CHECK_TRUE(has_research);
+
+  // Find the RESEARCH action
+  Action research_action = -1;
+  for (Action a : legal) {
+    std::string name = state->ActionToString(state->CurrentPlayer(), a);
+    if (name == "RESEARCH") {
+      research_action = a;
+      break;
+    }
+  }
+  SPIEL_CHECK_NE(research_action, -1);
+
+  // Start research action
+  state->ApplyAction(research_action);
+  eclipse_state = static_cast<EclipseState*>(state.get());
+  const ::State& s2 = eclipse_state->RawState();
+
+  // Should now be in research phase
+  SPIEL_CHECK_EQ(s2.research_state.phase, ResearchState::Phase::choose_tech);
+  SPIEL_CHECK_EQ(s2.research_state.player_id, acting_player);
+
+  // Get legal research actions
+  legal = state->LegalActions();
+  SPIEL_CHECK_FALSE(legal.empty());
+
+  // Find a standard tech that's affordable
+  Action chosen_tech = -1;
+  for (Action a : legal) {
+    std::string name = state->ActionToString(state->CurrentPlayer(), a);
+    if (name.rfind("RESEARCH_", 0) == 0 && name != "RESEARCH_STOP") {
+      // Check if it's a standard tech (not rare with _ON_ suffix)
+      if (name.find("_ON_") == std::string::npos) {
+        chosen_tech = a;
+        break;
+      }
+    }
+  }
+
+  if (chosen_tech != -1) {
+    // Record initial state
+    uint8_t initial_science = s2.players[acting_player].resources.science;
+    uint64_t initial_techs = s2.players[acting_player].researched_techs_military |
+                             s2.players[acting_player].researched_techs_grid |
+                             s2.players[acting_player].researched_techs_nano;
+
+    // Research the tech
+    state->ApplyAction(chosen_tech);
+    eclipse_state = static_cast<EclipseState*>(state.get());
+    const ::State& s3 = eclipse_state->RawState();
+
+    // Verify tech was added (at least one mask changed)
+    uint64_t final_techs = s3.players[acting_player].researched_techs_military |
+                           s3.players[acting_player].researched_techs_grid |
+                           s3.players[acting_player].researched_techs_nano;
+    SPIEL_CHECK_NE(final_techs, initial_techs);
+    // Science should have decreased
+    SPIEL_CHECK_LT(s3.players[acting_player].resources.science, initial_science);
+
+    // Research phase should be inactive (single activation species)
+    SPIEL_CHECK_EQ(s3.research_state.phase, ResearchState::Phase::inactive);
+  }
+}
+
 }  // namespace
 }  // namespace eclipse
 }  // namespace open_spiel
@@ -455,4 +614,7 @@ int main(int argc, char** argv) {
   open_spiel::eclipse::ExploreStopAndDracoDrawTest();
   open_spiel::eclipse::ExploreSpeciesRandomSimTest();
   open_spiel::eclipse::ExploreFullActionViaApiTest();
+  open_spiel::eclipse::ResearchRareTechTrackTest();
+  open_spiel::eclipse::ResearchInfluenceDiscRewardsTest();
+  open_spiel::eclipse::ResearchActionTest();
 }
