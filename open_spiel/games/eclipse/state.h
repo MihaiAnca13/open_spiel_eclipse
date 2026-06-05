@@ -19,6 +19,7 @@
 #include "species.h"
 #include "systems/actions/explore.h"
 #include "systems/actions/research.h"
+#include "systems/actions/build.h"
 #include "absl/container/fixed_array.h"
 
 using open_spiel::eclipse::FixedVector;
@@ -139,6 +140,9 @@ struct State {
     // Unlike Explore, Research does not require a multi-step sub-state machine:
     // each activation is a single choice of a tech (and track for Rare Techs).
     ResearchState research_state;
+
+    // In-flight Build action (inactive when no Build is being resolved).
+    BuildState build_state;
 
     // Helper functions for tech market tray (allocation-free representation)
     uint8_t get_tech_tray_count(TechBit tech) const {
