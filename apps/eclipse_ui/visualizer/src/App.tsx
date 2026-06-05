@@ -9,6 +9,7 @@ import {
   getPlayerColor,
 } from './theme';
 import ActionPanel, {type ExploreState, type ResearchState} from './ActionPanel';
+import ResearchTracks from './ResearchTracks';
 import { ACTION, TRADE_LABELS, POP_TRACK_LABELS } from './actionTypes';
 
 import {
@@ -70,6 +71,9 @@ interface Player {
   reputation_tiles: string[];
   trade_rate: number;
   researched_techs: number;
+  researched_techs_military: number;
+  researched_techs_grid: number;
+  researched_techs_nano: number;
 }
 
 interface Sector {
@@ -1212,6 +1216,12 @@ function App({
                                 legalTradeActions={legalTradeActions}
                                 onTrade={submitAction}
                                 resources={p.resources}
+                              />
+                              <ResearchTracks
+                                militaryMask={p.researched_techs_military}
+                                gridMask={p.researched_techs_grid}
+                                nanoMask={p.researched_techs_nano}
+                                techCatalog={gameMetadata.tech_catalog ?? {}}
                               />
                             </>
                           ) : (

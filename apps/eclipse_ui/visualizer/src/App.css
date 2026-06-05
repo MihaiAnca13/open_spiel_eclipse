@@ -298,6 +298,69 @@
 .tech-category-badge.Nano { color: #6ee7b7; }
 .tech-category-badge.Rare { color: #fde047; }
 
+.research-tracks-panel {
+  margin-top: 12px;
+}
+
+.research-tracks {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.research-track-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.research-track-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  min-width: 60px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  text-align: center;
+}
+
+.research-track-label.military {
+  color: #fca5a5;
+  background-color: rgba(239, 68, 68, 0.1);
+}
+
+.research-track-label.grid {
+  color: #93c5fd;
+  background-color: rgba(59, 130, 246, 0.1);
+}
+
+.research-track-label.nano {
+  color: #6ee7b7;
+  background-color: rgba(16, 185, 129, 0.1);
+}
+
+.research-track-techs {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.research-tech-item {
+  position: relative;
+  width: 32px;
+  height: 32px;
+  border-radius: 4px;
+  overflow: hidden;
+  background-color: #1a1c23;
+  border: 1px solid #2d313f;
+}
+
+.research-tech-image {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
 .image-hover-preview {
   position: fixed;
   inset: 0;
