@@ -214,3 +214,17 @@ std::vector<ColonyPlacement> legal_colony_ship_placements(
     }
     return result;
 }
+
+bool can_place_warp_portal(const State& state, uint8_t player_id, uint8_t galaxy_cell_idx) {
+    // TODO: Implement Warp Portal placement logic later.
+    // 1. Verify player is eligible (either by claiming the Warp Portal Discovery Tile
+    //    or having researched the Warp Portal Rare Tech).
+    // 2. Consume the eligibility flag/tile.
+    // 3. Mark the target sector as containing a player warp portal (set has_player_warp_portal = true).
+    return false;
+}
+
+bool place_warp_portal(State& state, uint8_t player_id, uint8_t galaxy_cell_idx) {
+    // TODO: Implement Warp Portal placement logic later.
+    return false;
+}

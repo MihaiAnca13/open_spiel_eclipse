@@ -94,6 +94,10 @@ set(GAME_SOURCES
   eclipse/systems/actions/explore.h
   eclipse/systems/actions/research.cpp
   eclipse/systems/actions/research.h
+  eclipse/systems/actions/build.cpp
+  eclipse/systems/actions/build.h
+  eclipse/systems/actions/influence.cpp
+  eclipse/systems/actions/influence.h
   eclipse/actions.h
   eclipse/dice.h
   eclipse/discovery_tiles.h

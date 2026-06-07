@@ -110,6 +110,17 @@ inline int hex_distance(uint32_t key1, uint32_t key2) {
     return hex_distance(unpack_q(key1), unpack_r(key1), unpack_q(key2), unpack_r(key2));
 }
 
+// Check if coordinates are within the galaxy bounds
+inline bool in_galaxy_bounds(int q, int r) {
+    return q >= -GALAXY_RADIUS && q <= GALAXY_RADIUS &&
+           r >= -GALAXY_RADIUS && r <= GALAXY_RADIUS;
+}
+
+// Check if a 6-edge bitmask has an edge in the given direction (0-5)
+inline bool has_edge(uint8_t mask, int d) {
+    return (mask >> d) & 1u;
+}
+
 #include <nlohmann/json.hpp>
 
 inline void to_json(nlohmann::json& j, const Galaxy& g) {

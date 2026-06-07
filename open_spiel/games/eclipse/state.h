@@ -20,6 +20,7 @@
 #include "systems/actions/explore.h"
 #include "systems/actions/research.h"
 #include "systems/actions/build.h"
+#include "systems/actions/influence.h"
 #include "absl/container/fixed_array.h"
 
 using open_spiel::eclipse::FixedVector;
@@ -144,6 +145,9 @@ struct State {
     // In-flight Build action (inactive when no Build is being resolved).
     BuildState build_state;
 
+    // In-flight Influence action (inactive when no Influence is being resolved).
+    InfluenceState influence_state;
+
     // Helper functions for tech market tray (allocation-free representation)
     uint8_t get_tech_tray_count(TechBit tech) const {
         if (tech == TechBit::NONE) return 0;
@@ -262,6 +266,43 @@ inline void from_json(const nlohmann::json& j, State& s) {
     }
 
     j.at("research_state").get_to(s.research_state);
+}
+
+// Helper: Check if a sector is an anchor for a player (controlled or has a ship present)
+// TODO: respect Pinning once movement/combat exists; any own ship anchors.
+inline bool is_sector_anchor(const State& state, uint8_t player_id, const Sector& sector) {
+    if (sector.sector_id == 0) return false;
+    if (sector.owner_id == player_id) return true;
+    for (const Unit& unit : state.unit_registry) {
+        if (unit.player_id == player_id && unit.sector_id == sector.sector_id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+inline bool player_has_warp_portal_anchor(const State& state, uint8_t player_id) {
+    for (int q = -GALAXY_RADIUS; q <= GALAXY_RADIUS; ++q) {
+        for (int r = -GALAXY_RADIUS; r <= GALAXY_RADIUS; ++r) {
+            if (!in_galaxy_bounds(q, r)) continue;
+            const Sector& sector = state.galaxy.at(q, r);
+            if (sector.sector_id == 0) continue;
+            
+            bool has_portal = sector.has_player_warp_portal;
+            if (!has_portal) {
+                const SectorDefinition* def = get_sector_definition(sector.sector_id);
+                if (def && def->has_warp_portal) {
+                    has_portal = true;
+                }
+            }
+            if (!has_portal) continue;
+
+            if (is_sector_anchor(state, player_id, sector)) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 #endif //ECLIPSE_STATE_H

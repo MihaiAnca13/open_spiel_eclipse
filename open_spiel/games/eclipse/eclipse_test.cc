@@ -5,6 +5,7 @@
 
 #include "open_spiel/games/eclipse/systems/actions/explore.h"
 #include "open_spiel/games/eclipse/systems/actions/research.h"
+#include "open_spiel/games/eclipse/systems/actions/influence.h"
 #include "open_spiel/json/include/nlohmann/json.hpp"
 #include "open_spiel/spiel.h"
 #include "open_spiel/spiel_utils.h"
@@ -594,6 +595,127 @@ void ResearchActionTest() {
   }
 }
 
+void InfluenceReclaimCubesTest() {
+  // Test reclaim logic with wildcards, orbitals, and saturation cascades
+  ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+  ::Player& p = s.players[0];
+
+  // Set up starting resources & tracks
+  p.resources.gold_prod = 5;
+  p.resources.science_prod = 5;
+  p.resources.materials_prod = 5;
+
+  // Let's place an influence disc on a sector and colonize slots
+  Sector& cell = s.galaxy.at(1, 0);
+  cell.sector_id = 101; // Castor: ADV_MATERIALS, MATERIALS, MONEY
+  cell.owner_id = 0;
+  cell.coords = {1, 0};
+  p.disks_on_sectors = 1;
+
+  // Colonize Castor slots: ADV_MATERIALS (index 0) and MONEY (index 2)
+  cell.occupied_slots_mask = (1u << 0) | (1u << 2);
+
+  // Reclaim disc from Castor!
+  // Normal return: ADV_MATERIALS (matching Materials track), MONEY (matching Money track)
+  // Since both tracks have 5 cubes (< 12), they should be auto-returned immediately.
+  SPIEL_CHECK_TRUE(execute_reclaim_from_sector(s, 0, hex_to_index(1, 0)));
+  SPIEL_CHECK_EQ(cell.owner_id, 255);
+  SPIEL_CHECK_EQ(cell.occupied_slots_mask, 0);
+  SPIEL_CHECK_EQ(p.disks_on_sectors, 0);
+  // Track values should have incremented by 1
+  SPIEL_CHECK_EQ(p.resources.gold_prod, 6);
+  SPIEL_CHECK_EQ(p.resources.materials_prod, 6);
+  SPIEL_CHECK_EQ(p.resources.science_prod, 5);
+  SPIEL_CHECK_TRUE(s.influence_state.phase == InfluenceState::Phase::inactive);
+
+  // Let's test wildcards (ANY) on Mu Cassiopeiae (sector 108)
+  Sector& cell2 = s.galaxy.at(0, 1);
+  cell2.sector_id = 108; // Mu Cassiopeiae: ADV_MONEY, SCIENCE, ANY
+  cell2.owner_id = 0;
+  cell2.coords = {0, 1};
+  p.disks_on_sectors = 1;
+
+  // Occupy the ANY slot (index 2)
+  cell2.occupied_slots_mask = (1u << 2);
+
+  // Reset tracks to 5
+  p.resources.gold_prod = 5;
+  p.resources.science_prod = 5;
+  p.resources.materials_prod = 5;
+
+  SPIEL_CHECK_TRUE(execute_reclaim_from_sector(s, 0, hex_to_index(0, 1)));
+  // Should transition to choose_return_track phase!
+  SPIEL_CHECK_TRUE(s.influence_state.phase == InfluenceState::Phase::choose_return_track);
+  SPIEL_CHECK_EQ(s.influence_state.pending_returns.size(), 1);
+  SPIEL_CHECK_TRUE(s.influence_state.pending_returns[0].type == PlanetType::ANY);
+
+  // Let's try to choose an invalid track or valid track
+  // We choose materials (track 2)
+  SPIEL_CHECK_TRUE(execute_choose_return_track(s, 0, 2)); // PopTrack::MATERIALS
+  SPIEL_CHECK_EQ(p.resources.materials_prod, 6);
+  SPIEL_CHECK_EQ(p.resources.gold_prod, 5);
+  SPIEL_CHECK_EQ(p.resources.science_prod, 5);
+  SPIEL_CHECK_TRUE(s.influence_state.phase == InfluenceState::Phase::inactive);
+
+  // Let's test Orbitals
+  Sector& cell3 = s.galaxy.at(2, 0);
+  cell3.sector_id = 201; // Alpha Centauri: MATERIALS, MONEY
+  cell3.owner_id = 0;
+  cell3.coords = {2, 0};
+  cell3.orbital_built = true;
+  p.disks_on_sectors = 1;
+
+  // Occupy the orbital slot (index 2, which is def->slots.size() since Alpha Centauri has 2 slots)
+  cell3.occupied_slots_mask = (1u << 2);
+
+  p.resources.gold_prod = 5;
+  p.resources.science_prod = 5;
+  p.resources.materials_prod = 5;
+
+  SPIEL_CHECK_TRUE(execute_reclaim_from_sector(s, 0, hex_to_index(2, 0)));
+  SPIEL_CHECK_TRUE(s.influence_state.phase == InfluenceState::Phase::choose_return_track);
+  SPIEL_CHECK_EQ(s.influence_state.pending_returns.size(), 1);
+  SPIEL_CHECK_TRUE(s.influence_state.pending_returns[0].is_orbital);
+
+  // For orbital, PopTrack::MATERIALS (2) should be illegal because orbital only allows gold/science
+  SPIEL_CHECK_FALSE(execute_choose_return_track(s, 0, 2));
+
+  // Choose gold (track 0)
+  SPIEL_CHECK_TRUE(execute_choose_return_track(s, 0, 0));
+  SPIEL_CHECK_EQ(p.resources.gold_prod, 6);
+  SPIEL_CHECK_EQ(p.resources.science_prod, 5);
+  SPIEL_CHECK_TRUE(s.influence_state.phase == InfluenceState::Phase::inactive);
+
+  // Let's test saturation/overflow!
+  Sector& cell4 = s.galaxy.at(0, 2);
+  cell4.sector_id = 201; // Alpha Centauri: MATERIALS, MONEY
+  cell4.owner_id = 0;
+  cell4.coords = {0, 2};
+  p.disks_on_sectors = 1;
+
+  // Occupy MONEY slot (index 1)
+  cell4.occupied_slots_mask = (1u << 1);
+
+  // Make MONEY track fully saturated (12)
+  p.resources.gold_prod = 12;
+  p.resources.science_prod = 5;
+  p.resources.materials_prod = 5;
+
+  SPIEL_CHECK_TRUE(execute_reclaim_from_sector(s, 0, hex_to_index(0, 2)));
+  // Since gold_prod is 12, it must trigger a choice for the spillover!
+  SPIEL_CHECK_TRUE(s.influence_state.phase == InfluenceState::Phase::choose_return_track);
+  SPIEL_CHECK_EQ(s.influence_state.pending_returns.size(), 1);
+
+  // We should not be able to choose track 0 (gold_prod is full)
+  SPIEL_CHECK_FALSE(execute_choose_return_track(s, 0, 0));
+
+  // Choose science (track 1)
+  SPIEL_CHECK_TRUE(execute_choose_return_track(s, 0, 1));
+  SPIEL_CHECK_EQ(p.resources.gold_prod, 12);
+  SPIEL_CHECK_EQ(p.resources.science_prod, 6);
+  SPIEL_CHECK_TRUE(s.influence_state.phase == InfluenceState::Phase::inactive);
+}
+
 }  // namespace
 }  // namespace eclipse
 }  // namespace open_spiel
@@ -617,4 +739,5 @@ int main(int argc, char** argv) {
   open_spiel::eclipse::ResearchRareTechTrackTest();
   open_spiel::eclipse::ResearchInfluenceDiscRewardsTest();
   open_spiel::eclipse::ResearchActionTest();
+  open_spiel::eclipse::InfluenceReclaimCubesTest();
 }

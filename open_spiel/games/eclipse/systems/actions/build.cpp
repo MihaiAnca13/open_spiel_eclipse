@@ -6,6 +6,7 @@
 
 #include <algorithm>
 
+#include "open_spiel/games/eclipse/state.h"
 #include "open_spiel/games/eclipse/galaxy.h"
 #include "open_spiel/games/eclipse/sectors.h"
 #include "open_spiel/games/eclipse/species.h"

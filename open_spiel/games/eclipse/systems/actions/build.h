@@ -8,7 +8,10 @@
 #include <cstdint>
 #include <vector>
 #include <nlohmann/json.hpp>
-#include "open_spiel/games/eclipse/state.h"
+
+// Forward declarations to avoid circular dependency
+struct State;
+struct Player;
 
 // Sub-state machine driving multi-activation build actions.
 struct BuildState

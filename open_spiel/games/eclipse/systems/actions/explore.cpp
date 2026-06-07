@@ -47,10 +47,6 @@ const std::vector<uint16_t>& ring_sector_ids(SectorType ring) {
     }
 }
 
-bool in_galaxy_bounds(int q, int r) {
-    return q >= -GALAXY_RADIUS && q <= GALAXY_RADIUS &&
-           r >= -GALAXY_RADIUS && r <= GALAXY_RADIUS;
-}
 
 bool is_draco(const State& state, uint8_t player_id) {
     return state.players[player_id].species_id == Species::DESCENDANTS_OF_DRACO;
@@ -98,7 +94,7 @@ bool zone_has_wormhole_access(const State& state, uint8_t player_id, int q, int 
         int nr = r + HEX_DIRECTIONS[d].second;
         if (!in_galaxy_bounds(nq, nr)) continue;
         const Sector& nb = state.galaxy.at(nq, nr);
-        if (nb.sector_id == 0 || !is_explore_anchor(state, player_id, nb)) continue;
+        if (nb.sector_id == 0 || !is_sector_anchor(state, player_id, nb)) continue;
         if (wormhole_generator) return true;
         const SectorDefinition* ndef = get_sector_definition(nb.sector_id);
         if (ndef == nullptr) continue;
@@ -190,17 +186,6 @@ void end_explore_activation(State& state) {
 }  // namespace
 
 
-bool is_explore_anchor(const State& state, uint8_t player_id, const Sector& sector) {
-    if (sector.sector_id == 0) return false;
-    if (sector.owner_id == player_id) return true;
-    // TODO: respect Pinning once movement/combat exists; any own ship anchors.
-    for (const Unit& unit : state.unit_registry) {
-        if (unit.player_id == player_id && unit.sector_id == sector.sector_id) {
-            return true;
-        }
-    }
-    return false;
-}
 
 uint32_t ring_bag_value(const State& state, SectorType ring) {
     switch (ring) {
@@ -245,7 +230,7 @@ std::vector<uint8_t> legal_explore_rotations(const State& state, uint8_t player_
         int nr = es.zone_r + HEX_DIRECTIONS[d].second;
         if (!in_galaxy_bounds(nq, nr)) continue;
         const Sector& nb = state.galaxy.at(nq, nr);
-        if (nb.sector_id == 0 || !is_explore_anchor(state, player_id, nb)) continue;
+        if (nb.sector_id == 0 || !is_sector_anchor(state, player_id, nb)) continue;
         const SectorDefinition* ndef = get_sector_definition(nb.sector_id);
         if (ndef == nullptr) continue;
         neighbours[d] = {true, rotate_edge_mask(ndef->wormholes_mask, nb.rotation)};
@@ -259,8 +244,8 @@ std::vector<uint8_t> legal_explore_rotations(const State& state, uint8_t player_
         bool connects = false;
         for (uint8_t d = 0; d < 6 && !connects; ++d) {
             if (!neighbours[d].anchor) continue;
-            bool my_edge = (my_mask >> d) & 1u;
-            bool their_edge = (neighbours[d].mask >> ((d + 3) % 6)) & 1u;
+            bool my_edge = has_edge(my_mask, d);
+            bool their_edge = has_edge(neighbours[d].mask, (d + 3) % 6);
             connects = wormhole_generator ? (my_edge || their_edge)
                                           : (my_edge && their_edge);
         }

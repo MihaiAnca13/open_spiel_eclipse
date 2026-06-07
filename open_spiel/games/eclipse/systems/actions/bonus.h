@@ -66,6 +66,15 @@ struct ColonyPlacement {
 std::vector<ColonyPlacement> legal_colony_ship_placements(
     const State& state, uint8_t player_id);
 
+// ── Player Warp Portal Placement ──────────────────────────────────────────────
+// TODO: Implement Warp Portal placement logic later.
+// 1. Verify player is eligible (either by claiming the Warp Portal Discovery Tile
+//    or having researched the Warp Portal Rare Tech).
+// 2. Consume the eligibility flag/tile.
+// 3. Mark the target sector as containing a player warp portal (set has_player_warp_portal = true).
+bool can_place_warp_portal(const State& state, uint8_t player_id, uint8_t galaxy_cell_idx);
+bool place_warp_portal(State& state, uint8_t player_id, uint8_t galaxy_cell_idx);
+
 // ── Population Track helpers ──────────────────────────────────────────────────
 // Track state is stored in Resources::gold_prod / science_prod / materials_prod
 // as the number of cubes REMAINING ON THE TRACK (0=empty, 12=full).
