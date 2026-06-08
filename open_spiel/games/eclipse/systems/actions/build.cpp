@@ -17,7 +17,7 @@ namespace open_spiel::eclipse
     namespace
     {
         // Checks whether the player has any components remaining in their finite component pool supply.
-        bool has_available_miniatures(const State& state, const uint8_t player_id, const BuildType type)
+        bool has_available_miniatures(const ::State& state, const uint8_t player_id, const BuildType type)
         {
             // Count active units of this type on the board currently in registry
             int active_count = 0;
@@ -60,7 +60,7 @@ namespace open_spiel::eclipse
         }
 
         // Advances or terminates the build lifecycle tracking loop.
-        void end_build_activation(State& state)
+        void end_build_activation(::State& state)
         {
             if (state.build_state.activations_remaining > 0)
             {
@@ -96,7 +96,7 @@ namespace open_spiel::eclipse
         return 255;
     }
 
-    bool can_build(const State& state, const uint8_t player_id, const BuildType type, const uint8_t galaxy_cell_idx)
+    bool can_build(const ::State& state, const uint8_t player_id, const BuildType type, const uint8_t galaxy_cell_idx)
     {
         if (player_id >= state.players.size()) return false;
         const Player& player = state.players[player_id];
@@ -136,7 +136,7 @@ namespace open_spiel::eclipse
         return true;
     }
 
-    bool execute_build(State& state, uint8_t player_id, BuildType type, uint8_t galaxy_cell_idx)
+    bool execute_build(::State& state, uint8_t player_id, BuildType type, uint8_t galaxy_cell_idx)
     {
         if (!can_build(state, player_id, type, galaxy_cell_idx)) return false;
 
@@ -175,7 +175,7 @@ namespace open_spiel::eclipse
         return true;
     }
 
-    bool begin_build(State& state, uint8_t player_id)
+    bool begin_build(::State& state, uint8_t player_id)
     {
         if (player_id >= state.players.size()) return false;
 

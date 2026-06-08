@@ -58,6 +58,9 @@ namespace open_spiel::eclipse
     // track: 0=Money, 1=Science, 2=Materials
     bool execute_choose_return_track(::State& state, uint8_t player_id, uint8_t track);
 
+    // Returns the legal return tracks (0=Money, 1=Science, 2=Materials) for the current pending return cube.
+    std::vector<uint8_t> get_legal_return_tracks_for_current_pending(const ::State& state);
+
     // Initializes a multi-activation influence cycle and automatically restores
     // up to two colony ships faceup.
     bool begin_influence(::State& state, uint8_t player_id);

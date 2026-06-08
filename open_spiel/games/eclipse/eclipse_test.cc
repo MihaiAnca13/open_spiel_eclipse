@@ -5,6 +5,7 @@
 
 #include "open_spiel/games/eclipse/systems/actions/explore.h"
 #include "open_spiel/games/eclipse/systems/actions/research.h"
+#include "open_spiel/games/eclipse/systems/actions/build.h"
 #include "open_spiel/games/eclipse/systems/actions/influence.h"
 #include "open_spiel/json/include/nlohmann/json.hpp"
 #include "open_spiel/spiel.h"
@@ -716,6 +717,160 @@ void InfluenceReclaimCubesTest() {
   SPIEL_CHECK_TRUE(s.influence_state.phase == InfluenceState::Phase::inactive);
 }
 
+void InfluenceFullActionTest() {
+  std::shared_ptr<const Game> game = LoadEclipseGame(2, 7);
+  std::unique_ptr<State> state = game->NewInitialState();
+  state->ApplyAction(0); // resolve setup
+
+  EclipseState* eclipse_state = static_cast<EclipseState*>(state.get());
+  ::State& raw = const_cast<::State&>(eclipse_state->RawState());
+  raw.current_player = 0;
+  raw.players[0].has_passed = false;
+  raw.players[0].resources.gold_prod = 5;
+  raw.players[0].resources.science_prod = 5;
+  raw.players[0].resources.materials_prod = 5;
+
+  // Let's make sure the INFLUENCE action is available
+  std::vector<Action> legal = state->LegalActions();
+  Action influence_act = -1;
+  for (Action a : legal) {
+    if (state->ActionToString(state->CurrentPlayer(), a) == "INFLUENCE") {
+      influence_act = a;
+      break;
+    }
+  }
+  SPIEL_CHECK_NE(influence_act, -1);
+
+  // Apply INFLUENCE action!
+  state->ApplyAction(influence_act);
+  SPIEL_CHECK_TRUE(raw.influence_state.phase == InfluenceState::Phase::choose_influence);
+  SPIEL_CHECK_EQ(raw.players[0].disks_on_actions, 1); // Spends 1 disc
+
+  // Let's set up cell (1, 0) to be owned and colonized with wildcard ANY
+  Sector& cell = raw.galaxy.at(1, 0);
+  cell.sector_id = 108; // Mu Cassiopeiae: ADV_MONEY, SCIENCE, ANY
+  cell.owner_id = 0;
+  cell.coords = {1, 0};
+  cell.occupied_slots_mask = (1u << 2); // ANY slot colonized
+  raw.players[0].disks_on_sectors = 1;
+
+  // Get current legal actions: should contain RECLAIM_FROM_1_0
+  legal = state->LegalActions();
+  Action reclaim_act = -1;
+  for (Action a : legal) {
+    std::string name = state->ActionToString(state->CurrentPlayer(), a);
+    if (name == "RECLAIM_FROM_1_0") {
+      reclaim_act = a;
+      break;
+    }
+  }
+  SPIEL_CHECK_NE(reclaim_act, -1);
+
+  // Apply reclaim action!
+  state->ApplyAction(reclaim_act);
+
+  // Should transition to choose_return_track and expect a choice of track (0, 1, 2)
+  SPIEL_CHECK_TRUE(raw.influence_state.phase == InfluenceState::Phase::choose_return_track);
+  legal = state->LegalActions();
+  SPIEL_CHECK_EQ(legal.size(), 3); // Money, Science, Materials all have space
+  SPIEL_CHECK_EQ(state->ActionToString(state->CurrentPlayer(), legal[0]), "RETURN_CUBE_TO_MONEY");
+  SPIEL_CHECK_EQ(state->ActionToString(state->CurrentPlayer(), legal[1]), "RETURN_CUBE_TO_SCIENCE");
+  SPIEL_CHECK_EQ(state->ActionToString(state->CurrentPlayer(), legal[2]), "RETURN_CUBE_TO_MATERIALS");
+
+  // Choose Materials (index 2, which maps to legal[2])
+  state->ApplyAction(legal[2]);
+
+  // Mu Cassiopeiae should now be vacant and owned by 255
+  SPIEL_CHECK_EQ(cell.owner_id, 255);
+  SPIEL_CHECK_EQ(cell.occupied_slots_mask, 0);
+  SPIEL_CHECK_EQ(raw.players[0].disks_on_sectors, 0);
+  SPIEL_CHECK_EQ(raw.players[0].resources.materials_prod, 6);
+
+  // Activations remaining should have decremented from 2 to 1 (since Terrans have 2 influence activations)
+  SPIEL_CHECK_EQ(raw.influence_state.activations_remaining, 1);
+  SPIEL_CHECK_TRUE(raw.influence_state.phase == InfluenceState::Phase::choose_influence);
+
+  // Stop early!
+  legal = state->LegalActions();
+  Action stop_act = -1;
+  for (Action a : legal) {
+    if (state->ActionToString(state->CurrentPlayer(), a) == "INFLUENCE_STOP") {
+      stop_act = a;
+      break;
+    }
+  }
+  SPIEL_CHECK_NE(stop_act, -1);
+  state->ApplyAction(stop_act);
+
+  // Phase should now be inactive and turn should have advanced to player 1
+  SPIEL_CHECK_TRUE(raw.influence_state.phase == InfluenceState::Phase::inactive);
+  SPIEL_CHECK_EQ(state->CurrentPlayer(), 1);
+}
+
+void BuildFullActionTest() {
+  std::shared_ptr<const Game> game = LoadEclipseGame(2, 7);
+  std::unique_ptr<State> state = game->NewInitialState();
+  state->ApplyAction(0); // resolve setup
+
+  EclipseState* eclipse_state = static_cast<EclipseState*>(state.get());
+  ::State& raw = const_cast<::State&>(eclipse_state->RawState());
+  raw.current_player = 0;
+  raw.players[0].has_passed = false;
+  raw.players[0].resources.materials = 10;
+
+  // Verify BUILD action is available
+  std::vector<Action> legal = state->LegalActions();
+  Action build_act = -1;
+  for (Action a : legal) {
+    if (state->ActionToString(state->CurrentPlayer(), a) == "BUILD") {
+      build_act = a;
+      break;
+    }
+  }
+  SPIEL_CHECK_NE(build_act, -1);
+
+  // Apply BUILD action
+  state->ApplyAction(build_act);
+  SPIEL_CHECK_TRUE(raw.build_state.phase == BuildState::Phase::choose_build);
+  SPIEL_CHECK_EQ(raw.players[0].disks_on_actions, 1);
+
+  // Build an Interceptor (BuildType 0) at cell 221 (Procyon starting sector for player 0)
+  // materials cost is 3 for Terrans.
+  legal = state->LegalActions();
+  Action interceptor_build = -1;
+  for (Action a : legal) {
+    std::string name = state->ActionToString(state->CurrentPlayer(), a);
+    if (name.find("BUILD_INTERCEPTOR_") != std::string::npos) {
+      interceptor_build = a;
+      break;
+    }
+  }
+  SPIEL_CHECK_NE(interceptor_build, -1);
+
+  // Apply build action!
+  state->ApplyAction(interceptor_build);
+
+  // Remaining activations should be 1 (Terrans have 2 activations)
+  SPIEL_CHECK_EQ(raw.build_state.activations_remaining, 1);
+  SPIEL_CHECK_EQ(raw.players[0].resources.materials, 7); // 10 - 3
+
+  // Stop early
+  legal = state->LegalActions();
+  Action stop_act = -1;
+  for (Action a : legal) {
+    if (state->ActionToString(state->CurrentPlayer(), a) == "BUILD_STOP") {
+      stop_act = a;
+      break;
+    }
+  }
+  SPIEL_CHECK_NE(stop_act, -1);
+  state->ApplyAction(stop_act);
+
+  // Build phase should now be inactive, and turn should advance to player 1
+  SPIEL_CHECK_TRUE(raw.build_state.phase == BuildState::Phase::inactive);
+  SPIEL_CHECK_EQ(state->CurrentPlayer(), 1);
+}
+
 }  // namespace
 }  // namespace eclipse
 }  // namespace open_spiel
@@ -740,4 +895,6 @@ int main(int argc, char** argv) {
   open_spiel::eclipse::ResearchInfluenceDiscRewardsTest();
   open_spiel::eclipse::ResearchActionTest();
   open_spiel::eclipse::InfluenceReclaimCubesTest();
+  open_spiel::eclipse::InfluenceFullActionTest();
+  open_spiel::eclipse::BuildFullActionTest();
 }

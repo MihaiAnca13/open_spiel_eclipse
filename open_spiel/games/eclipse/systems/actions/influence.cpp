@@ -49,7 +49,7 @@ namespace open_spiel::eclipse
                 const Sector& nb = state.galaxy.at(nq, nr);
                 if (nb.sector_id == 0) continue;
 
-                // Neighbor must be controlled or hold an unpinned ship to source the connection [cite: 854]
+                // Neighbor must be controlled or hold an unpinned ship to source the connection
                 if (!is_sector_anchor(state, player_id, nb)) continue;
 
                 if (wormhole_generator)
@@ -207,43 +207,27 @@ namespace open_spiel::eclipse
             end_influence_activation(state);
         }
 
-        void return_cube_to_track(Player& player, PlanetType type)
-        {
-            if (return_requires_choice(player, type, false))
-            {
-                if (player.resources.gold_prod < 12) player.resources.gold_prod++;
-                else if (player.resources.science_prod < 12) player.resources.science_prod++;
-                else if (player.resources.materials_prod < 12) player.resources.materials_prod++;
-            }
-            else
-            {
-                PopTrack matching = get_matching_track(type);
-                if (matching == PopTrack::SCIENCE) player.resources.science_prod++;
-                else if (matching == PopTrack::MATERIALS) player.resources.materials_prod++;
-                else player.resources.gold_prod++;
-            }
-        }
     } // namespace
 
     bool can_influence_to_sector(const ::State& state, uint8_t player_id, uint8_t galaxy_cell_idx)
     {
         if (player_id >= state.players.size()) return false;
         const Player& player = state.players[player_id];
-        // Must have discs available on your internal sheet tracker track [cite: 460]
+        // Must have discs available on your internal sheet tracker track
         if (player.available_influence_discs() == 0) return false;
 
         HexCoord coord = index_to_hex(galaxy_cell_idx);
         const Sector& sector = state.galaxy.at(coord.q, coord.r);
 
-        // Sector must be an explored tile and completely unowned/vacant [cite: 848]
+        // Sector must be an explored tile and completely unowned/vacant
         if (sector.sector_id == 0 || sector.owner_id != 255) return false;
 
         // Build bitsets for O(1) ship presence checks (matches explore.cpp pattern)
-        constexpr int kMaxSectorId = 512;
-        std::bitset<kMaxSectorId> own_ships;
-        std::bitset<kMaxSectorId> enemy_ships;
+        constexpr int max_sector_id = 512;
+        std::bitset<max_sector_id> own_ships;
+        std::bitset<max_sector_id> enemy_ships;
         for (const Unit& unit : state.unit_registry) {
-            if (unit.sector_id < kMaxSectorId) {
+            if (unit.sector_id < max_sector_id) {
                 if (unit.player_id == player_id) {
                     own_ships.set(unit.sector_id);
                 } else if (unit.player_id != NPC_PLAYER_ID) {
@@ -252,14 +236,14 @@ namespace open_spiel::eclipse
             }
         }
 
-        // Condition A: Vacant, no opponent ships, has wormhole connection to control/ship anchor [cite: 854]
+        // Condition A: Vacant, no opponent ships, has wormhole connection to control/ship anchor
         if (!enemy_ships_present(enemy_ships, sector.sector_id) &&
             has_influence_wormhole_access(state, player_id, coord.q, coord.r))
         {
             return true;
         }
 
-        // Condition B: Uncontrolled sector where ONLY you have a ship present [cite: 855]
+        // Condition B: Uncontrolled sector where ONLY you have a ship present
         if (only_own_ships_present(own_ships, enemy_ships, sector.sector_id))
         {
             return true;
@@ -275,7 +259,7 @@ namespace open_spiel::eclipse
         HexCoord coord = index_to_hex(galaxy_cell_idx);
         const Sector& sector = state.galaxy.at(coord.q, coord.r);
 
-        // Sector must be explored and currently possessed by the active player [cite: 848]
+        // Sector must be explored and currently possessed by the active player
         if (sector.sector_id == 0 || sector.owner_id != player_id) return false;
 
         return true;
@@ -289,7 +273,7 @@ namespace open_spiel::eclipse
         HexCoord coord = index_to_hex(galaxy_cell_idx);
         Sector& sector = state.galaxy.at(coord.q, coord.r);
 
-        // Drop leftmost disc onto the planet node map [cite: 327, 559]
+        // Drop leftmost disc onto the planet node map
         sector.owner_id = player_id;
         player.disks_on_sectors++;
 
@@ -305,7 +289,7 @@ namespace open_spiel::eclipse
         HexCoord coord = index_to_hex(galaxy_cell_idx);
         Sector& sector = state.galaxy.at(coord.q, coord.r);
 
-        // Lift ownership disc and return to your track pool [cite: 856]
+        // Lift ownership disc and return to your track pool
         sector.owner_id = 255;
         if (player.disks_on_sectors > 0)
         {
@@ -313,7 +297,7 @@ namespace open_spiel::eclipse
         }
 
         // Rule requirement: Removing an influence disc forces ALL population cubes
-        // off that sector back onto the player track architecture [cite: 858]
+        // off that sector back onto the player track architecture
         const SectorDefinition* def = get_sector_definition(sector.sector_id);
 
         state.influence_state.player_id = player_id;
@@ -361,12 +345,12 @@ namespace open_spiel::eclipse
 
         Player& player = state.players[player_id];
         const auto& pending = is.pending_returns.front();
-        PopTrack track = static_cast<PopTrack>(track_code);
+        auto track = static_cast<PopTrack>(track_code);
 
         // Validate choice
-        std::vector<PopTrack> legal = get_legal_return_tracks(player, pending.type, pending.is_orbital);
+        const std::vector<PopTrack> legal = get_legal_return_tracks(player, pending.type, pending.is_orbital);
         bool is_legal = false;
-        for (PopTrack t : legal)
+        for (const PopTrack t : legal)
         {
             if (t == track)
             {
@@ -392,7 +376,25 @@ namespace open_spiel::eclipse
         return true;
     }
 
-    bool begin_influence(::State& state, uint8_t player_id)
+    std::vector<uint8_t> get_legal_return_tracks_for_current_pending(const ::State& state)
+    {
+        const InfluenceState& is = state.influence_state;
+        if (is.pending_returns.empty() || is.player_id >= state.players.size())
+        {
+            return {};
+        }
+        const Player& player = state.players[is.player_id];
+        const auto& [type, is_orbital] = is.pending_returns.front();
+        const std::vector<PopTrack> tracks = get_legal_return_tracks(player, type, is_orbital);
+        std::vector<uint8_t> result;
+        for (PopTrack t : tracks)
+        {
+            result.push_back(static_cast<uint8_t>(t));
+        }
+        return result;
+    }
+
+    bool begin_influence(::State& state, const uint8_t player_id)
     {
         if (player_id >= state.players.size()) return false;
 

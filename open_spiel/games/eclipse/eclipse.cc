@@ -12,6 +12,8 @@
 #include "open_spiel/games/eclipse/systems/actions/bonus.h"
 #include "open_spiel/games/eclipse/systems/actions/explore.h"
 #include "open_spiel/games/eclipse/systems/actions/research.h"
+#include "open_spiel/games/eclipse/systems/actions/build.h"
+#include "open_spiel/games/eclipse/systems/actions/influence.h"
 #include "open_spiel/games/eclipse/systems/setup.h"
 #include "open_spiel/json/include/nlohmann/json.hpp"
 #include "open_spiel/observer.h"
@@ -47,7 +49,7 @@ constexpr Action action_research = 1;
 constexpr Action action_research_stop = 2;
 constexpr Action action_research_standard_start = 3;
 constexpr Action action_research_rare_start = 27;
-constexpr Action action_build_start = 75;
+constexpr Action action_build = 75;
 constexpr Action action_explore = 83;
 constexpr Action explore_place = 84;
 constexpr Action explore_discard = 85;
@@ -67,8 +69,16 @@ constexpr int COLONY_SHIP_SLOTS_PER_CELL   = 8;
 constexpr int COLONY_SHIP_TRACKS           = POP_TRACK_COUNT;  // 3
 constexpr int COLONY_SHIP_CODES_PER_CELL   =
     COLONY_SHIP_SLOTS_PER_CELL * COLONY_SHIP_TRACKS;
-constexpr int num_distinct_actions =
-    action_colony_ship_start + GALAXY_CELL_COUNT * COLONY_SHIP_CODES_PER_CELL;
+
+constexpr Action action_influence_start = action_colony_ship_start + GALAXY_CELL_COUNT * COLONY_SHIP_CODES_PER_CELL; // 5732
+constexpr Action action_influence_stop = action_influence_start + 1; // 5733
+constexpr Action action_influence_to_cell_start = action_influence_stop + 1; // 5734
+constexpr Action action_reclaim_from_cell_start = action_influence_to_cell_start + GALAXY_CELL_COUNT; // 5959
+constexpr Action action_choose_return_track_start = action_reclaim_from_cell_start + GALAXY_CELL_COUNT; // 6184
+
+constexpr Action action_build_stop = action_choose_return_track_start + 3; // 6187
+constexpr Action action_build_choice_start = action_build_stop + 1; // 6188
+constexpr int num_distinct_actions = action_build_choice_start + BUILD_TYPE_COUNT * GALAXY_CELL_COUNT; // 6188 + 6*225 = 7538
 
 const GameType game_type{
     /*short_name=*/"eclipse",
@@ -244,6 +254,16 @@ std::vector<Action> EclipseState::LegalActions() const {
     return ResearchLegalActions();
   }
 
+  // Mid-Influence: only influence choices are legal.
+  if (s.influence_state.phase != ::InfluenceState::Phase::inactive) {
+    return InfluenceLegalActions();
+  }
+
+  // Mid-Build: only build choices are legal.
+  if (s.build_state.phase != ::BuildState::Phase::inactive) {
+    return BuildLegalActions();
+  }
+
   std::vector<Action> actions;
   actions.push_back(action_pass);
 
@@ -255,13 +275,14 @@ std::vector<Action> EclipseState::LegalActions() const {
     if (has_action_disk && player.resources.science >= 2) {
       actions.push_back(action_research);
     }
-    if (has_action_disk && player.resources.materials >= 3) {
-      for (int i = 0; i < 8; ++i) {
-        actions.push_back(action_build_start + i);
-      }
+    if (has_action_disk) {
+      actions.push_back(action_build);
     }
     if (has_action_disk && has_explore_zone(s, current_player)) {
       actions.push_back(action_explore);
+    }
+    if (has_action_disk) {
+      actions.push_back(action_influence_start);
     }
 
     // Bonus actions (no disc cost, no turn advance).
@@ -414,6 +435,58 @@ std::vector<Action> EclipseState::ResearchLegalActions() const {
   return actions;
 }
 
+std::vector<Action> EclipseState::InfluenceLegalActions() const {
+  const ::State& s = eclipse_state_;
+  const ::InfluenceState& is = s.influence_state;
+  std::vector<Action> actions;
+
+  if (is.phase == ::InfluenceState::Phase::choose_influence) {
+    // 1. Placement of influence disc (influence to cell)
+    for (int cell = 0; cell < GALAXY_CELL_COUNT; ++cell) {
+      if (can_influence_to_sector(s, is.player_id, static_cast<uint8_t>(cell))) {
+        actions.push_back(action_influence_to_cell_start + cell);
+      }
+    }
+    // 2. Reclamation of influence disc (reclaim from cell)
+    for (int cell = 0; cell < GALAXY_CELL_COUNT; ++cell) {
+      if (can_reclaim_from_sector(s, is.player_id, static_cast<uint8_t>(cell))) {
+        actions.push_back(action_reclaim_from_cell_start + cell);
+      }
+    }
+    // 3. Stop/Finish
+    actions.push_back(action_influence_stop);
+  } else if (is.phase == ::InfluenceState::Phase::choose_return_track) {
+    // Choice of return track (0=Money, 1=Science, 2=Materials)
+    for (uint8_t track : get_legal_return_tracks_for_current_pending(s)) {
+      actions.push_back(action_choose_return_track_start + track);
+    }
+  }
+
+  std::sort(actions.begin(), actions.end());
+  return actions;
+}
+
+std::vector<Action> EclipseState::BuildLegalActions() const {
+  const ::State& s = eclipse_state_;
+  const ::BuildState& bs = s.build_state;
+  std::vector<Action> actions;
+
+  if (bs.phase == ::BuildState::Phase::choose_build) {
+    for (int t = 0; t < BUILD_TYPE_COUNT; ++t) {
+      BuildType type = static_cast<BuildType>(t);
+      for (int cell = 0; cell < GALAXY_CELL_COUNT; ++cell) {
+        if (can_build(s, bs.player_id, type, static_cast<uint8_t>(cell))) {
+          actions.push_back(action_build_choice_start + t * GALAXY_CELL_COUNT + cell);
+        }
+      }
+    }
+    actions.push_back(action_build_stop);
+  }
+
+  std::sort(actions.begin(), actions.end());
+  return actions;
+}
+
 std::string EclipseState::ActionToString(Player player, Action action_id) const {
   if (pending_random_event_ == PendingRandomEvent::explore_draw) {
     uint32_t bag = ring_bag_value(eclipse_state_, eclipse_state_.explore_state.ring);
@@ -443,7 +516,7 @@ std::string EclipseState::ActionToString(Player player, Action action_id) const 
       return "RESEARCH_" + std::string(TECH_TABLE[tech_idx].name);
     }
   }
-  if (action_id >= action_research_rare_start && action_id < action_build_start) {
+  if (action_id >= action_research_rare_start && action_id < action_build) {
     size_t offset = action_id - action_research_rare_start;
     size_t rare_idx = offset / 3;
     size_t track = offset % 3;
@@ -456,8 +529,21 @@ std::string EclipseState::ActionToString(Player player, Action action_id) const 
   if (action_id == action_explore) {
     return "EXPLORE";
   }
-  if (action_id >= action_build_start && action_id < action_explore) {
-    return "BUILD_" + std::to_string(action_id - action_build_start);
+  if (action_id == action_build) {
+    return "BUILD";
+  }
+  if (action_id == action_build_stop) {
+    return "BUILD_STOP";
+  }
+  if (action_id >= action_build_choice_start && action_id < action_build_choice_start + BUILD_TYPE_COUNT * GALAXY_CELL_COUNT) {
+    int encoded = action_id - action_build_choice_start;
+    int type_idx = encoded / GALAXY_CELL_COUNT;
+    int cell_idx = encoded % GALAXY_CELL_COUNT;
+    static const char* kBuildTypeNames[BUILD_TYPE_COUNT] = {
+        "INTERCEPTOR", "CRUISER", "DREADNOUGHT", "STARBASE", "ORBITAL", "MONOLITH"
+    };
+    HexCoord c = index_to_hex(cell_idx);
+    return "BUILD_" + std::string(kBuildTypeNames[type_idx]) + "_" + std::to_string(c.q) + "_" + std::to_string(c.r);
   }
   if (action_id == explore_place) return "EXPLORE_PLACE";
   if (action_id == explore_discard) return "EXPLORE_DISCARD";
@@ -492,7 +578,7 @@ std::string EclipseState::ActionToString(Player player, Action action_id) const 
       action_id < action_colony_ship_start) {
     return kTradeNames[action_id - action_trade_start];
   }
-  if (action_id >= action_colony_ship_start) {
+  if (action_id >= action_colony_ship_start && action_id < action_influence_start) {
     int encoded = static_cast<int>(action_id - action_colony_ship_start);
     int cell = encoded / COLONY_SHIP_CODES_PER_CELL;
     int rem  = encoded % COLONY_SHIP_CODES_PER_CELL;
@@ -504,6 +590,24 @@ std::string EclipseState::ActionToString(Player player, Action action_id) const 
     return "COLONY_SHIP_" + std::to_string(c.q) + "_" +
            std::to_string(c.r) + "_SLOT" + std::to_string(slot) + "_" +
            kTrackNames[track];
+  }
+  if (action_id == action_influence_start) {
+    return "INFLUENCE";
+  }
+  if (action_id == action_influence_stop) {
+    return "INFLUENCE_STOP";
+  }
+  if (action_id >= action_influence_to_cell_start && action_id < action_reclaim_from_cell_start) {
+    HexCoord zone = index_to_hex(action_id - action_influence_to_cell_start);
+    return "INFLUENCE_TO_" + std::to_string(zone.q) + "_" + std::to_string(zone.r);
+  }
+  if (action_id >= action_reclaim_from_cell_start && action_id < action_choose_return_track_start) {
+    HexCoord zone = index_to_hex(action_id - action_reclaim_from_cell_start);
+    return "RECLAIM_FROM_" + std::to_string(zone.q) + "_" + std::to_string(zone.r);
+  }
+  if (action_id >= action_choose_return_track_start && action_id < action_choose_return_track_start + 3) {
+    static const char* kTrackNames[3] = {"MONEY", "SCIENCE", "MATERIALS"};
+    return "RETURN_CUBE_TO_" + std::string(kTrackNames[action_id - action_choose_return_track_start]);
   }
   return "UNKNOWN_ACTION(" + std::to_string(action_id) + ")";
 }
@@ -803,7 +907,7 @@ void EclipseState::ApplyResearchSubAction(Action action_id) {
     if (tech_idx >= TECH_TABLE_SIZE) return; // Invalid index
     tech_def = &TECH_TABLE[tech_idx];
     target_track = tech_def->category;
-  } else if (action_id >= action_research_rare_start && action_id < action_build_start) {
+  } else if (action_id >= action_research_rare_start && action_id < action_build) {
     // Rare tech
     size_t offset = action_id - action_research_rare_start;
     size_t rare_idx = offset / 3;
@@ -837,6 +941,49 @@ void EclipseState::ApplyResearchSubAction(Action action_id) {
   if (s.research_state.activations_remaining == 0) {
     s.research_state.phase = ::ResearchState::Phase::inactive;
     s.research_state.player_id = 255;
+  }
+}
+
+void EclipseState::ApplyInfluenceSubAction(Action action_id) {
+  ::State& s = eclipse_state_;
+  const uint8_t player = s.influence_state.player_id;
+
+  if (action_id == action_influence_stop) {
+    s.influence_state.phase = ::InfluenceState::Phase::inactive;
+    s.influence_state.player_id = 255;
+    s.influence_state.activations_remaining = 0;
+    s.influence_state.pending_returns.clear();
+    return;
+  }
+
+  if (action_id >= action_influence_to_cell_start && action_id < action_reclaim_from_cell_start) {
+    uint8_t cell_idx = static_cast<uint8_t>(action_id - action_influence_to_cell_start);
+    SPIEL_CHECK_TRUE(execute_influence_to_sector(s, player, cell_idx));
+  } else if (action_id >= action_reclaim_from_cell_start && action_id < action_choose_return_track_start) {
+    uint8_t cell_idx = static_cast<uint8_t>(action_id - action_reclaim_from_cell_start);
+    SPIEL_CHECK_TRUE(execute_reclaim_from_sector(s, player, cell_idx));
+  } else if (action_id >= action_choose_return_track_start && action_id < action_choose_return_track_start + 3) {
+    uint8_t track = static_cast<uint8_t>(action_id - action_choose_return_track_start);
+    SPIEL_CHECK_TRUE(execute_choose_return_track(s, player, track));
+  }
+}
+
+void EclipseState::ApplyBuildSubAction(Action action_id) {
+  ::State& s = eclipse_state_;
+  const uint8_t player = s.build_state.player_id;
+
+  if (action_id == action_build_stop) {
+    s.build_state.phase = ::BuildState::Phase::inactive;
+    s.build_state.player_id = 255;
+    s.build_state.activations_remaining = 0;
+    return;
+  }
+
+  if (action_id >= action_build_choice_start && action_id < action_build_choice_start + BUILD_TYPE_COUNT * GALAXY_CELL_COUNT) {
+    int encoded = action_id - action_build_choice_start;
+    BuildType type = static_cast<BuildType>(encoded / GALAXY_CELL_COUNT);
+    uint8_t cell_idx = static_cast<uint8_t>(encoded % GALAXY_CELL_COUNT);
+    SPIEL_CHECK_TRUE(execute_build(s, player, type, cell_idx));
   }
 }
 
@@ -883,6 +1030,28 @@ void EclipseState::DoApplyAction(Action action_id) {
     return;
   }
 
+  // Resolve a step of an in-flight Build action without advancing the turn,
+  // until all activations are done (phase returns to inactive).
+  if (eclipse_state_.build_state.phase != ::BuildState::Phase::inactive) {
+    ApplyBuildSubAction(action_id);
+    if (eclipse_state_.build_state.phase != ::BuildState::Phase::inactive) {
+      return;
+    }
+    AdvanceTurn();
+    return;
+  }
+
+  // Resolve a step of an in-flight Influence action without advancing the turn,
+  // until all activations are done (phase returns to inactive).
+  if (eclipse_state_.influence_state.phase != ::InfluenceState::Phase::inactive) {
+    ApplyInfluenceSubAction(action_id);
+    if (eclipse_state_.influence_state.phase != ::InfluenceState::Phase::inactive) {
+      return;
+    }
+    AdvanceTurn();
+    return;
+  }
+
   uint8_t current_player = eclipse_state_.current_player;
 
   if (action_id == action_pass) {
@@ -915,14 +1084,30 @@ void EclipseState::DoApplyAction(Action action_id) {
         return;
       }
     }
-  } else if (action_id >= action_build_start && action_id < action_explore) {
-    // NOTE: PLACEHOLDER - build is not implemented yet.
+  } else if (action_id == action_influence_start) {
     if (current_player < eclipse_state_.players.size()) {
-      auto& player = eclipse_state_.players[current_player];
-      if (player.available_influence_discs() > 0 && player.resources.materials >= 3) {
-        ++player.disks_on_actions;
-        player.resources.materials -= 3;
-        player.score += 3;
+      const auto& player = eclipse_state_.players[current_player];
+      if (player.available_influence_discs() > 0) {
+        bool started = begin_influence(eclipse_state_, current_player);
+        if (started) {
+          ++eclipse_state_.players[current_player].disks_on_actions;
+        }
+        if (eclipse_state_.influence_state.phase != ::InfluenceState::Phase::inactive) {
+          return;
+        }
+      }
+    }
+  } else if (action_id == action_build) {
+    if (current_player < eclipse_state_.players.size()) {
+      const auto& player = eclipse_state_.players[current_player];
+      if (player.available_influence_discs() > 0) {
+        bool started = begin_build(eclipse_state_, current_player);
+        if (started) {
+          ++eclipse_state_.players[current_player].disks_on_actions;
+        }
+        if (eclipse_state_.build_state.phase != ::BuildState::Phase::inactive) {
+          return;
+        }
       }
     }
   } else if (action_id >= action_trade_start &&

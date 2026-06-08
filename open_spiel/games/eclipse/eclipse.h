@@ -89,8 +89,12 @@ class EclipseState : public State {
   void ResolveChanceEvent(Action action_id);
   std::vector<Action> ExploreLegalActions() const;
   std::vector<Action> ResearchLegalActions() const;
+  std::vector<Action> InfluenceLegalActions() const;
+  std::vector<Action> BuildLegalActions() const;
   void ApplyExploreSubAction(Action action_id);
   void ApplyResearchSubAction(Action action_id);
+  void ApplyInfluenceSubAction(Action action_id);
+  void ApplyBuildSubAction(Action action_id);
   void AdvanceTurn();
 
   ::State eclipse_state_;

@@ -49,15 +49,15 @@ namespace open_spiel::eclipse
     uint8_t calculate_build_cost(const Player& player, BuildType type);
 
     // Validates whether a player can execute a specific build action at a target galaxy cell hex.
-    bool can_build(const State& state, uint8_t player_id, BuildType type, uint8_t galaxy_cell_idx);
+    bool can_build(const ::State& state, uint8_t player_id, BuildType type, uint8_t galaxy_cell_idx);
 
     // Executes a single build validation and processing phase.
     // Deducts materials, updates structure flags or spawns ship units into the registry,
     // and handles multi-activation iteration decrement.
-    bool execute_build(State& state, uint8_t player_id, BuildType type, uint8_t galaxy_cell_idx);
+    bool execute_build(::State& state, uint8_t player_id, BuildType type, uint8_t galaxy_cell_idx);
 
     // Initializes a multi-activation build cycle by pulling the species' innate icons.
-    bool begin_build(State& state, uint8_t player_id);
+    bool begin_build(::State& state, uint8_t player_id);
 } // namespace open_spiel::eclipse
 
 #endif // ECLIPSE_BUILD_H
