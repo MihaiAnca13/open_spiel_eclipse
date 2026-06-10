@@ -22,6 +22,7 @@
 #include "systems/actions/build.h"
 #include "systems/actions/influence.h"
 #include "systems/actions/upgrade.h"
+#include "systems/actions/move.h"
 #include "absl/container/fixed_array.h"
 
 using open_spiel::eclipse::FixedVector;
@@ -152,6 +153,9 @@ struct State {
     // In-flight Upgrade action (inactive when no Upgrade is being resolved).
     UpgradeState upgrade_state;
 
+    // In-flight Move action (inactive when no Move is being resolved).
+    MoveState move_state;
+
     // Helper functions for tech market tray (allocation-free representation)
     uint8_t get_tech_tray_count(TechBit tech) const {
         if (tech == TechBit::NONE) return 0;
@@ -212,7 +216,8 @@ inline void to_json(nlohmann::json& j, const State& s) {
         {"research_state", s.research_state},
         {"build_state", s.build_state},
         {"influence_state", s.influence_state},
-        {"upgrade_state", s.upgrade_state}
+        {"upgrade_state", s.upgrade_state},
+        {"move_state", s.move_state}
     };
 }
 
@@ -290,6 +295,12 @@ inline void from_json(const nlohmann::json& j, State& s) {
         j.at("upgrade_state").get_to(s.upgrade_state);
     } else {
         s.upgrade_state = UpgradeState{};
+    }
+
+    if (j.contains("move_state")) {
+        j.at("move_state").get_to(s.move_state);
+    } else {
+        s.move_state = MoveState{};
     }
 }
 

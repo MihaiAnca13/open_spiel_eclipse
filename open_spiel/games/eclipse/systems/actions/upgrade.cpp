@@ -45,6 +45,9 @@ namespace open_spiel::eclipse
         const Blueprint& current_bp = player.blueprints[bp_idx];
         if (slot_idx >= current_bp.capacity) return false;
 
+        // Reject no-op assignments (also keeps free removals from looping forever)
+        if (current_bp.slots[slot_idx] == part_id) return false;
+
         // Extract required data if shifting structural items into empty or existing spaces
         if (part_id == ShipPartId::NONE)
         {
@@ -65,7 +68,12 @@ namespace open_spiel::eclipse
                 }
                 if (drive_count == 0) return false; // Thwarting engine-less mobile layouts
             }
-            return true;
+
+            // Removing a part (e.g. an energy source) must keep the grid energy-positive
+            Blueprint removal_bp = current_bp;
+            removal_bp.slots[slot_idx] = ShipPartId::NONE;
+            removal_bp.recompute();
+            return removal_bp.total_stats.energy_net >= 0;
         }
 
         // Table index verification bounds guard
@@ -126,8 +134,11 @@ namespace open_spiel::eclipse
         target_bp.slots[slot_idx] = part_id;
         target_bp.recompute();
 
-        // Advance inner state loop trackers
-        end_upgrade_activation(state);
+        // Returning Ship Parts costs nothing; only placements consume an activation.
+        if (part_id != ShipPartId::NONE)
+        {
+            end_upgrade_activation(state);
+        }
         return true;
     }
 
