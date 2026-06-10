@@ -1,10 +1,16 @@
 //
 // Move actions: relocating ships along the wormhole / warp portal network.
 //
+// Optimized for high-frequency legal-action generation in MCTS/RL:
+// - board-derived movement data is built once per public query/execution path;
+// - sector pinning availability is precomputed once for bulk legal move generation;
+// - execution paths validate directly instead of allocating/scanning legal vectors.
+//
 
 #include "open_spiel/games/eclipse/systems/actions/move.h"
 
 #include <array>
+#include <cstddef>
 
 #include "open_spiel/games/eclipse/state.h"
 #include "open_spiel/games/eclipse/galaxy.h"
@@ -14,82 +20,340 @@ namespace open_spiel::eclipse
 {
     namespace
     {
+        // Highest known valid sector id. The map needs MAX_SECTOR_ID + 1 slots
+        // because sector ids are used directly as indices.
         constexpr uint16_t MAX_SECTOR_ID = 395;
+        constexpr std::size_t SECTOR_ID_LIMIT = static_cast<std::size_t>(MAX_SECTOR_ID) + 1;
         constexpr uint8_t INVALID_CELL = 255;
 
-        // Dense sector_id -> galaxy cell index map, rebuilt in O(GALAXY_CELL_COUNT).
-        using SectorCellMap = std::array<uint8_t, MAX_SECTOR_ID>;
+        using SectorCellMap = std::array<uint8_t, SECTOR_ID_LIMIT>;
+        using SectorFlagMap = std::array<uint8_t, SECTOR_ID_LIMIT>;
+        using CellSectorMap = std::array<uint16_t, GALAXY_CELL_COUNT>;
+        using CellMaskMap = std::array<uint8_t, GALAXY_CELL_COUNT>;
+        using CellFlagMap = std::array<uint8_t, GALAXY_CELL_COUNT>;
 
-        SectorCellMap build_sector_cell_map(const ::State& state)
+        bool valid_sector_id(uint16_t sector_id)
         {
-            SectorCellMap map;
-            map.fill(INVALID_CELL);
-            for (int q = -GALAXY_RADIUS; q <= GALAXY_RADIUS; ++q)
+            return sector_id <= MAX_SECTOR_ID;
+        }
+
+        // Per-call board cache. This intentionally remains local to avoid
+        // increasing State size or requiring all board-mutating systems to
+        // maintain derived indexes. It still collapses several repeated O(C)
+        // scans and get_sector_definition() calls into one pass.
+        struct MoveBoardCache
+        {
+            SectorCellMap sector_to_cell{};
+            CellSectorMap cell_to_sector{};
+            CellMaskMap rotated_wormholes{};
+            CellFlagMap has_sector_definition{};
+            CellFlagMap has_warp_portal{};
+            uint8_t warp_portal_count = 0;
+
+            explicit MoveBoardCache(const ::State& state)
             {
-                for (int r = -GALAXY_RADIUS; r <= GALAXY_RADIUS; ++r)
+                sector_to_cell.fill(INVALID_CELL);
+                cell_to_sector.fill(0);
+                rotated_wormholes.fill(0);
+                has_sector_definition.fill(0);
+                has_warp_portal.fill(0);
+
+                for (int q = -GALAXY_RADIUS; q <= GALAXY_RADIUS; ++q)
                 {
-                    const Sector& sector = state.galaxy.at(q, r);
-                    if (sector.sector_id != 0 && sector.sector_id < MAX_SECTOR_ID)
+                    for (int r = -GALAXY_RADIUS; r <= GALAXY_RADIUS; ++r)
                     {
-                        map[sector.sector_id] = static_cast<uint8_t>(hex_to_index(q, r));
+                        const uint8_t cell = static_cast<uint8_t>(hex_to_index(q, r));
+                        const Sector& sector = state.galaxy.at(q, r);
+                        const uint16_t sector_id = sector.sector_id;
+                        cell_to_sector[cell] = sector_id;
+
+                        if (sector_id == 0) continue;
+
+                        if (valid_sector_id(sector_id))
+                        {
+                            sector_to_cell[sector_id] = cell;
+                        }
+
+                        const SectorDefinition* def = get_sector_definition(sector_id);
+                        if (def != nullptr)
+                        {
+                            has_sector_definition[cell] = 1;
+                            rotated_wormholes[cell] = rotate_edge_mask(def->wormholes_mask, sector.rotation);
+                        }
+
+                        if (sector.has_player_warp_portal || (def != nullptr && def->has_warp_portal))
+                        {
+                            has_warp_portal[cell] = 1;
+                            ++warp_portal_count;
+                        }
                     }
                 }
             }
-            return map;
-        }
 
-        // Only player-built mobile ships may move; starbases and NPCs never do.
+            [[nodiscard]] uint8_t cell_for_sector(uint16_t sector_id) const
+            {
+                if (!valid_sector_id(sector_id)) return INVALID_CELL;
+                return sector_to_cell[sector_id];
+            }
+        };
+
+        // Bulk pinning cache for legal_move_steps()/begin_move(). Public
+        // can_leave_sector() remains a direct O(U) query to avoid building this
+        // table for one-off validation calls.
+        struct PinningAvailability
+        {
+            SectorFlagMap can_leave{};
+
+            PinningAvailability(const ::State& state, const Player& player, uint8_t player_id)
+            {
+                std::array<uint8_t, SECTOR_ID_LIMIT> friendly{};
+                std::array<uint8_t, SECTOR_ID_LIMIT> opponents{};
+                SectorFlagMap has_gcds{};
+
+                can_leave.fill(0);
+                has_gcds.fill(0);
+
+                for (const Unit& unit : state.unit_registry)
+                {
+                    if (!valid_sector_id(unit.sector_id)) continue;
+                    const std::size_t sector_idx = unit.sector_id;
+
+                    if (unit.type == ShipType::GCDS)
+                    {
+                        has_gcds[sector_idx] = 1;
+                        continue;
+                    }
+
+                    if (unit.player_id == player_id)
+                    {
+                        ++friendly[sector_idx];
+                    }
+                    else
+                    {
+                        ++opponents[sector_idx];
+                    }
+                }
+
+                const bool cloaking = player.has_tech(TechBit::CLOAKING_DEVICE);
+                for (std::size_t sector_idx = 0; sector_idx < SECTOR_ID_LIMIT; ++sector_idx)
+                {
+                    if (has_gcds[sector_idx] != 0) continue;
+                    const uint8_t pinned = cloaking
+                        ? static_cast<uint8_t>(opponents[sector_idx] / 2)
+                        : opponents[sector_idx];
+                    can_leave[sector_idx] = friendly[sector_idx] > pinned ? 1 : 0;
+                }
+            }
+
+            [[nodiscard]] bool can_leave_from(uint16_t sector_id) const
+            {
+                return valid_sector_id(sector_id) && can_leave[sector_id] != 0;
+            }
+        };
+
         bool is_movable_ship(const Unit& unit, uint8_t player_id)
         {
             if (unit.player_id != player_id) return false;
-            return unit.type == ShipType::INTERCEPTOR ||
-                   unit.type == ShipType::CRUISER ||
-                   unit.type == ShipType::DREADNOUGHT;
+            switch (unit.type)
+            {
+                case ShipType::INTERCEPTOR:
+                case ShipType::CRUISER:
+                case ShipType::DREADNOUGHT:
+                    return true;
+                default:
+                    return false;
+            }
         }
 
-        bool sector_has_warp_portal(const Sector& sector)
-        {
-            if (sector.sector_id == 0) return false;
-            if (sector.has_player_warp_portal) return true;
-            const SectorDefinition* def = get_sector_definition(sector.sector_id);
-            return def != nullptr && def->has_warp_portal;
-        }
 
-        // A unit may start a fresh activation, or continue the one it is mid-way through.
         bool can_start_or_continue(const ::MoveState& ms, uint8_t unit_idx)
         {
             if (ms.active_unit_idx == unit_idx && ms.steps_remaining > 0) return true;
             return ms.activations_remaining > 0;
         }
 
-        // Wormhole Connection between adjacent sectors: both facing edges need a
-        // wormhole, or just one with the Wormhole Generator tech (half wormhole).
-        bool has_wormhole_connection(const Sector& from, const Sector& to,
-                                     uint8_t direction, bool wormhole_generator)
+        bool has_wormhole_connection(const MoveBoardCache& cache, uint8_t from_cell,
+                                     uint8_t to_cell, uint8_t direction,
+                                     bool wormhole_generator)
         {
-            const SectorDefinition* from_def = get_sector_definition(from.sector_id);
-            const SectorDefinition* to_def = get_sector_definition(to.sector_id);
-            if (from_def == nullptr || to_def == nullptr) return false;
+            if (from_cell >= GALAXY_CELL_COUNT || to_cell >= GALAXY_CELL_COUNT) return false;
+            if (cache.cell_to_sector[to_cell] == 0) return false;
+            if (cache.has_sector_definition[from_cell] == 0 ||
+                cache.has_sector_definition[to_cell] == 0)
+            {
+                return false;
+            }
 
-            const uint8_t from_mask = rotate_edge_mask(from_def->wormholes_mask, from.rotation);
-            const uint8_t to_mask = rotate_edge_mask(to_def->wormholes_mask, to.rotation);
-            const bool my_edge = has_edge(from_mask, direction);
-            const bool their_edge = has_edge(to_mask, (direction + 3) % 6);
+            const bool my_edge = has_edge(cache.rotated_wormholes[from_cell], direction);
+            const bool their_edge = has_edge(cache.rotated_wormholes[to_cell], (direction + 3) % 6);
             return wormhole_generator ? (my_edge || their_edge) : (my_edge && their_edge);
+        }
+
+        bool has_other_warp_portal(const MoveBoardCache& cache, uint16_t source_sector_id)
+        {
+            if (cache.warp_portal_count < 2) return false;
+            for (std::size_t cell = 0; cell < GALAXY_CELL_COUNT; ++cell)
+            {
+                if (cache.has_warp_portal[cell] != 0 && cache.cell_to_sector[cell] != source_sector_id)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        struct UnitMoveContext
+        {
+            const Unit* unit = nullptr;
+            uint8_t source_cell = INVALID_CELL;
+            uint8_t movement_value = 0;
+        };
+
+        bool validate_unit_for_step(const ::State& state, uint8_t player_id, uint8_t unit_idx,
+                                    const MoveBoardCache& cache, UnitMoveContext& ctx)
+        {
+            if (player_id >= state.players.size()) return false;
+            if (unit_idx >= state.unit_registry.size()) return false;
+
+            const ::MoveState& ms = state.move_state;
+            if (ms.phase != ::MoveState::Phase::choose_move || ms.player_id != player_id) return false;
+            if (!can_start_or_continue(ms, unit_idx)) return false;
+
+            const Player& player = state.players[player_id];
+            const Unit& unit = state.unit_registry[unit_idx];
+            if (!is_movable_ship(unit, player_id)) return false;
+
+            const uint8_t source_cell = cache.cell_for_sector(unit.sector_id);
+            if (source_cell == INVALID_CELL) return false;
+
+            const uint8_t movement_value = ship_movement_value(player, unit.type);
+            if (movement_value == 0) return false;
+
+            if (!can_leave_sector(state, player_id, unit.sector_id)) return false;
+
+            ctx.unit = &unit;
+            ctx.source_cell = source_cell;
+            ctx.movement_value = movement_value;
+            return true;
+        }
+
+        struct StepValidation
+        {
+            uint16_t dest_sector_id = 0;
+            uint8_t movement_value = 0;
+        };
+
+        bool validate_regular_step(const ::State& state, uint8_t player_id, uint8_t unit_idx,
+                                   uint8_t direction, const MoveBoardCache& cache,
+                                   StepValidation& validation)
+        {
+            if (direction >= 6) return false;
+
+            UnitMoveContext ctx;
+            if (!validate_unit_for_step(state, player_id, unit_idx, cache, ctx)) return false;
+
+            const HexCoord from = index_to_hex(ctx.source_cell);
+            const int to_q = from.q + HEX_DIRECTIONS[direction].first;
+            const int to_r = from.r + HEX_DIRECTIONS[direction].second;
+            if (!in_galaxy_bounds(to_q, to_r)) return false;
+
+            const uint8_t to_cell = static_cast<uint8_t>(hex_to_index(to_q, to_r));
+            if (cache.cell_to_sector[to_cell] == 0) return false;
+
+            const bool wormhole_generator =
+                state.players[player_id].has_tech(TechBit::WORMHOLE_GENERATOR);
+            if (!has_wormhole_connection(cache, ctx.source_cell, to_cell,
+                                         direction, wormhole_generator))
+            {
+                return false;
+            }
+
+            validation.dest_sector_id = cache.cell_to_sector[to_cell];
+            validation.movement_value = ctx.movement_value;
+            return true;
+        }
+
+        bool validate_warp_entry(const ::State& state, uint8_t player_id, uint8_t unit_idx,
+                                 const MoveBoardCache& cache)
+        {
+            UnitMoveContext ctx;
+            if (!validate_unit_for_step(state, player_id, unit_idx, cache, ctx)) return false;
+            if (cache.has_warp_portal[ctx.source_cell] == 0) return false;
+            return has_other_warp_portal(cache, ctx.unit->sector_id);
+        }
+
+        bool unit_can_contribute_legal_step(const ::MoveState& ms, const Player& player,
+                                           const Unit& unit, uint8_t player_id,
+                                           uint8_t unit_idx,
+                                           const MoveBoardCache& cache,
+                                           const PinningAvailability& pinning,
+                                           uint8_t& source_cell)
+        {
+            if (!is_movable_ship(unit, player_id)) return false;
+            if (!can_start_or_continue(ms, unit_idx)) return false;
+            if (ship_movement_value(player, unit.type) == 0) return false;
+
+            source_cell = cache.cell_for_sector(unit.sector_id);
+            if (source_cell == INVALID_CELL) return false;
+            return pinning.can_leave_from(unit.sector_id);
+        }
+
+        bool has_any_legal_move(const ::State& state, uint8_t player_id,
+                                const MoveBoardCache& cache,
+                                const PinningAvailability& pinning)
+        {
+            const ::MoveState& ms = state.move_state;
+            const Player& player = state.players[player_id];
+            const bool wormhole_generator = player.has_tech(TechBit::WORMHOLE_GENERATOR);
+
+            const std::size_t unit_count = state.unit_registry.size();
+            for (std::size_t idx = 0; idx < unit_count; ++idx)
+            {
+                const uint8_t unit_idx = static_cast<uint8_t>(idx);
+                const Unit& unit = state.unit_registry[idx];
+
+                uint8_t source_cell = INVALID_CELL;
+                if (!unit_can_contribute_legal_step(ms, player, unit, player_id, unit_idx,
+                                                    cache, pinning, source_cell))
+                {
+                    continue;
+                }
+
+                const HexCoord from = index_to_hex(source_cell);
+                for (uint8_t d = 0; d < 6; ++d)
+                {
+                    const int to_q = from.q + HEX_DIRECTIONS[d].first;
+                    const int to_r = from.r + HEX_DIRECTIONS[d].second;
+                    if (!in_galaxy_bounds(to_q, to_r)) continue;
+
+                    const uint8_t to_cell = static_cast<uint8_t>(hex_to_index(to_q, to_r));
+                    if (has_wormhole_connection(cache, source_cell, to_cell,
+                                                d, wormhole_generator))
+                    {
+                        return true;
+                    }
+                }
+
+                if (cache.has_warp_portal[source_cell] != 0 &&
+                    has_other_warp_portal(cache, unit.sector_id))
+                {
+                    return true;
+                }
+            }
+            return false;
         }
 
         // Consumes a movement step, opening a new activation when needed and
         // closing the whole action once every activation is spent.
-        void apply_step_bookkeeping(::State& state, uint8_t player_id, uint8_t unit_idx)
+        void apply_step_bookkeeping(::State& state, uint8_t unit_idx, uint8_t movement_value)
         {
             ::MoveState& ms = state.move_state;
             if (ms.active_unit_idx != unit_idx || ms.steps_remaining == 0)
             {
-                // Fresh activation (possibly ending a previous ship's early).
+                // Fresh activation, possibly ending a previous ship's activation early.
                 --ms.activations_remaining;
                 ms.active_unit_idx = unit_idx;
-                ms.steps_remaining = ship_movement_value(
-                    state.players[player_id], state.unit_registry[unit_idx].type);
+                ms.steps_remaining = movement_value;
             }
 
             --ms.steps_remaining;
@@ -112,19 +376,21 @@ namespace open_spiel::eclipse
 
     uint8_t ship_movement_value(const Player& player, ShipType ship_type)
     {
-        const size_t bp_idx = static_cast<size_t>(ship_type);
+        const std::size_t bp_idx = static_cast<std::size_t>(ship_type);
         if (bp_idx >= player.blueprints.size()) return 0;
         return player.blueprints[bp_idx].total_stats.movement;
     }
 
     bool can_leave_sector(const ::State& state, uint8_t player_id, uint16_t sector_id)
     {
+        if (player_id >= state.players.size()) return false;
+
         int friendly = 0;
         int opponents = 0;
         for (const Unit& unit : state.unit_registry)
         {
             if (unit.sector_id != sector_id) continue;
-            if (unit.type == ShipType::GCDS) return false;  // GCDS pins all ships
+            if (unit.type == ShipType::GCDS) return false;  // GCDS pins all ships.
             if (unit.player_id == player_id) ++friendly;
             else ++opponents;
         }
@@ -132,40 +398,16 @@ namespace open_spiel::eclipse
         int pinned = opponents;
         if (state.players[player_id].has_tech(TechBit::CLOAKING_DEVICE))
         {
-            pinned = opponents / 2;  // two ships are required to pin each of yours
+            pinned = opponents / 2;  // Two opposing ships are required to pin each of yours.
         }
         return friendly > pinned;
     }
 
     bool can_move_step(const ::State& state, uint8_t player_id, uint8_t unit_idx, uint8_t direction)
     {
-        if (player_id >= state.players.size()) return false;
-        if (unit_idx >= state.unit_registry.size() || direction >= 6) return false;
-
-        const ::MoveState& ms = state.move_state;
-        if (ms.phase != ::MoveState::Phase::choose_move || ms.player_id != player_id) return false;
-        if (!can_start_or_continue(ms, unit_idx)) return false;
-
-        const Unit& unit = state.unit_registry[unit_idx];
-        if (!is_movable_ship(unit, player_id)) return false;
-        if (ship_movement_value(state.players[player_id], unit.type) == 0) return false;
-        if (!can_leave_sector(state, player_id, unit.sector_id)) return false;
-
-        const SectorCellMap cell_map = build_sector_cell_map(state);
-        if (unit.sector_id >= MAX_SECTOR_ID || cell_map[unit.sector_id] == INVALID_CELL) return false;
-        const HexCoord from = index_to_hex(cell_map[unit.sector_id]);
-
-        const int to_q = from.q + HEX_DIRECTIONS[direction].first;
-        const int to_r = from.r + HEX_DIRECTIONS[direction].second;
-        if (!in_galaxy_bounds(to_q, to_r)) return false;
-
-        const Sector& dest = state.galaxy.at(to_q, to_r);
-        if (dest.sector_id == 0) return false;  // Ships may not move to unexplored zones
-
-        const bool wormhole_generator =
-            state.players[player_id].has_tech(TechBit::WORMHOLE_GENERATOR);
-        return has_wormhole_connection(state.galaxy.at(from.q, from.r), dest,
-                                       direction, wormhole_generator);
+        const MoveBoardCache cache(state);
+        StepValidation validation;
+        return validate_regular_step(state, player_id, unit_idx, direction, cache, validation);
     }
 
     bool can_begin_warp_move(const ::State& state, uint8_t player_id, uint8_t unit_idx)
@@ -177,29 +419,8 @@ namespace open_spiel::eclipse
         if (ms.phase != ::MoveState::Phase::choose_move || ms.player_id != player_id) return false;
         if (!can_start_or_continue(ms, unit_idx)) return false;
 
-        const Unit& unit = state.unit_registry[unit_idx];
-        if (!is_movable_ship(unit, player_id)) return false;
-        if (ship_movement_value(state.players[player_id], unit.type) == 0) return false;
-        if (!can_leave_sector(state, player_id, unit.sector_id)) return false;
-
-        const SectorCellMap cell_map = build_sector_cell_map(state);
-        if (unit.sector_id >= MAX_SECTOR_ID || cell_map[unit.sector_id] == INVALID_CELL) return false;
-        const HexCoord from = index_to_hex(cell_map[unit.sector_id]);
-        if (!sector_has_warp_portal(state.galaxy.at(from.q, from.r))) return false;
-
-        // Any other explored warp portal sector is a valid destination.
-        for (int q = -GALAXY_RADIUS; q <= GALAXY_RADIUS; ++q)
-        {
-            for (int r = -GALAXY_RADIUS; r <= GALAXY_RADIUS; ++r)
-            {
-                const Sector& sector = state.galaxy.at(q, r);
-                if (sector.sector_id != unit.sector_id && sector_has_warp_portal(sector))
-                {
-                    return true;
-                }
-            }
-        }
-        return false;
+        const MoveBoardCache cache(state);
+        return validate_warp_entry(state, player_id, unit_idx, cache);
     }
 
     std::vector<MoveStepOption> legal_move_steps(const ::State& state, uint8_t player_id)
@@ -212,44 +433,43 @@ namespace open_spiel::eclipse
 
         const Player& player = state.players[player_id];
         const bool wormhole_generator = player.has_tech(TechBit::WORMHOLE_GENERATOR);
-        const SectorCellMap cell_map = build_sector_cell_map(state);
+        const MoveBoardCache cache(state);
+        const PinningAvailability pinning(state, player, player_id);
 
-        // Whether any warp portal pair exists on the board (cheap pre-pass).
-        int warp_portal_sectors = 0;
-        for (int q = -GALAXY_RADIUS; q <= GALAXY_RADIUS; ++q)
+        // Public API still returns std::vector, so reserve the compact action upper bound
+        // once rather than paying for repeated reallocations during push_back.
+        options.reserve(state.unit_registry.size() * MOVE_CODES_PER_UNIT);
+
+        const std::size_t unit_count = state.unit_registry.size();
+        for (std::size_t idx = 0; idx < unit_count; ++idx)
         {
-            for (int r = -GALAXY_RADIUS; r <= GALAXY_RADIUS; ++r)
+            const uint8_t unit_idx = static_cast<uint8_t>(idx);
+            const Unit& unit = state.unit_registry[idx];
+
+            uint8_t source_cell = INVALID_CELL;
+            if (!unit_can_contribute_legal_step(ms, player, unit, player_id, unit_idx,
+                                                cache, pinning, source_cell))
             {
-                if (sector_has_warp_portal(state.galaxy.at(q, r))) ++warp_portal_sectors;
+                continue;
             }
-        }
 
-        for (uint8_t unit_idx = 0; unit_idx < state.unit_registry.size(); ++unit_idx)
-        {
-            const Unit& unit = state.unit_registry[unit_idx];
-            if (!is_movable_ship(unit, player_id)) continue;
-            if (!can_start_or_continue(ms, unit_idx)) continue;
-            if (ship_movement_value(player, unit.type) == 0) continue;
-            if (unit.sector_id >= MAX_SECTOR_ID || cell_map[unit.sector_id] == INVALID_CELL) continue;
-            if (!can_leave_sector(state, player_id, unit.sector_id)) continue;
-
-            const HexCoord from = index_to_hex(cell_map[unit.sector_id]);
-            const Sector& source = state.galaxy.at(from.q, from.r);
-
+            const HexCoord from = index_to_hex(source_cell);
             for (uint8_t d = 0; d < 6; ++d)
             {
                 const int to_q = from.q + HEX_DIRECTIONS[d].first;
                 const int to_r = from.r + HEX_DIRECTIONS[d].second;
                 if (!in_galaxy_bounds(to_q, to_r)) continue;
-                const Sector& dest = state.galaxy.at(to_q, to_r);
-                if (dest.sector_id == 0) continue;
-                if (has_wormhole_connection(source, dest, d, wormhole_generator))
+
+                const uint8_t to_cell = static_cast<uint8_t>(hex_to_index(to_q, to_r));
+                if (has_wormhole_connection(cache, source_cell, to_cell,
+                                            d, wormhole_generator))
                 {
                     options.push_back(MoveStepOption{unit_idx, d});
                 }
             }
 
-            if (warp_portal_sectors >= 2 && sector_has_warp_portal(source))
+            if (cache.has_warp_portal[source_cell] != 0 &&
+                has_other_warp_portal(cache, unit.sector_id))
             {
                 options.push_back(MoveStepOption{unit_idx, MOVE_WARP_DIRECTION});
             }
@@ -260,6 +480,8 @@ namespace open_spiel::eclipse
     std::vector<uint8_t> legal_warp_destination_cells(const ::State& state, uint8_t player_id)
     {
         std::vector<uint8_t> cells;
+        if (player_id >= state.players.size()) return cells;
+
         const ::MoveState& ms = state.move_state;
         if (ms.phase != ::MoveState::Phase::choose_warp_destination ||
             ms.player_id != player_id || ms.warp_unit_idx >= state.unit_registry.size())
@@ -267,16 +489,18 @@ namespace open_spiel::eclipse
             return cells;
         }
 
-        const uint16_t source_sector_id = state.unit_registry[ms.warp_unit_idx].sector_id;
-        for (int q = -GALAXY_RADIUS; q <= GALAXY_RADIUS; ++q)
+        const Unit& unit = state.unit_registry[ms.warp_unit_idx];
+        const MoveBoardCache cache(state);
+        const uint8_t source_cell = cache.cell_for_sector(unit.sector_id);
+        if (source_cell == INVALID_CELL || cache.has_warp_portal[source_cell] == 0) return cells;
+        if (!has_other_warp_portal(cache, unit.sector_id)) return cells;
+
+        cells.reserve(cache.warp_portal_count > 0 ? cache.warp_portal_count - 1 : 0);
+        for (std::size_t cell = 0; cell < GALAXY_CELL_COUNT; ++cell)
         {
-            for (int r = -GALAXY_RADIUS; r <= GALAXY_RADIUS; ++r)
+            if (cache.has_warp_portal[cell] != 0 && cache.cell_to_sector[cell] != unit.sector_id)
             {
-                const Sector& sector = state.galaxy.at(q, r);
-                if (sector.sector_id != source_sector_id && sector_has_warp_portal(sector))
-                {
-                    cells.push_back(static_cast<uint8_t>(hex_to_index(q, r)));
-                }
+                cells.push_back(static_cast<uint8_t>(cell));
             }
         }
         return cells;
@@ -284,16 +508,12 @@ namespace open_spiel::eclipse
 
     bool execute_move_step(::State& state, uint8_t player_id, uint8_t unit_idx, uint8_t direction)
     {
-        if (!can_move_step(state, player_id, unit_idx, direction)) return false;
+        const MoveBoardCache cache(state);
+        StepValidation validation;
+        if (!validate_regular_step(state, player_id, unit_idx, direction, cache, validation)) return false;
 
-        Unit& unit = state.unit_registry[unit_idx];
-        const SectorCellMap cell_map = build_sector_cell_map(state);
-        const HexCoord from = index_to_hex(cell_map[unit.sector_id]);
-        const Sector& dest = state.galaxy.at(from.q + HEX_DIRECTIONS[direction].first,
-                                             from.r + HEX_DIRECTIONS[direction].second);
-
-        unit.sector_id = dest.sector_id;
-        apply_step_bookkeeping(state, player_id, unit_idx);
+        state.unit_registry[unit_idx].sector_id = validation.dest_sector_id;
+        apply_step_bookkeeping(state, unit_idx, validation.movement_value);
         return true;
     }
 
@@ -308,30 +528,33 @@ namespace open_spiel::eclipse
 
     bool execute_warp_move(::State& state, uint8_t player_id, uint8_t galaxy_cell_idx)
     {
+        if (player_id >= state.players.size()) return false;
+        if (galaxy_cell_idx >= GALAXY_CELL_COUNT) return false;
+
         const ::MoveState& ms = state.move_state;
         if (ms.phase != ::MoveState::Phase::choose_warp_destination ||
-            ms.player_id != player_id)
+            ms.player_id != player_id || ms.warp_unit_idx >= state.unit_registry.size())
         {
             return false;
         }
 
-        const std::vector<uint8_t> cells = legal_warp_destination_cells(state, player_id);
-        bool is_legal = false;
-        for (uint8_t cell : cells)
-        {
-            if (cell == galaxy_cell_idx)
-            {
-                is_legal = true;
-                break;
-            }
-        }
-        if (!is_legal) return false;
-
         const uint8_t unit_idx = ms.warp_unit_idx;
-        const HexCoord dest_coord = index_to_hex(galaxy_cell_idx);
-        state.unit_registry[unit_idx].sector_id =
-            state.galaxy.at(dest_coord.q, dest_coord.r).sector_id;
-        apply_step_bookkeeping(state, player_id, unit_idx);
+        Unit& unit = state.unit_registry[unit_idx];
+        if (!is_movable_ship(unit, player_id)) return false;
+
+        const uint8_t movement_value = ship_movement_value(state.players[player_id], unit.type);
+        if (movement_value == 0) return false;
+
+        const MoveBoardCache cache(state);
+        const uint8_t source_cell = cache.cell_for_sector(unit.sector_id);
+        if (source_cell == INVALID_CELL || cache.has_warp_portal[source_cell] == 0) return false;
+        if (cache.has_warp_portal[galaxy_cell_idx] == 0) return false;
+
+        const uint16_t dest_sector_id = cache.cell_to_sector[galaxy_cell_idx];
+        if (dest_sector_id == 0 || dest_sector_id == unit.sector_id) return false;
+
+        unit.sector_id = dest_sector_id;
+        apply_step_bookkeeping(state, unit_idx, movement_value);
         return true;
     }
 
@@ -339,25 +562,28 @@ namespace open_spiel::eclipse
     {
         if (player_id >= state.players.size()) return false;
 
-        MoveState& ms = state.move_state;
-        ms = MoveState{};
+        ::MoveState& ms = state.move_state;
+        ms = ::MoveState{};
         ms.player_id = player_id;
 
-        uint8_t activations = SPECIES_TABLE[static_cast<size_t>(state.players[player_id].species_id)].activations.move;
+        uint8_t activations =
+            SPECIES_TABLE[static_cast<std::size_t>(state.players[player_id].species_id)].activations.move;
 
         // Improved Logistics grants 1 additional Move Activation per Move action.
         if (state.players[player_id].has_tech(TechBit::IMPROVED_LOGISTICS))
         {
-            activations += 1;
+            ++activations;
         }
 
         ms.activations_remaining = activations > 0 ? activations : 1;
-        ms.phase = MoveState::Phase::choose_move;
+        ms.phase = ::MoveState::Phase::choose_move;
 
         // Stay inactive when there is nothing to move so no disc is wasted.
-        if (legal_move_steps(state, player_id).empty())
+        const MoveBoardCache cache(state);
+        const PinningAvailability pinning(state, state.players[player_id], player_id);
+        if (!has_any_legal_move(state, player_id, cache, pinning))
         {
-            ms = MoveState{};
+            ms = ::MoveState{};
             return false;
         }
         return true;

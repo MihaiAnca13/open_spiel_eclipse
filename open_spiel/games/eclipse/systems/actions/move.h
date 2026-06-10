@@ -75,8 +75,24 @@ namespace open_spiel::eclipse
     // All legal steps for the current Move sub-phase, computed in one pass.
     std::vector<MoveStepOption> legal_move_steps(const ::State& state, uint8_t player_id);
 
+    // No-allocation overload: writes legal steps into caller-owned buffer.
+    // Returns the number of steps written (capped at max_out).
+    int legal_move_steps_into(const ::State& state, uint8_t player_id,
+                               MoveStepOption* out, int max_out);
+
     // Galaxy cell indices of warp portal sectors reachable by the pending warp unit.
     std::vector<uint8_t> legal_warp_destination_cells(const ::State& state, uint8_t player_id);
+
+    // No-allocation overload: writes warp destination cells into caller-owned buffer.
+    // Returns the number of cells written (capped at max_out).
+    int legal_warp_destination_cells_into(const ::State& state, uint8_t player_id,
+                                          uint8_t* out, int max_out);
+
+    // Action-mask API for MCTS/RL: fills a bitset where each bit represents
+    // a legal move action. Regular moves use 128 units * 7 move codes = 896 bits.
+    // Warp destinations use the dense GALAXY_CELL_COUNT mapping (225 cells).
+    // mask_words must point to at least ((896 + GALAXY_CELL_COUNT + 63) / 64) uint64_t words.
+    void fill_move_action_mask(const ::State& state, uint8_t player_id, uint64_t* mask_words);
 
     // Executes a single-hex movement step, handling activation bookkeeping.
     bool execute_move_step(::State& state, uint8_t player_id, uint8_t unit_idx, uint8_t direction);
