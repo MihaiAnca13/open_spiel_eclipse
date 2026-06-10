@@ -9,6 +9,7 @@ set(ECLIPSE_UI_NATIVE_SOURCES
   ${CMAKE_CURRENT_SOURCE_DIR}/../../../open_spiel/games/eclipse/systems/actions/build.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../../../open_spiel/games/eclipse/systems/actions/influence.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../../../open_spiel/games/eclipse/systems/actions/upgrade.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../../open_spiel/games/eclipse/systems/actions/move.cpp
 )
 
 add_library(eclipse_ui_native MODULE ${ECLIPSE_UI_NATIVE_SOURCES})

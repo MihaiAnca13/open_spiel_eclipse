@@ -871,6 +871,110 @@ void BuildFullActionTest() {
   SPIEL_CHECK_EQ(state->CurrentPlayer(), 1);
 }
 
+void UpgradeFullActionTest() {
+  std::shared_ptr<const Game> game = LoadEclipseGame(2, 7);
+  std::unique_ptr<State> state = game->NewInitialState();
+  state->ApplyAction(0); // resolve setup
+
+  EclipseState* eclipse_state = static_cast<EclipseState*>(state.get());
+  ::State& raw = const_cast<::State&>(eclipse_state->RawState());
+  raw.current_player = 0;
+  raw.players[0].has_passed = false;
+  raw.players[0].resources.materials = 10;
+  raw.players[0].resources.science = 10;
+
+  // Verify UPGRADE action is available
+  std::vector<Action> legal = state->LegalActions();
+  Action upgrade_act = -1;
+  for (Action a : legal) {
+    if (state->ActionToString(state->CurrentPlayer(), a) == "UPGRADE") {
+      upgrade_act = a;
+      break;
+    }
+  }
+  SPIEL_CHECK_NE(upgrade_act, -1);
+
+  // Apply UPGRADE action
+  state->ApplyAction(upgrade_act);
+  SPIEL_CHECK_TRUE(raw.upgrade_state.phase == UpgradeState::Phase::choose_upgrade);
+  SPIEL_CHECK_EQ(raw.players[0].disks_on_actions, 1);
+
+  // Upgrade Interceptor slot 0 (add a part if legal, or remove if legal)
+  legal = state->LegalActions();
+  Action interceptor_slot0 = -1;
+  for (Action a : legal) {
+    std::string name = state->ActionToString(state->CurrentPlayer(), a);
+    if (name == "UPGRADE_INTERCEPTOR_SLOT0") {
+      interceptor_slot0 = a;
+      break;
+    }
+  }
+  SPIEL_CHECK_NE(interceptor_slot0, -1);
+
+  // Apply upgrade action
+  state->ApplyAction(interceptor_slot0);
+
+  // Activations should decrement only if a part was placed (not for removal)
+  // Stop early
+  legal = state->LegalActions();
+  Action stop_act = -1;
+  for (Action a : legal) {
+    if (state->ActionToString(state->CurrentPlayer(), a) == "UPGRADE_STOP") {
+      stop_act = a;
+      break;
+    }
+  }
+  SPIEL_CHECK_NE(stop_act, -1);
+  state->ApplyAction(stop_act);
+
+  // Upgrade phase should now be inactive, and turn should advance to player 1
+  SPIEL_CHECK_TRUE(raw.upgrade_state.phase == UpgradeState::Phase::inactive);
+  SPIEL_CHECK_EQ(state->CurrentPlayer(), 1);
+}
+
+void MoveFullActionTest() {
+  std::shared_ptr<const Game> game = LoadEclipseGame(2, 7);
+  std::unique_ptr<State> state = game->NewInitialState();
+  state->ApplyAction(0); // resolve setup
+
+  EclipseState* eclipse_state = static_cast<EclipseState*>(state.get());
+  ::State& raw = const_cast<::State&>(eclipse_state->RawState());
+  raw.current_player = 0;
+  raw.players[0].has_passed = false;
+
+  // Verify MOVE action is available
+  std::vector<Action> legal = state->LegalActions();
+  Action move_act = -1;
+  for (Action a : legal) {
+    if (state->ActionToString(state->CurrentPlayer(), a) == "MOVE") {
+      move_act = a;
+      break;
+    }
+  }
+  SPIEL_CHECK_NE(move_act, -1);
+
+  // Apply MOVE action
+  state->ApplyAction(move_act);
+  SPIEL_CHECK_TRUE(raw.move_state.phase == MoveState::Phase::choose_move);
+  SPIEL_CHECK_EQ(raw.players[0].disks_on_actions, 1);
+
+  // Check if any legal move steps exist (depends on ship positions)
+  legal = state->LegalActions();
+  Action stop_act = -1;
+  for (Action a : legal) {
+    if (state->ActionToString(state->CurrentPlayer(), a) == "MOVE_STOP") {
+      stop_act = a;
+      break;
+    }
+  }
+  SPIEL_CHECK_NE(stop_act, -1);
+  state->ApplyAction(stop_act);
+
+  // Move phase should now be inactive, and turn should advance to player 1
+  SPIEL_CHECK_TRUE(raw.move_state.phase == MoveState::Phase::inactive);
+  SPIEL_CHECK_EQ(state->CurrentPlayer(), 1);
+}
+
 }  // namespace
 }  // namespace eclipse
 }  // namespace open_spiel
@@ -897,4 +1001,6 @@ int main(int argc, char** argv) {
   open_spiel::eclipse::InfluenceReclaimCubesTest();
   open_spiel::eclipse::InfluenceFullActionTest();
   open_spiel::eclipse::BuildFullActionTest();
+  open_spiel::eclipse::UpgradeFullActionTest();
+  open_spiel::eclipse::MoveFullActionTest();
 }

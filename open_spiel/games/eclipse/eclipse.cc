@@ -14,6 +14,8 @@
 #include "open_spiel/games/eclipse/systems/actions/research.h"
 #include "open_spiel/games/eclipse/systems/actions/build.h"
 #include "open_spiel/games/eclipse/systems/actions/influence.h"
+#include "open_spiel/games/eclipse/systems/actions/upgrade.h"
+#include "open_spiel/games/eclipse/systems/actions/move.h"
 #include "open_spiel/games/eclipse/systems/setup.h"
 #include "open_spiel/json/include/nlohmann/json.hpp"
 #include "open_spiel/observer.h"
@@ -78,7 +80,26 @@ constexpr Action action_choose_return_track_start = action_reclaim_from_cell_sta
 
 constexpr Action action_build_stop = action_choose_return_track_start + 3; // 6187
 constexpr Action action_build_choice_start = action_build_stop + 1; // 6188
-constexpr int num_distinct_actions = action_build_choice_start + BUILD_TYPE_COUNT * GALAXY_CELL_COUNT; // 6188 + 6*225 = 7538
+constexpr Action action_build_end = action_build_choice_start + BUILD_TYPE_COUNT * GALAXY_CELL_COUNT; // 6188 + 6*225 = 7538
+
+// Upgrade action IDs (4 ship types * 8 slots * ~30 parts = 960 choices)
+constexpr Action action_upgrade = action_build_end + 1; // 7539
+constexpr Action action_upgrade_stop = action_upgrade + 1; // 7540
+constexpr Action action_upgrade_choice_start = action_upgrade_stop + 1; // 7541
+constexpr int UPGRADE_SHIP_COUNT = 4; // INTERCEPTOR, CRUISER, DREADNOUGHT, STARBASE
+constexpr int UPGRADE_SLOTS_PER_SHIP = 8;
+constexpr int UPGRADE_PART_COUNT = 30; // Approximate number of non-discovery ship parts
+constexpr Action action_upgrade_end = action_upgrade_choice_start + UPGRADE_SHIP_COUNT * UPGRADE_SLOTS_PER_SHIP * UPGRADE_PART_COUNT; // 7541 + 960 = 8501
+constexpr int num_distinct_actions_upgrade = action_upgrade_end + 1; // 8501 + 1 = 8502
+
+// Move action IDs (128 units * 7 codes = 896 step codes, 128 warp entry codes, 225 warp destinations)
+constexpr Action action_move = num_distinct_actions_upgrade; // 8502
+constexpr Action action_move_stop = action_move + 1; // 8503
+constexpr Action action_move_choice_start = action_move_stop + 1; // 8504
+constexpr int MAX_MOVE_UNITS = 128; // unit_registry capacity
+constexpr Action action_move_warp_start = action_move_choice_start + MAX_MOVE_UNITS * MOVE_CODES_PER_UNIT; // 8504 + 896 = 9400
+constexpr Action action_move_warp_destination_start = action_move_warp_start + MAX_MOVE_UNITS; // 9400 + 128 = 9528
+constexpr int num_distinct_actions = action_move_warp_destination_start + GALAXY_CELL_COUNT; // 9528 + 225 = 9753
 
 const GameType game_type{
     /*short_name=*/"eclipse",
@@ -264,6 +285,16 @@ std::vector<Action> EclipseState::LegalActions() const {
     return BuildLegalActions();
   }
 
+  // Mid-Upgrade: only upgrade choices are legal.
+  if (s.upgrade_state.phase != ::UpgradeState::Phase::inactive) {
+    return UpgradeLegalActions();
+  }
+
+  // Mid-Move: only move choices are legal.
+  if (s.move_state.phase != ::MoveState::Phase::inactive) {
+    return MoveLegalActions();
+  }
+
   std::vector<Action> actions;
   actions.push_back(action_pass);
 
@@ -283,6 +314,12 @@ std::vector<Action> EclipseState::LegalActions() const {
     }
     if (has_action_disk) {
       actions.push_back(action_influence_start);
+    }
+    if (has_action_disk) {
+      actions.push_back(action_upgrade);
+    }
+    if (has_action_disk) {
+      actions.push_back(action_move);
     }
 
     // Bonus actions (no disc cost, no turn advance).
@@ -487,6 +524,75 @@ std::vector<Action> EclipseState::BuildLegalActions() const {
   return actions;
 }
 
+std::vector<Action> EclipseState::UpgradeLegalActions() const {
+  const ::State& s = eclipse_state_;
+  const ::UpgradeState& us = s.upgrade_state;
+  std::vector<Action> actions;
+
+  if (us.phase == ::UpgradeState::Phase::choose_upgrade) {
+    const ::Player& player = s.players[us.player_id];
+    constexpr size_t total_parts = sizeof(SHIP_PART_TABLE) / sizeof(SHIP_PART_TABLE[0]);
+
+    // 4 ship types (INTERCEPTOR=0, CRUISER=1, DREADNOUGHT=2, STARBASE=3)
+    for (int ship = 0; ship < UPGRADE_SHIP_COUNT; ++ship) {
+      ShipType ship_type = static_cast<ShipType>(ship);
+      const Blueprint& bp = player.blueprints[ship];
+
+      for (int slot = 0; slot < UPGRADE_SLOTS_PER_SHIP; ++slot) {
+        if (slot >= bp.capacity) continue;
+
+        // Check if removal is legal (energy-positive, retains drive)
+        if (can_upgrade(s, us.player_id, ship_type, static_cast<uint8_t>(slot), ShipPartId::NONE)) {
+          Action action = action_upgrade_choice_start + ship * UPGRADE_SLOTS_PER_SHIP * UPGRADE_PART_COUNT + slot * UPGRADE_PART_COUNT;
+          if (action == action_upgrade_stop) {
+            continue;
+          }
+          actions.push_back(action);
+        }
+
+        // Check all ship parts (skip NONE, already handled)
+        for (size_t part_idx = 1; part_idx < total_parts && part_idx < static_cast<size_t>(UPGRADE_PART_COUNT); ++part_idx) {
+          ShipPartId part_id = static_cast<ShipPartId>(part_idx);
+          if (can_upgrade(s, us.player_id, ship_type, static_cast<uint8_t>(slot), part_id)) {
+            Action action = action_upgrade_choice_start + ship * UPGRADE_SLOTS_PER_SHIP * UPGRADE_PART_COUNT + slot * UPGRADE_PART_COUNT + static_cast<int>(part_idx);
+            if (action == action_upgrade_stop) {
+              continue;
+            }
+            actions.push_back(action);
+          }
+        }
+      }
+    }
+    actions.push_back(action_upgrade_stop);
+  }
+
+  std::sort(actions.begin(), actions.end());
+  actions.erase(std::unique(actions.begin(), actions.end()), actions.end());
+  return actions;
+}
+
+std::vector<Action> EclipseState::MoveLegalActions() const {
+  const ::State& s = eclipse_state_;
+  const ::MoveState& ms = s.move_state;
+  std::vector<Action> actions;
+
+  if (ms.phase == ::MoveState::Phase::choose_move) {
+    const std::vector<MoveStepOption> steps = legal_move_steps(s, ms.player_id);
+    for (const MoveStepOption& opt : steps) {
+      actions.push_back(action_move_choice_start + opt.unit_idx * MOVE_CODES_PER_UNIT + opt.direction);
+    }
+    actions.push_back(action_move_stop);
+  } else if (ms.phase == ::MoveState::Phase::choose_warp_destination) {
+    const std::vector<uint8_t> cells = legal_warp_destination_cells(s, ms.player_id);
+    for (uint8_t cell : cells) {
+      actions.push_back(action_move_warp_destination_start + cell);
+    }
+  }
+
+  std::sort(actions.begin(), actions.end());
+  return actions;
+}
+
 std::string EclipseState::ActionToString(Player player, Action action_id) const {
   if (pending_random_event_ == PendingRandomEvent::explore_draw) {
     uint32_t bag = ring_bag_value(eclipse_state_, eclipse_state_.explore_state.ring);
@@ -535,7 +641,7 @@ std::string EclipseState::ActionToString(Player player, Action action_id) const 
   if (action_id == action_build_stop) {
     return "BUILD_STOP";
   }
-  if (action_id >= action_build_choice_start && action_id < action_build_choice_start + BUILD_TYPE_COUNT * GALAXY_CELL_COUNT) {
+  if (action_id >= action_build_choice_start && action_id < action_build_end) {
     int encoded = action_id - action_build_choice_start;
     int type_idx = encoded / GALAXY_CELL_COUNT;
     int cell_idx = encoded % GALAXY_CELL_COUNT;
@@ -607,7 +713,49 @@ std::string EclipseState::ActionToString(Player player, Action action_id) const 
   }
   if (action_id >= action_choose_return_track_start && action_id < action_choose_return_track_start + 3) {
     static const char* kTrackNames[3] = {"MONEY", "SCIENCE", "MATERIALS"};
-    return "RETURN_CUBE_TO_" + std::string(kTrackNames[action_id - action_choose_return_track_start]);
+    return "RETURN_TO_" + std::string(kTrackNames[action_id - action_choose_return_track_start]);
+  }
+  if (action_id == action_upgrade) {
+    return "UPGRADE";
+  }
+  if (action_id == action_upgrade_stop) {
+    return "UPGRADE_STOP";
+  }
+  if (action_id >= action_upgrade_choice_start && action_id < action_upgrade_choice_start + UPGRADE_SHIP_COUNT * UPGRADE_SLOTS_PER_SHIP * UPGRADE_PART_COUNT) {
+    int encoded = action_id - action_upgrade_choice_start;
+    int ship = encoded / (UPGRADE_SLOTS_PER_SHIP * UPGRADE_PART_COUNT);
+    int rem = encoded % (UPGRADE_SLOTS_PER_SHIP * UPGRADE_PART_COUNT);
+    int slot = rem / UPGRADE_PART_COUNT;
+    int part_idx = rem % UPGRADE_PART_COUNT;
+    static const char* kShipNames[UPGRADE_SHIP_COUNT] = {"INTERCEPTOR", "CRUISER", "DREADNOUGHT", "STARBASE"};
+    if (part_idx == 0) {
+      return "UPGRADE_" + std::string(kShipNames[ship]) + "_SLOT" + std::to_string(slot) + "_REMOVE";
+    }
+    if (part_idx < sizeof(SHIP_PART_TABLE) / sizeof(SHIP_PART_TABLE[0])) {
+      const ShipPart& part = SHIP_PART_TABLE[part_idx];
+      return "UPGRADE_" + std::string(kShipNames[ship]) + "_SLOT" + std::to_string(slot) + "_" + std::string(part.name);
+    }
+    return "UPGRADE_" + std::string(kShipNames[ship]) + "_SLOT" + std::to_string(slot) + "_PART" + std::to_string(part_idx);
+  }
+  if (action_id == action_move) {
+    return "MOVE";
+  }
+  if (action_id == action_move_stop) {
+    return "MOVE_STOP";
+  }
+  if (action_id >= action_move_choice_start && action_id < action_move_warp_start) {
+    int encoded = action_id - action_move_choice_start;
+    int unit_idx = encoded / MOVE_CODES_PER_UNIT;
+    int direction = encoded % MOVE_CODES_PER_UNIT;
+    if (direction == MOVE_WARP_DIRECTION) {
+      return "MOVE_UNIT_" + std::to_string(unit_idx) + "_WARP";
+    }
+    static const char* kDirNames[6] = {"E", "NE", "NW", "W", "SW", "SE"};
+    return "MOVE_UNIT_" + std::to_string(unit_idx) + "_" + kDirNames[direction];
+  }
+  if (action_id >= action_move_warp_destination_start && action_id < num_distinct_actions) {
+    HexCoord c = index_to_hex(action_id - action_move_warp_destination_start);
+    return "MOVE_WARP_TO_" + std::to_string(c.q) + "_" + std::to_string(c.r);
   }
   return "UNKNOWN_ACTION(" + std::to_string(action_id) + ")";
 }
@@ -979,11 +1127,60 @@ void EclipseState::ApplyBuildSubAction(Action action_id) {
     return;
   }
 
-  if (action_id >= action_build_choice_start && action_id < action_build_choice_start + BUILD_TYPE_COUNT * GALAXY_CELL_COUNT) {
+  if (action_id >= action_build_choice_start && action_id < action_build_end) {
     int encoded = action_id - action_build_choice_start;
     BuildType type = static_cast<BuildType>(encoded / GALAXY_CELL_COUNT);
     uint8_t cell_idx = static_cast<uint8_t>(encoded % GALAXY_CELL_COUNT);
     SPIEL_CHECK_TRUE(execute_build(s, player, type, cell_idx));
+  }
+}
+
+void EclipseState::ApplyUpgradeSubAction(Action action_id) {
+  ::State& s = eclipse_state_;
+  const uint8_t player = s.upgrade_state.player_id;
+
+  if (action_id == action_upgrade_stop) {
+    s.upgrade_state.phase = ::UpgradeState::Phase::inactive;
+    s.upgrade_state.player_id = 255;
+    s.upgrade_state.activations_remaining = 0;
+    return;
+  }
+
+  if (action_id >= action_upgrade_choice_start && action_id < action_upgrade_choice_start + UPGRADE_SHIP_COUNT * UPGRADE_SLOTS_PER_SHIP * UPGRADE_PART_COUNT) {
+    int encoded = action_id - action_upgrade_choice_start;
+    int ship = encoded / (UPGRADE_SLOTS_PER_SHIP * UPGRADE_PART_COUNT);
+    int rem = encoded % (UPGRADE_SLOTS_PER_SHIP * UPGRADE_PART_COUNT);
+    int slot = rem / UPGRADE_PART_COUNT;
+    int part_idx = rem % UPGRADE_PART_COUNT;
+    ShipType ship_type = static_cast<ShipType>(ship);
+    ShipPartId part_id = static_cast<ShipPartId>(part_idx);
+    SPIEL_CHECK_TRUE(execute_upgrade(s, player, ship_type, static_cast<uint8_t>(slot), part_id));
+  }
+}
+
+void EclipseState::ApplyMoveSubAction(Action action_id) {
+  ::State& s = eclipse_state_;
+  const uint8_t player = s.move_state.player_id;
+
+  if (action_id == action_move_stop) {
+    s.move_state.phase = ::MoveState::Phase::inactive;
+    s.move_state.player_id = 255;
+    s.move_state.activations_remaining = 0;
+    return;
+  }
+
+  if (action_id >= action_move_choice_start && action_id < action_move_warp_start) {
+    int encoded = action_id - action_move_choice_start;
+    uint8_t unit_idx = static_cast<uint8_t>(encoded / MOVE_CODES_PER_UNIT);
+    uint8_t direction = static_cast<uint8_t>(encoded % MOVE_CODES_PER_UNIT);
+    if (direction == MOVE_WARP_DIRECTION) {
+      SPIEL_CHECK_TRUE(begin_warp_move(s, player, unit_idx));
+    } else {
+      SPIEL_CHECK_TRUE(execute_move_step(s, player, unit_idx, direction));
+    }
+  } else if (action_id >= action_move_warp_destination_start && action_id < num_distinct_actions) {
+    uint8_t cell_idx = static_cast<uint8_t>(action_id - action_move_warp_destination_start);
+    SPIEL_CHECK_TRUE(execute_warp_move(s, player, cell_idx));
   }
 }
 
@@ -1052,6 +1249,28 @@ void EclipseState::DoApplyAction(Action action_id) {
     return;
   }
 
+  // Resolve a step of an in-flight Upgrade action without advancing the turn,
+  // until all activations are done (phase returns to inactive).
+  if (eclipse_state_.upgrade_state.phase != ::UpgradeState::Phase::inactive) {
+    ApplyUpgradeSubAction(action_id);
+    if (eclipse_state_.upgrade_state.phase != ::UpgradeState::Phase::inactive) {
+      return;
+    }
+    AdvanceTurn();
+    return;
+  }
+
+  // Resolve a step of an in-flight Move action without advancing the turn,
+  // until all activations are done (phase returns to inactive).
+  if (eclipse_state_.move_state.phase != ::MoveState::Phase::inactive) {
+    ApplyMoveSubAction(action_id);
+    if (eclipse_state_.move_state.phase != ::MoveState::Phase::inactive) {
+      return;
+    }
+    AdvanceTurn();
+    return;
+  }
+
   uint8_t current_player = eclipse_state_.current_player;
 
   if (action_id == action_pass) {
@@ -1106,6 +1325,32 @@ void EclipseState::DoApplyAction(Action action_id) {
           ++eclipse_state_.players[current_player].disks_on_actions;
         }
         if (eclipse_state_.build_state.phase != ::BuildState::Phase::inactive) {
+          return;
+        }
+      }
+    }
+  } else if (action_id == action_upgrade) {
+    if (current_player < eclipse_state_.players.size()) {
+      const auto& player = eclipse_state_.players[current_player];
+      if (player.available_influence_discs() > 0) {
+        bool started = begin_upgrade(eclipse_state_, current_player);
+        if (started) {
+          ++eclipse_state_.players[current_player].disks_on_actions;
+        }
+        if (eclipse_state_.upgrade_state.phase != ::UpgradeState::Phase::inactive) {
+          return;
+        }
+      }
+    }
+  } else if (action_id == action_move) {
+    if (current_player < eclipse_state_.players.size()) {
+      const auto& player = eclipse_state_.players[current_player];
+      if (player.available_influence_discs() > 0) {
+        bool started = begin_move(eclipse_state_, current_player);
+        if (started) {
+          ++eclipse_state_.players[current_player].disks_on_actions;
+        }
+        if (eclipse_state_.move_state.phase != ::MoveState::Phase::inactive) {
           return;
         }
       }

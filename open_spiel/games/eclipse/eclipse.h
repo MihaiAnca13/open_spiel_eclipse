@@ -91,10 +91,14 @@ class EclipseState : public State {
   std::vector<Action> ResearchLegalActions() const;
   std::vector<Action> InfluenceLegalActions() const;
   std::vector<Action> BuildLegalActions() const;
+  std::vector<Action> UpgradeLegalActions() const;
+  std::vector<Action> MoveLegalActions() const;
   void ApplyExploreSubAction(Action action_id);
   void ApplyResearchSubAction(Action action_id);
   void ApplyInfluenceSubAction(Action action_id);
   void ApplyBuildSubAction(Action action_id);
+  void ApplyUpgradeSubAction(Action action_id);
+  void ApplyMoveSubAction(Action action_id);
   void AdvanceTurn();
 
   ::State eclipse_state_;
