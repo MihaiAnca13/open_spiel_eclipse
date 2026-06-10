@@ -98,6 +98,7 @@ set(GAME_SOURCES
   eclipse/systems/actions/build.h
   eclipse/systems/actions/influence.cpp
   eclipse/systems/actions/influence.h
+  eclipse/systems/actions/upgrade.h
   eclipse/actions.h
   eclipse/dice.h
   eclipse/discovery_tiles.h

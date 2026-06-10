@@ -21,6 +21,7 @@
 #include "systems/actions/research.h"
 #include "systems/actions/build.h"
 #include "systems/actions/influence.h"
+#include "systems/actions/upgrade.h"
 #include "absl/container/fixed_array.h"
 
 using open_spiel::eclipse::FixedVector;
@@ -148,6 +149,9 @@ struct State {
     // In-flight Influence action (inactive when no Influence is being resolved).
     InfluenceState influence_state;
 
+    // In-flight Upgrade action (inactive when no Upgrade is being resolved).
+    UpgradeState upgrade_state;
+
     // Helper functions for tech market tray (allocation-free representation)
     uint8_t get_tech_tray_count(TechBit tech) const {
         if (tech == TechBit::NONE) return 0;
@@ -205,7 +209,10 @@ inline void to_json(nlohmann::json& j, const State& s) {
         {"turn_order", s.turn_order},
         {"pass_order", s.pass_order},
         {"explore_state", s.explore_state},
-        {"research_state", s.research_state}
+        {"research_state", s.research_state},
+        {"build_state", s.build_state},
+        {"influence_state", s.influence_state},
+        {"upgrade_state", s.upgrade_state}
     };
 }
 
@@ -266,6 +273,24 @@ inline void from_json(const nlohmann::json& j, State& s) {
     }
 
     j.at("research_state").get_to(s.research_state);
+
+    if (j.contains("build_state")) {
+        j.at("build_state").get_to(s.build_state);
+    } else {
+        s.build_state = BuildState{};
+    }
+
+    if (j.contains("influence_state")) {
+        j.at("influence_state").get_to(s.influence_state);
+    } else {
+        s.influence_state = InfluenceState{};
+    }
+
+    if (j.contains("upgrade_state")) {
+        j.at("upgrade_state").get_to(s.upgrade_state);
+    } else {
+        s.upgrade_state = UpgradeState{};
+    }
 }
 
 // Helper: Check if a sector is an anchor for a player (controlled or has a ship present)
