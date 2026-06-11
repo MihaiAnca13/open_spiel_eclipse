@@ -23,6 +23,13 @@ export const ACTION = {
   COLONY_SHIP_SLOTS_PER_CELL: 8,
   COLONY_SHIP_TRACKS: 3,         // 0=Money, 1=Science, 2=Materials
   COLONY_SHIP_CODES_PER_CELL: 24, // SLOTS_PER_CELL * TRACKS
+
+  // Influence action IDs — mirror open_spiel/games/eclipse/eclipse.cc:75-79.
+  INFLUENCE: 5732,
+  INFLUENCE_STOP: 5733,
+  INFLUENCE_TO_CELL_START: 5734,   // + galaxy cell index (0..224)
+  RECLAIM_FROM_CELL_START: 5959,   // + galaxy cell index (0..224)
+  CHOOSE_RETURN_TRACK_START: 6184, // + 0=Money, 1=Science, 2=Materials
 } as const;
 
 // Population track names, indexed by track id (mirrors PopTrack in bonus.h).

@@ -289,10 +289,13 @@ function App({
   const exploreState = gameState?.explore_state;
   const explorePhase = exploreState?.phase ?? 'inactive';
   const researchState = gameState?.research_state;
+  const influenceState = gameState?.influence_state;
+  const influencePhase = influenceState?.phase ?? 'inactive';
   const isTerminal = snapshot?.is_terminal ?? false;
   const isStarted = setupFinalized && snapshot?.current_player !== undefined;
   const isMyTurn = isStarted && snapshot?.current_player === mySeatIdx && !isTerminal;
   const isResearchPhase = isMyTurn && researchState?.phase === 'choose_tech';
+  const isInfluencePhase = isMyTurn && influencePhase !== 'inactive';
   const currentPlayerLabel =
     snapshot?.current_player !== undefined ? playerLabel(snapshot.current_player) : '';
   const selectedSectorId = exploreState?.selected_sector_id ?? 0;
@@ -330,7 +333,15 @@ function App({
     ? legalActions.filter(a => a >= ACTION.TRADE_START && a < ACTION.COLONY_SHIP_START)
     : [];
   const legalColonyShipActions = isMyTurn
-    ? legalActions.filter(a => a >= ACTION.COLONY_SHIP_START)
+    ? legalActions.filter(a => a >= ACTION.COLONY_SHIP_START && a < ACTION.INFLUENCE)
+    : [];
+
+  // Influence sub-action targets (sectors to place or reclaim discs).
+  const influenceToCellActions = isInfluencePhase
+    ? legalActions.filter(a => a >= ACTION.INFLUENCE_TO_CELL_START && a < ACTION.RECLAIM_FROM_CELL_START)
+    : [];
+  const reclaimFromCellActions = isInfluencePhase
+    ? legalActions.filter(a => a >= ACTION.RECLAIM_FROM_CELL_START && a < ACTION.CHOOSE_RETURN_TRACK_START)
     : [];
 
   // Decode colony ship actions into (sectorId, slotIdx, track) for display.
@@ -529,6 +540,8 @@ function App({
               playerLabel={playerLabel}
               beginPreview={beginPreview}
               clearPreview={clearPreview}
+              influenceToCellActions={influenceToCellActions}
+              reclaimFromCellActions={reclaimFromCellActions}
             />
 
             {/* Floating action panel — only show when it's my turn */}
@@ -537,6 +550,7 @@ function App({
                 <ActionPanel
                   explore={exploreState}
                   research={researchState}
+                  influence={influenceState}
                   selectedRareTech={selectedRareTech}
                   onClearSelectedRareTech={() => setSelectedRareTech(null)}
                   legalActions={legalActions}

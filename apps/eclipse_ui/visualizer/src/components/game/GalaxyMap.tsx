@@ -26,6 +26,8 @@ interface GalaxyMapProps {
   playerLabel: (pid: number) => string;
   beginPreview: (preview: { src: string; label: string }) => void;
   clearPreview: () => void;
+  influenceToCellActions?: number[];
+  reclaimFromCellActions?: number[];
 }
 
 export default function GalaxyMap({
@@ -45,9 +47,28 @@ export default function GalaxyMap({
   playerLabel,
   beginPreview,
   clearPreview,
+  influenceToCellActions = [],
+  reclaimFromCellActions = [],
 }: GalaxyMapProps) {
   const [hoveredSector, setHoveredSector] = useState<Sector | null>(null);
   const [brokenImages, setBrokenImages] = useState<Set<number>>(new Set());
+
+  // Influence targets: cell index -> actionId for quick lookup.
+  const influencePlaceCells = useMemo(() => {
+    const map = new Map<number, number>();
+    for (const a of influenceToCellActions) {
+      map.set(a - ACTION.INFLUENCE_TO_CELL_START, a);
+    }
+    return map;
+  }, [influenceToCellActions]);
+  const influenceReclaimCells = useMemo(() => {
+    const map = new Map<number, number>();
+    for (const a of reclaimFromCellActions) {
+      map.set(a - ACTION.RECLAIM_FROM_CELL_START, a);
+    }
+    return map;
+  }, [reclaimFromCellActions]);
+  const inInfluencePhase = influenceToCellActions.length > 0 || reclaimFromCellActions.length > 0;
 
   // Pan/zoom state
   const [viewTransform, setViewTransform] = useState({ x: 0, y: 0, scale: INITIAL_SCALE });
@@ -463,6 +484,39 @@ export default function GalaxyMap({
                       />
                     )}
                   </g>
+                );
+              })()}
+
+              {/* ── Influence overlay: clickable sectors for place/reclaim ── */}
+              {inInfluencePhase && (() => {
+                const mapSize = gameState?.galaxy.length ?? 15;
+                const cellIdx = (sector.coords.q + 7) * mapSize + (sector.coords.r + 7);
+                const placeAction = influencePlaceCells.get(cellIdx);
+                const reclaimAction = influenceReclaimCells.get(cellIdx);
+                if (!placeAction && !reclaimAction) return null;
+                const isPlace = !!placeAction;
+                const actionId = placeAction ?? reclaimAction!;
+                return (
+                  <polygon
+                    points={getHexPoints(cx, cy, r)}
+                    fill={isPlace ? '#38bdf8' : '#4ade80'}
+                    fillOpacity={0.3}
+                    stroke={isPlace ? '#38bdf8' : '#4ade80'}
+                    strokeWidth={2}
+                    strokeDasharray="4 2"
+                    className="influence-target"
+                    style={{ cursor: 'pointer' }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      submitAction(actionId);
+                    }}
+                    onMouseEnter={() => {
+                      setHoveredSector(sector);
+                    }}
+                    onMouseLeave={() => {
+                      setHoveredSector(null);
+                    }}
+                  />
                 );
               })()}
             </g>

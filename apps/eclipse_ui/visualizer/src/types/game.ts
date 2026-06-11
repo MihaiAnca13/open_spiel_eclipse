@@ -88,6 +88,18 @@ export interface Unit {
   damage: number;
 }
 
+export interface PendingReturn {
+  type: string;
+  is_orbital: boolean;
+}
+
+export interface InfluenceState {
+  phase: 'inactive' | 'choose_influence' | 'choose_return_track';
+  player_id: number;
+  activations_remaining: number;
+  pending_returns: PendingReturn[];
+}
+
 export interface GameState {
   players: Player[];
   galaxy: Sector[][];
@@ -105,6 +117,7 @@ export interface GameState {
   pass_order: number[];
   explore_state?: ExploreState;
   research_state?: ResearchState;
+  influence_state?: InfluenceState;
   sector_bag_inner: number;
   sector_bag_middle: number;
   sector_bag_outer: number;

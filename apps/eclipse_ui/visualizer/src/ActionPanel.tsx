@@ -3,6 +3,7 @@
 // `gameState.explore_state`, so the UI never needs to reimplement game rules.
 
 import { ACTION } from './actionTypes';
+import type { InfluenceState } from './types/game';
 
 const RING_NAME: Record<number, string> = { 0: 'Inner (I)', 1: 'Middle (II)', 2: 'Outer (III)' };
 
@@ -28,6 +29,7 @@ export interface ResearchState {
 interface Props {
   explore: ExploreState | undefined;
   research: ResearchState | undefined;
+  influence: InfluenceState | undefined;
   selectedRareTech: { name: string; order: number } | null;
   onClearSelectedRareTech: () => void;
   legalActions: number[];
@@ -47,6 +49,7 @@ interface Props {
 export default function ActionPanel({
   explore,
   research,
+  influence,
   selectedRareTech,
   onClearSelectedRareTech,
   legalActions,
@@ -63,7 +66,12 @@ export default function ActionPanel({
   onAction,
 }: Props) {
   const legal = new Set(legalActions);
-  const phase = research?.phase === 'choose_tech' ? 'choose_tech' : (explore?.phase ?? 'inactive');
+  const influencePhase = influence?.phase ?? 'inactive';
+  const phase = influencePhase !== 'inactive'
+    ? influencePhase
+    : research?.phase === 'choose_tech'
+      ? 'choose_tech'
+      : (explore?.phase ?? 'inactive');
 
   const renderActionButton = (id: number, label: string, kind: 'primary' | 'secondary' | 'danger' = 'primary') =>
     legal.has(id) ? (
@@ -112,8 +120,39 @@ export default function ActionPanel({
             {renderActionButton(ACTION.RESEARCH, '🔬 Research')}
           </div>
           <div className="action-row">
+            {renderActionButton(ACTION.INFLUENCE, '🔵 Influence')}
             {renderActionButton(ACTION.PASS, '✋ Pass', 'secondary')}
-            <button className="action-btn secondary" disabled title="Not implemented yet">Build (soon)</button>
+          </div>
+          <div className="action-row">
+            <button className="action-btn secondary" disabled title="Coming soon">Build (soon)</button>
+          </div>
+        </>
+      )}
+
+      {phase === 'choose_influence' && influence && (
+        <>
+          <span className="text-xs text-[#94a3b8]">
+            {influence.activations_remaining > 1
+              ? `Manage your influence. Activations left: ${influence.activations_remaining}.`
+              : 'Manage your influence.'}
+            {' '}Click a highlighted sector on the map to place or reclaim a disc, or stop to finish.
+          </span>
+          <div className="action-row">
+            {renderActionButton(ACTION.INFLUENCE_STOP, 'Stop influence', 'secondary')}
+          </div>
+        </>
+      )}
+
+      {phase === 'choose_return_track' && (
+        <>
+          <span className="text-xs text-[#94a3b8]">
+            Choose which population track to place the returning cube on:
+            {influence && influence.pending_returns.length > 1 && ` (${influence.pending_returns.length} cubes remaining)`}
+          </span>
+          <div className="action-row">
+            {renderActionButton(ACTION.CHOOSE_RETURN_TRACK_START + 0, '💰 Money')}
+            {renderActionButton(ACTION.CHOOSE_RETURN_TRACK_START + 1, '🔬 Science')}
+            {renderActionButton(ACTION.CHOOSE_RETURN_TRACK_START + 2, '⚙️ Materials')}
           </div>
         </>
       )}
