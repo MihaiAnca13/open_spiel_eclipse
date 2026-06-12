@@ -1,7 +1,5 @@
 export const hexSize = 35;
-// The PNG tile art is 180 degrees from the backend's rotation=0 wormhole
-// masks. Apply that fixed offset, then apply the game's rotation.
-export const IMAGE_ROTATION_OFFSET = 180;
+export const IMAGE_ROTATION_OFFSET = 0;
 export const SQRT3 = Math.sqrt(3);
 
 // Axial (q,r) → pixel for a flat-top hex layout.
@@ -19,4 +17,18 @@ export function getHexPoints(cx: number, cy: number, r: number): string {
     points.push(`${cx + r * Math.cos(angle)},${cy + r * Math.sin(angle)}`);
   }
   return points.join(' ');
+}
+
+// Axial hex neighbor for direction 0=E, 1=NE, 2=NW, 3=W, 4=SW, 5=SE (flat-top).
+export function axialNeighbor(q: number, r: number, dir: number): [number, number] {
+  const dirs: [number, number][] = [
+    [1, 0],   // E
+    [1, -1],  // NE
+    [0, -1],  // NW
+    [-1, 0],  // W
+    [-1, 1],  // SW
+    [0, 1],   // SE
+  ];
+  const [dq, dr] = dirs[dir] ?? [0, 0];
+  return [q + dq, r + dr];
 }

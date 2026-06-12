@@ -975,6 +975,41 @@ void MoveFullActionTest() {
   SPIEL_CHECK_EQ(state->CurrentPlayer(), 1);
 }
 
+void StrictMainActionFilteringTest() {
+  std::shared_ptr<const Game> game = LoadEclipseGame(2, 7);
+  std::unique_ptr<State> state = game->NewInitialState();
+  state->ApplyAction(0);  // resolve setup
+
+  EclipseState* eclipse_state = static_cast<EclipseState*>(state.get());
+  ::State& raw = const_cast<::State&>(eclipse_state->RawState());
+  raw.current_player = 0;
+  raw.players[0].has_passed = false;
+  raw.players[0].resources.science = 0;
+  raw.players[0].resources.materials = 0;
+  raw.unit_registry.clear();
+
+  for (int q = -GALAXY_RADIUS; q <= GALAXY_RADIUS; ++q) {
+    for (int r = -GALAXY_RADIUS; r <= GALAXY_RADIUS; ++r) {
+      Sector& sector = raw.galaxy.at(q, r);
+      sector.owner_id = 255;
+      sector.occupied_slots_mask = 0;
+    }
+  }
+  raw.players[0].disks_on_sectors = 0;
+
+  const std::vector<Action> legal = state->LegalActions();
+  std::vector<std::string> names;
+  names.reserve(legal.size());
+  for (Action action : legal) {
+    names.push_back(state->ActionToString(state->CurrentPlayer(), action));
+  }
+
+  SPIEL_CHECK_EQ(std::find(names.begin(), names.end(), "RESEARCH"), names.end());
+  SPIEL_CHECK_EQ(std::find(names.begin(), names.end(), "BUILD"), names.end());
+  SPIEL_CHECK_EQ(std::find(names.begin(), names.end(), "INFLUENCE"), names.end());
+  SPIEL_CHECK_EQ(std::find(names.begin(), names.end(), "MOVE"), names.end());
+}
+
 }  // namespace
 }  // namespace eclipse
 }  // namespace open_spiel
@@ -1003,4 +1038,5 @@ int main(int argc, char** argv) {
   open_spiel::eclipse::BuildFullActionTest();
   open_spiel::eclipse::UpgradeFullActionTest();
   open_spiel::eclipse::MoveFullActionTest();
+  open_spiel::eclipse::StrictMainActionFilteringTest();
 }

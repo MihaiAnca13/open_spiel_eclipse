@@ -180,6 +180,7 @@ struct State {
 
 inline void to_json(nlohmann::json& j, const State& s) {
     nlohmann::json tray_j = nlohmann::json::object();
+    nlohmann::json build_costs_by_player = nlohmann::json::object();
     for (size_t i = 0; i < 40; ++i) {
         if (s.tech_tray[i] > 0) {
             const auto& tech = TECH_TABLE[i];
@@ -192,6 +193,16 @@ inline void to_json(nlohmann::json& j, const State& s) {
             entry["copies"] = tech.copies;
             tray_j[tech.name] = entry;
         }
+    }
+    for (const Player& player : s.players) {
+        build_costs_by_player[std::to_string(player.id)] = {
+            {"Interceptor", open_spiel::eclipse::calculate_build_cost(player, open_spiel::eclipse::BuildType::INTERCEPTOR)},
+            {"Cruiser", open_spiel::eclipse::calculate_build_cost(player, open_spiel::eclipse::BuildType::CRUISER)},
+            {"Dreadnought", open_spiel::eclipse::calculate_build_cost(player, open_spiel::eclipse::BuildType::DREADNOUGHT)},
+            {"Starbase", open_spiel::eclipse::calculate_build_cost(player, open_spiel::eclipse::BuildType::STARBASE)},
+            {"Orbital", open_spiel::eclipse::calculate_build_cost(player, open_spiel::eclipse::BuildType::ORBITAL)},
+            {"Monolith", open_spiel::eclipse::calculate_build_cost(player, open_spiel::eclipse::BuildType::MONOLITH)},
+        };
     }
 
     j = nlohmann::json{
@@ -215,6 +226,7 @@ inline void to_json(nlohmann::json& j, const State& s) {
         {"explore_state", s.explore_state},
         {"research_state", s.research_state},
         {"build_state", s.build_state},
+        {"build_costs_by_player", build_costs_by_player},
         {"influence_state", s.influence_state},
         {"upgrade_state", s.upgrade_state},
         {"move_state", s.move_state}

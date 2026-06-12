@@ -3,9 +3,12 @@
 // `gameState.explore_state`, so the UI never needs to reimplement game rules.
 
 import { ACTION } from './actionTypes';
-import type { InfluenceState } from './types/game';
+import type { InfluenceState, BuildState, MoveState, Unit, BuildCosts } from './types/game';
+import BuildPanel from './components/ui/BuildPanel';
+import MovePanel from './components/ui/MovePanel';
 
 const RING_NAME: Record<number, string> = { 0: 'Inner (I)', 1: 'Middle (II)', 2: 'Outer (III)' };
+type MainActionPreview = 'research' | 'build' | 'influence' | 'upgrade' | 'move' | 'explore';
 
 export interface ExploreState {
   phase: string;
@@ -30,6 +33,9 @@ interface Props {
   explore: ExploreState | undefined;
   research: ResearchState | undefined;
   influence: InfluenceState | undefined;
+  build: BuildState | undefined;
+  move: MoveState | undefined;
+  unitRegistry?: Unit[];
   selectedRareTech: { name: string; order: number } | null;
   onClearSelectedRareTech: () => void;
   legalActions: number[];
@@ -44,12 +50,28 @@ interface Props {
   onClearPreviewDrawnTile: () => void;
   onConfirmPreviewRotation: () => void;
   onAction: (actionId: number) => void;
+  onStartPreviewAction: (actionId: number) => void;
+  previewAction: MainActionPreview | null;
+  onCancelPreviewAction: () => void;
+  onConfirmPreviewAction: (actionId: number) => void;
+  previewResearchActions: number[];
+  selectedBuildType: number | null;
+  onSelectBuildType: (type: number | null) => void;
+  builtShipsCount: number;
+  buildCosts?: BuildCosts | null;
+  hasPassed: boolean;
+  selectedMoveUnitIdx: number | null;
+  onSelectMoveUnit: (idx: number | null) => void;
+  selectedMoveSectorId?: number | null;
 }
 
 export default function ActionPanel({
   explore,
   research,
   influence,
+  build,
+  move,
+  unitRegistry,
   selectedRareTech,
   onClearSelectedRareTech,
   legalActions,
@@ -64,21 +86,59 @@ export default function ActionPanel({
   onClearPreviewDrawnTile,
   onConfirmPreviewRotation,
   onAction,
+  onStartPreviewAction,
+  previewAction,
+  onCancelPreviewAction,
+  onConfirmPreviewAction,
+  previewResearchActions,
+  selectedBuildType,
+  onSelectBuildType,
+  builtShipsCount,
+  buildCosts,
+  hasPassed,
+  selectedMoveUnitIdx,
+  onSelectMoveUnit,
+  selectedMoveSectorId,
 }: Props) {
   const legal = new Set(legalActions);
   const influencePhase = influence?.phase ?? 'inactive';
+  const buildPhase = build?.phase ?? 'inactive';
+  const movePhase = move?.phase ?? 'inactive';
   const phase = influencePhase !== 'inactive'
     ? influencePhase
-    : research?.phase === 'choose_tech'
-      ? 'choose_tech'
-      : (explore?.phase ?? 'inactive');
+    : buildPhase !== 'inactive'
+      ? 'choose_build'
+      : movePhase !== 'inactive'
+        ? movePhase
+        : research?.phase === 'choose_tech'
+          ? 'choose_tech'
+          : (explore?.phase ?? 'inactive');
 
-  const renderActionButton = (id: number, label: string, kind: 'primary' | 'secondary' | 'danger' = 'primary') =>
+  const renderActionButton = (id: number, label: string, kind: 'primary' | 'secondary' | 'danger' = 'primary', forceDisabled = false) =>
     legal.has(id) ? (
-      <button className={`action-btn ${kind}`} disabled={busy} onClick={() => onAction(id)}>
+      <button className={`action-btn ${kind}`} disabled={busy || forceDisabled} onClick={() => onAction(id)}>
         {label}
       </button>
     ) : null;
+
+  const renderPreviewButton = (id: number, label: string, kind: 'primary' | 'secondary' | 'danger' = 'primary', forceDisabled = false) =>
+    legal.has(id) ? (
+      <button className={`action-btn ${kind}`} disabled={busy || forceDisabled} onClick={() => onStartPreviewAction(id)}>
+        {label}
+      </button>
+    ) : null;
+
+  const renderResearchChoiceButton = (id: number, label: string) => {
+    if (previewAction === 'research') {
+      if (!previewResearchActions.includes(id)) return null;
+      return (
+        <button className="action-btn primary" disabled={busy} onClick={() => onConfirmPreviewAction(id)}>
+          {label}
+        </button>
+      );
+    }
+    return renderActionButton(id, label);
+  };
 
   if (isTerminal) {
     return (
@@ -112,20 +172,60 @@ export default function ActionPanel({
 
       {phase === 'inactive' && (
         <>
-          <span className="text-xs text-[#94a3b8]">
-            Take one action. Play continues around the table — you act again each turn until you <strong>Pass</strong> for the round.
-          </span>
-          <div className="action-row">
-            {renderActionButton(ACTION.EXPLORE, '🔭 Explore')}
-            {renderActionButton(ACTION.RESEARCH, '🔬 Research')}
-          </div>
-          <div className="action-row">
-            {renderActionButton(ACTION.INFLUENCE, '🔵 Influence')}
-            {renderActionButton(ACTION.PASS, '✋ Pass', 'secondary')}
-          </div>
-          <div className="action-row">
-            <button className="action-btn secondary" disabled title="Coming soon">Build (soon)</button>
-          </div>
+          {previewAction ? (
+            <>
+              <span className="text-xs text-[#94a3b8]">
+                {previewAction === 'research' && 'Preview research choices. Pick a tech below to commit the action, or cancel.'}
+                {previewAction === 'build' && 'Build preview. Review your current costs, then commit to enter build mode.'}
+                {previewAction === 'influence' && 'Influence preview. Commit when you are ready to place or reclaim discs.'}
+                {previewAction === 'upgrade' && 'Upgrade preview. Commit when you are ready to modify your blueprints.'}
+                {previewAction === 'move' && 'Move preview. Commit when you are ready to choose ships and destinations.'}
+                {previewAction === 'explore' && `Explore preview. Ring sizes: ${RING_NAME[0]} ${legal.has(ACTION.EXPLORE) ? '' : ''}. Commit when you are ready to pick a zone.`}
+              </span>
+              {previewAction === 'build' && buildCosts && (
+                <div className="text-xs text-[#cbd5e1]">
+                  Costs: I {buildCosts.Interceptor}, C {buildCosts.Cruiser}, D {buildCosts.Dreadnought}, S {buildCosts.Starbase}, O {buildCosts.Orbital}, M {buildCosts.Monolith}
+                </div>
+              )}
+              <div className="action-row">
+                {previewAction !== 'research' && (
+                  <button className="action-btn primary" disabled={busy} onClick={() => onConfirmPreviewAction(
+                    previewAction === 'build' ? ACTION.BUILD :
+                    previewAction === 'influence' ? ACTION.INFLUENCE :
+                    previewAction === 'upgrade' ? ACTION.UPGRADE :
+                    previewAction === 'move' ? ACTION.MOVE :
+                    ACTION.EXPLORE
+                  )}>
+                    Commit action
+                  </button>
+                )}
+                <button className="action-btn secondary" disabled={busy} onClick={onCancelPreviewAction}>
+                  Cancel
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <span className="text-xs text-[#94a3b8]">
+                Take one action. Play continues around the table — you act again each turn until you <strong>Pass</strong> for the round.
+              </span>
+              <div className="action-row">
+                {renderPreviewButton(ACTION.EXPLORE, '🔭 Explore', hasPassed ? 'secondary' : 'primary', hasPassed)}
+                {renderPreviewButton(ACTION.RESEARCH, '🔬 Research', hasPassed ? 'secondary' : 'primary', hasPassed)}
+              </div>
+              <div className="action-row">
+                {renderPreviewButton(ACTION.INFLUENCE, '🔵 Influence', hasPassed ? 'secondary' : 'primary', hasPassed)}
+                {renderActionButton(ACTION.PASS, '✋ Pass', hasPassed ? 'secondary' : 'primary', hasPassed)}
+              </div>
+              <div className="action-row">
+                {renderPreviewButton(ACTION.BUILD, '⚙️ Build', hasPassed ? 'secondary' : 'primary', hasPassed)}
+                {renderPreviewButton(ACTION.MOVE, '↗️ Move', hasPassed ? 'secondary' : 'primary', hasPassed)}
+              </div>
+              <div className="action-row">
+                {renderPreviewButton(ACTION.UPGRADE, '🛠️ Upgrade', hasPassed ? 'secondary' : 'primary', hasPassed)}
+              </div>
+            </>
+          )}
         </>
       )}
 
@@ -155,6 +255,32 @@ export default function ActionPanel({
             {renderActionButton(ACTION.CHOOSE_RETURN_TRACK_START + 2, '⚙️ Materials')}
           </div>
         </>
+      )}
+
+      {phase === 'choose_build' && (
+        <BuildPanel
+          legalActions={legalActions}
+          busy={busy}
+          onAction={onAction}
+          activationsRemaining={build?.activations_remaining ?? 0}
+          selectedBuildType={selectedBuildType}
+          onSelectBuildType={onSelectBuildType}
+          builtShipsCount={builtShipsCount}
+          buildCosts={buildCosts}
+        />
+      )}
+
+      {(phase === 'choose_move' || phase === 'choose_warp_destination') && move && (
+        <MovePanel
+          legalActions={legalActions}
+          unitRegistry={unitRegistry ?? []}
+          busy={busy}
+          onAction={onAction}
+          moveState={move}
+          selectedMoveUnitIdx={selectedMoveUnitIdx}
+          onSelectMoveUnit={onSelectMoveUnit}
+          selectedMoveSectorId={selectedMoveSectorId}
+        />
       )}
 
       {phase === 'choose_zone' && (
@@ -314,7 +440,7 @@ export default function ActionPanel({
         </>
       )}
 
-      {phase === 'choose_tech' && (
+      {(phase === 'choose_tech' || previewAction === 'research') && (
         <>
           {selectedRareTech ? (
             <>
@@ -326,18 +452,9 @@ export default function ActionPanel({
                   const rareIdx = selectedRareTech.order - 24;
                   return (
                     <>
-                      {renderActionButton(
-                        ACTION.RESEARCH_RARE_START + rareIdx * 3 + 0,
-                        '⚔️ Military Track'
-                      )}
-                      {renderActionButton(
-                        ACTION.RESEARCH_RARE_START + rareIdx * 3 + 1,
-                        '🔬 Grid Track'
-                      )}
-                      {renderActionButton(
-                        ACTION.RESEARCH_RARE_START + rareIdx * 3 + 2,
-                        '⚙️ Nano Track'
-                      )}
+                      {renderResearchChoiceButton(ACTION.RESEARCH_RARE_START + rareIdx * 3 + 0, '⚔️ Military Track')}
+                      {renderResearchChoiceButton(ACTION.RESEARCH_RARE_START + rareIdx * 3 + 1, '🔬 Grid Track')}
+                      {renderResearchChoiceButton(ACTION.RESEARCH_RARE_START + rareIdx * 3 + 2, '⚙️ Nano Track')}
                     </>
                   );
                 })()}
@@ -353,11 +470,15 @@ export default function ActionPanel({
           ) : (
             <>
               <span className="text-xs text-[#94a3b8]">
-                Select a technology card in the market below to research.
+                {previewAction === 'research'
+                  ? 'Select a technology card in the market below to commit Research.'
+                  : 'Select a technology card in the market below to research.'}
                 {research ? ` Activations left: ${research.activations_remaining}.` : ''}
               </span>
               <div className="action-row mt-2">
-                {renderActionButton(ACTION.RESEARCH_STOP, 'Stop researching', 'secondary')}
+                {phase === 'choose_tech'
+                  ? renderActionButton(ACTION.RESEARCH_STOP, 'Stop researching', 'secondary')
+                  : <button className="action-btn secondary" disabled={busy} onClick={onCancelPreviewAction}>Cancel</button>}
               </div>
             </>
           )}

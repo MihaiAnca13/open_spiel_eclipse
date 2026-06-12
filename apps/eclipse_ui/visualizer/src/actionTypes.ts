@@ -30,6 +30,26 @@ export const ACTION = {
   INFLUENCE_TO_CELL_START: 5734,   // + galaxy cell index (0..224)
   RECLAIM_FROM_CELL_START: 5959,   // + galaxy cell index (0..224)
   CHOOSE_RETURN_TRACK_START: 6184, // + 0=Money, 1=Science, 2=Materials
+
+  // Build action IDs — mirror open_spiel/games/eclipse/eclipse.cc:54,81-83.
+  BUILD: 75,
+  BUILD_STOP: 6187,
+  BUILD_CHOICE_START: 6188,           // + type * GALAXY_CELL_COUNT + cell_idx
+  BUILD_END: 7538,                    // BUILD_CHOICE_START + 6 * 225
+  GALAXY_CELL_COUNT: 225,
+
+  // Upgrade action IDs — mirror open_spiel/games/eclipse/eclipse.cc:86-91.
+  UPGRADE: 7539,
+  UPGRADE_STOP: 7540,
+  UPGRADE_CHOICE_START: 7541,
+
+  // Move action IDs — mirror open_spiel/games/eclipse/eclipse.cc:96-102.
+  MOVE: 8502,
+  MOVE_STOP: 8503,
+  MOVE_CHOICE_START: 8504,               // + unit_idx * 7 + direction (0-5=hex, 6=warp)
+  MOVE_WARP_START: 9400,                 // MOVE_CHOICE_START + 128 * 7
+  MOVE_WARP_DESTINATION_START: 9528,     // MOVE_WARP_START + 128
+  MOVE_CODES_PER_UNIT: 7,
 } as const;
 
 // Population track names, indexed by track id (mirrors PopTrack in bonus.h).

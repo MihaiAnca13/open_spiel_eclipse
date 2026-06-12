@@ -4,8 +4,8 @@ import { ImageHoverPreview, useImageHoverPreview } from './ImageHoverPreview';
 import { SPECIES_THEME, getPlayerColor } from './theme';
 import ActionPanel from './ActionPanel';
 import { ACTION } from './actionTypes';
-import { API_BASE, buildTechMarketRows, TECH_CATEGORIES, techImageUrl, type TechMarketEntry } from './types/lobby';
-import type { SetupSnapshot, Player } from './types/game';
+import { API_BASE, buildTechMarketRows, TECH_CATEGORIES, techImageUrl } from './types/lobby';
+import type { SetupSnapshot, Player, BuildCosts } from './types/game';
 
 // Custom Hooks
 import { useGameSocket } from './hooks/useGameSocket';
@@ -18,7 +18,6 @@ import { bagCount, EMPTY_LEGAL_ACTIONS, INFLUENCE_TOTAL, POPULATION_PRODUCTION_T
 // Components
 import SetupPanel from './components/setup/SetupPanel';
 import GalaxyMap from './components/game/GalaxyMap';
-import TechMarket from './components/game/TechMarket';
 import DebugPanel from './components/overlays/DebugPanel';
 import JsonInspector from './components/overlays/JsonInspector';
 import PopulationTracks from './components/ui/PopulationTracks';
@@ -26,6 +25,8 @@ import InfluenceTrack from './components/ui/InfluenceTrack';
 import ColonyShips from './components/ui/ColonyShips';
 import TradePanel from './components/ui/TradePanel';
 import ResearchTracks from './ResearchTracks';
+
+type MainActionPreview = 'research' | 'build' | 'influence' | 'upgrade' | 'move' | 'explore';
 
 export interface AppProps {
   initialMetadata: any;
@@ -60,6 +61,14 @@ function App({
   const [setupFinalized, setSetupFinalized] = useState<boolean>(initialSnapshot?.finalized ?? false);
   const [playerStartingSectors, setPlayerStartingSectors] = useState<Record<number, number>>({});
   const [selectedRareTech, setSelectedRareTech] = useState<{ name: string; order: number } | null>(null);
+  const [selectedBuildType, setSelectedBuildType] = useState<number | null>(null);
+  const [builtShipsCount, setBuiltShipsCount] = useState<number>(0);
+  const [selectedMoveUnitIdx, setSelectedMoveUnitIdx] = useState<number | null>(null);
+  const [selectedMoveSectorId, setSelectedMoveSectorId] = useState<number | null>(null);
+  const [previewAction, setPreviewAction] = useState<MainActionPreview | null>(null);
+  const handleSelectBuildType = useCallback((type: number | null) => {
+    setSelectedBuildType(type);
+  }, []);
 
   const speciesList: string[] = gameMetadata.species ?? Object.keys(SPECIES_THEME);
   const [speciesChoices, setSpeciesChoices] = useState<Record<number, string>>(() => {
@@ -206,8 +215,9 @@ function App({
   const sectorImages = useSectorAssets();
   const sectorLayouts = useSectorLayouts();
 
-  const submitAction = async (actionId: number) => {
-    if (actionInProgress) return;
+  const submitAction = async (actionId: number): Promise<SetupSnapshot | null> => {
+    if (actionInProgress) return null;
+    const isBuildAction = actionId >= ACTION.BUILD_CHOICE_START && actionId < ACTION.BUILD_END;
     setActionInProgress(true);
     setError(null);
     try {
@@ -221,12 +231,26 @@ function App({
         throw new Error(detail?.detail || `Action failed (${response.status})`);
       }
       const updated = await response.json();
-      if (updated) setSnapshot(updated as SetupSnapshot);
+      if (updated) {
+        setSnapshot(updated as SetupSnapshot);
+        if (isBuildAction) setBuiltShipsCount(prev => prev + 1);
+        return updated as SetupSnapshot;
+      }
     } catch (err: any) {
       setError(err.message || 'Action failed');
     } finally {
       setActionInProgress(false);
     }
+    return null;
+  };
+
+  const submitActionSequence = async (actionIds: number[]) => {
+    let updated: SetupSnapshot | null = null;
+    for (const actionId of actionIds) {
+      updated = await submitAction(actionId);
+      if (!updated) break;
+    }
+    return updated;
   };
 
   const getPlayerId = () => sessionStorage.getItem('eclipse_player_id') ?? '';
@@ -290,6 +314,8 @@ function App({
   const explorePhase = exploreState?.phase ?? 'inactive';
   const researchState = gameState?.research_state;
   const influenceState = gameState?.influence_state;
+  const buildState = gameState?.build_state;
+  const moveState = gameState?.move_state;
   const influencePhase = influenceState?.phase ?? 'inactive';
   const isTerminal = snapshot?.is_terminal ?? false;
   const isStarted = setupFinalized && snapshot?.current_player !== undefined;
@@ -298,6 +324,56 @@ function App({
   const isInfluencePhase = isMyTurn && influencePhase !== 'inactive';
   const currentPlayerLabel =
     snapshot?.current_player !== undefined ? playerLabel(snapshot.current_player) : '';
+  const currentPlayerHasPassed =
+    gameState?.players[snapshot?.current_player ?? -1]?.has_passed ?? false;
+  const currentBuildCosts: BuildCosts | null =
+    gameState?.build_costs_by_player?.[String(mySeatIdx)] ??
+    (snapshot?.current_player !== undefined ? gameState?.build_costs_by_player?.[String(snapshot.current_player)] ?? null : null);
+  const previewResearchActions = useMemo(() => {
+    if (!gameState || mySeatIdx < 0 || !gameMetadata.tech_catalog) return [];
+    const player = gameState.players[mySeatIdx];
+    if (!player) return [];
+
+    const trackTileCount = (category: 'Military' | 'Grid' | 'Nano') =>
+      Object.entries(gameMetadata.tech_catalog).reduce((count: number, [, tech]: [string, any]) => {
+        const bit = BigInt(tech.order);
+        const categoryMask =
+          category === 'Military'
+            ? BigInt(player.researched_techs_military)
+            : category === 'Grid'
+              ? BigInt(player.researched_techs_grid)
+              : BigInt(player.researched_techs_nano);
+        return tech.category === category && (categoryMask & bit) !== 0n ? count + 1 : count;
+      }, 0);
+
+    const trackCounts = {
+      Military: trackTileCount('Military'),
+      Grid: trackTileCount('Grid'),
+      Nano: trackTileCount('Nano'),
+    };
+
+    const actions: number[] = [];
+    for (const [, tech] of Object.entries(gameState.tech_tray)) {
+      if (tech.count <= 0) continue;
+      if (tech.category !== 'Rare') {
+        if (trackCounts[tech.category as keyof typeof trackCounts] >= 8) continue;
+        const cost = Math.max(tech.min_cost ?? 0, (tech.base_cost ?? 0) - trackCounts[tech.category as keyof typeof trackCounts]);
+        if (player.resources.science >= cost) {
+          actions.push(ACTION.RESEARCH_STANDARD_START + (tech.order ?? 0));
+        }
+      } else {
+        const rareIdx = (tech.order ?? 0) - 24;
+        (['Military', 'Grid', 'Nano'] as const).forEach((trackName, trackIdx) => {
+          if (trackCounts[trackName] >= 8) return;
+          const cost = Math.max(tech.min_cost ?? 0, (tech.base_cost ?? 0) - trackCounts[trackName]);
+          if (player.resources.science >= cost) {
+            actions.push(ACTION.RESEARCH_RARE_START + rareIdx * 3 + trackIdx);
+          }
+        });
+      }
+    }
+    return actions;
+  }, [gameState, mySeatIdx, gameMetadata.tech_catalog]);
   const selectedSectorId = exploreState?.selected_sector_id ?? 0;
   const legalRotations = useMemo(
     () =>
@@ -359,6 +435,82 @@ function App({
 
   const inSelectDrawnTile = isMyTurn && explorePhase === 'select_drawn_tile';
 
+  // Build target actions (cell -> actionId map) filtered by selected build type
+  const buildTargetActions = (buildState?.phase === 'choose_build' && selectedBuildType !== null)
+    ? legalActions
+        .filter(a => a >= ACTION.BUILD_CHOICE_START && a < ACTION.BUILD_END)
+        .filter(a => {
+          const encoded = a - ACTION.BUILD_CHOICE_START;
+          const typeIdx = Math.floor(encoded / ACTION.GALAXY_CELL_COUNT);
+          return typeIdx === selectedBuildType;
+        })
+    : [];
+
+  // Move: sectors with movable units decoded from legal actions
+  const moveUnitSectors = useMemo(() => {
+    const sectorSet = new Set<number>();
+    if (!gameState) return sectorSet;
+    for (const a of legalActions) {
+      if (a >= ACTION.MOVE_CHOICE_START && a < ACTION.MOVE_WARP_START) {
+        const encoded = a - ACTION.MOVE_CHOICE_START;
+        const unitIdx = Math.floor(encoded / ACTION.MOVE_CODES_PER_UNIT);
+        const unit = gameState.unit_registry[unitIdx];
+        if (unit) sectorSet.add(unit.sector_id);
+      }
+    }
+    return sectorSet;
+  }, [legalActions, gameState]);
+
+  const moveUnitIndicesBySector = useMemo(() => {
+    const sectorMap = new Map<number, number[]>();
+    if (!gameState) return sectorMap;
+    for (const a of legalActions) {
+      if (a >= ACTION.MOVE_CHOICE_START && a < ACTION.MOVE_WARP_START) {
+        const encoded = a - ACTION.MOVE_CHOICE_START;
+        const unitIdx = Math.floor(encoded / ACTION.MOVE_CODES_PER_UNIT);
+        const unit = gameState.unit_registry[unitIdx];
+        if (!unit) continue;
+        const unitIndices = sectorMap.get(unit.sector_id) ?? [];
+        if (!unitIndices.includes(unitIdx)) {
+          unitIndices.push(unitIdx);
+          sectorMap.set(unit.sector_id, unitIndices);
+        }
+      }
+    }
+    return sectorMap;
+  }, [legalActions, gameState]);
+
+  // Move target cells for the selected unit
+  const moveTargetCells = useMemo(() => {
+    const map = new Map<number, number>();
+    if (selectedMoveUnitIdx === null) return map;
+    for (const a of legalActions) {
+      if (a >= ACTION.MOVE_CHOICE_START && a < ACTION.MOVE_WARP_START) {
+        const encoded = a - ACTION.MOVE_CHOICE_START;
+        const unitIdx = Math.floor(encoded / ACTION.MOVE_CODES_PER_UNIT);
+        if (unitIdx === selectedMoveUnitIdx) {
+          const direction = encoded % ACTION.MOVE_CODES_PER_UNIT;
+          map.set(direction, a);
+        }
+      }
+    }
+    return map;
+  }, [selectedMoveUnitIdx, legalActions]);
+
+  // Clear move unit selection when move phase ends
+  useEffect(() => {
+    if (moveState?.phase !== 'choose_move') {
+      setSelectedMoveUnitIdx(null);
+      setSelectedMoveSectorId(null);
+    }
+  }, [moveState?.phase]);
+
+  useEffect(() => {
+    if (selectedMoveUnitIdx !== null) {
+      setSelectedMoveSectorId(null);
+    }
+  }, [selectedMoveUnitIdx]);
+
   // Clear drawn tile preview state when it's no longer the select_drawn_tile phase.
   useEffect(() => {
     if (!inSelectDrawnTile) {
@@ -373,6 +525,61 @@ function App({
       setSelectedRareTech(null);
     }
   }, [isResearchPhase]);
+
+  useEffect(() => {
+    if (
+      explorePhase !== 'inactive' ||
+      researchState?.phase === 'choose_tech' ||
+      influencePhase !== 'inactive' ||
+      buildState?.phase === 'choose_build' ||
+      moveState?.phase === 'choose_move' ||
+      moveState?.phase === 'choose_warp_destination'
+    ) {
+      setPreviewAction(null);
+    }
+  }, [explorePhase, researchState?.phase, influencePhase, buildState?.phase, moveState?.phase]);
+
+  // Reset build selection when build phase ends
+  useEffect(() => {
+    if (buildState?.phase !== 'choose_build') {
+      setSelectedBuildType(null);
+    }
+  }, [buildState?.phase]);
+
+  useEffect(() => {
+    if (buildState?.phase === 'choose_build') {
+      setBuiltShipsCount(0);
+    }
+  }, [buildState?.phase === 'choose_build']);
+
+  const handleStartPreviewAction = useCallback((actionId: number) => {
+    if (actionId === ACTION.RESEARCH) setPreviewAction('research');
+    else if (actionId === ACTION.BUILD) setPreviewAction('build');
+    else if (actionId === ACTION.INFLUENCE) setPreviewAction('influence');
+    else if (actionId === ACTION.UPGRADE) setPreviewAction('upgrade');
+    else if (actionId === ACTION.MOVE) setPreviewAction('move');
+    else if (actionId === ACTION.EXPLORE) setPreviewAction('explore');
+  }, []);
+
+  const handleCancelPreviewAction = useCallback(() => {
+    setPreviewAction(null);
+    setSelectedRareTech(null);
+  }, []);
+
+  const handleConfirmPreviewAction = useCallback(async (actionId: number) => {
+    if (previewAction === 'research') {
+      const updated = await submitActionSequence([ACTION.RESEARCH, actionId]);
+      if (updated) {
+        setPreviewAction(null);
+        setSelectedRareTech(null);
+      }
+      return;
+    }
+    const updated = await submitAction(actionId);
+    if (updated) {
+      setPreviewAction(null);
+    }
+  }, [previewAction, submitActionSequence, submitAction]);
 
   // Player info modal state
   const [selectedPlayerId, setSelectedPlayerId] = useState<number | null>(null);
@@ -391,7 +598,7 @@ function App({
     return (
       <div key={playerId} className={`economy-card ${isActive ? 'active' : ''}`}>
         <div className="economy-name">
-          <span style={{ color: getPlayerColor(playerId) }}>{playerLabel(playerId)}</span>
+          <span style={{ color: getPlayerColor(playerId) }}>{playerLabel(playerId)} {player.species_id ? `(${player.species_id})` : ''}</span>
           <span className="economy-score">⭐ {player.score}</span>
         </div>
         <div className="economy-resources">
@@ -406,6 +613,12 @@ function App({
           </span>
         </div>
         <PopulationTracks resources={player.resources} playerColor={getPlayerColor(playerId)} />
+        <ResearchTracks
+          militaryMask={player.researched_techs_military}
+          gridMask={player.researched_techs_grid}
+          nanoMask={player.researched_techs_nano}
+          techCatalog={gameMetadata.tech_catalog ?? {}}
+        />
         {playerId === mySeatIdx ? (
           <>
             <InfluenceTrack onSectors={onSectors} onActions={onActions} />
@@ -420,12 +633,6 @@ function App({
               legalTradeActions={legalTradeActions}
               onTrade={submitAction}
               resources={player.resources}
-            />
-            <ResearchTracks
-              militaryMask={player.researched_techs_military}
-              gridMask={player.researched_techs_grid}
-              nanoMask={player.researched_techs_nano}
-              techCatalog={gameMetadata.tech_catalog ?? {}}
             />
           </>
         ) : (
@@ -495,7 +702,7 @@ function App({
                   title={`Click for ${playerLabel(playerId)} details`}
                 >
                   <span className="turn-num">{idx + 1}</span>
-                  <span style={{ color: getPlayerColor(playerId) }}>{playerLabel(playerId)}</span>
+                  <span style={{ color: getPlayerColor(playerId) }}>{playerLabel(playerId)} {player?.species_id ? `(${player.species_id})` : ''}</span>
                   {player?.is_ai && <span className="text-[9px] bg-[#334155] text-[#93c5fd] px-1 py-0.5 rounded">AI</span>}
                   {passed && <span className="text-[9px] text-[#94a3b8]">✓</span>}
                 </div>
@@ -542,6 +749,14 @@ function App({
               clearPreview={clearPreview}
               influenceToCellActions={influenceToCellActions}
               reclaimFromCellActions={reclaimFromCellActions}
+              buildTargetActions={buildTargetActions}
+              selectedBuildType={selectedBuildType}
+              moveUnitSectors={moveUnitSectors}
+              moveUnitIndicesBySector={moveUnitIndicesBySector}
+              moveTargetCells={moveTargetCells}
+              selectedMoveUnitIdx={selectedMoveUnitIdx}
+              onSelectMoveUnit={setSelectedMoveUnitIdx}
+              onSelectMoveSector={setSelectedMoveSectorId}
             />
 
             {/* Floating action panel — only show when it's my turn */}
@@ -551,6 +766,9 @@ function App({
                   explore={exploreState}
                   research={researchState}
                   influence={influenceState}
+                  build={buildState}
+                  move={moveState}
+                  unitRegistry={gameState?.unit_registry}
                   selectedRareTech={selectedRareTech}
                   onClearSelectedRareTech={() => setSelectedRareTech(null)}
                   legalActions={legalActions}
@@ -571,6 +789,19 @@ function App({
                   }}
                   onConfirmPreviewRotation={confirmPreviewRotation}
                   onAction={submitAction}
+                  onStartPreviewAction={handleStartPreviewAction}
+                  previewAction={previewAction}
+                  onCancelPreviewAction={handleCancelPreviewAction}
+                  onConfirmPreviewAction={handleConfirmPreviewAction}
+                  previewResearchActions={previewResearchActions}
+                  selectedBuildType={selectedBuildType}
+                  onSelectBuildType={handleSelectBuildType}
+                  builtShipsCount={builtShipsCount}
+                  buildCosts={currentBuildCosts}
+                  hasPassed={currentPlayerHasPassed}
+                  selectedMoveUnitIdx={selectedMoveUnitIdx}
+                  onSelectMoveUnit={setSelectedMoveUnitIdx}
+                  selectedMoveSectorId={selectedMoveSectorId}
                 />
               </div>
             )}
@@ -641,18 +872,23 @@ function App({
                       let isResearchable = false;
                       let onTechClick: (() => void) | undefined = undefined;
 
-                      if (isResearchPhase) {
+                      const isResearchPreview = previewAction === 'research';
+                      if (isResearchPhase || isResearchPreview) {
                         if (tech.category !== 'Rare') {
                           const actionId = ACTION.RESEARCH_STANDARD_START + (tech.order ?? 0);
-                          if (legalActions.includes(actionId)) {
+                          if (isResearchPhase ? legalActions.includes(actionId) : previewResearchActions.includes(actionId)) {
                             isResearchable = true;
-                            onTechClick = () => submitAction(actionId);
+                            onTechClick = () => handleConfirmPreviewAction(actionId);
                           }
                         } else {
                           const rareIdx = (tech.order ?? 0) - 24;
-                          const isAnyTrackLegal = [0, 1, 2].some((track) =>
-                            legalActions.includes(ACTION.RESEARCH_RARE_START + rareIdx * 3 + track)
-                          );
+                          const isAnyTrackLegal = isResearchPhase
+                            ? [0, 1, 2].some((track) =>
+                                legalActions.includes(ACTION.RESEARCH_RARE_START + rareIdx * 3 + track)
+                              )
+                            : [0, 1, 2].some((track) =>
+                                previewResearchActions.includes(ACTION.RESEARCH_RARE_START + rareIdx * 3 + track)
+                              );
                           if (isAnyTrackLegal) {
                             isResearchable = true;
                             onTechClick = () => setSelectedRareTech({ name: techName, order: tech.order ?? 0 });

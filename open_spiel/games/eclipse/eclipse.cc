@@ -160,6 +160,83 @@ EclipseState::PendingRandomEvent PendingRandomEventFromInt(int value) {
   return static_cast<EclipseState::PendingRandomEvent>(value);
 }
 
+bool HasLegalResearchChoice(const ::State& state, uint8_t player_id) {
+  if (player_id >= state.players.size()) return false;
+  const ::Player& player = state.players[player_id];
+
+  for (size_t i = 0; i < TECH_TABLE_SIZE; ++i) {
+    const TechDefinition& def = TECH_TABLE[i];
+    if (def.category == TechCategory::RARE) continue;
+    if (player.has_tech(def.bit)) continue;
+    if (state.get_tech_tray_count(def.bit) == 0) continue;
+    if (get_track_tile_count(player, def.category) >= 8) continue;
+    if (player.resources.science < calculate_research_cost(player, def, def.category)) continue;
+    return true;
+  }
+
+  for (size_t rare_idx = 0; rare_idx < TECH_RARE_COUNT; ++rare_idx) {
+    const TechDefinition& def = TECH_TABLE[TECH_TABLE_SIZE + rare_idx];
+    if (def.category != TechCategory::RARE) continue;
+    if (player.has_tech(def.bit)) continue;
+    if (state.get_tech_tray_count(def.bit) == 0) continue;
+
+    for (int track = 0; track < 3; ++track) {
+      const TechCategory target_track = static_cast<TechCategory>(track);
+      if (get_track_tile_count(player, target_track) >= 8) continue;
+      if (player.resources.science < calculate_research_cost(player, def, target_track)) continue;
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool HasLegalBuildChoice(const ::State& state, uint8_t player_id) {
+  if (player_id >= state.players.size()) return false;
+  for (int t = 0; t < BUILD_TYPE_COUNT; ++t) {
+    for (int cell = 0; cell < GALAXY_CELL_COUNT; ++cell) {
+      if (can_build(state, player_id, static_cast<BuildType>(t), static_cast<uint8_t>(cell))) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+bool HasLegalInfluenceChoice(const ::State& state, uint8_t player_id) {
+  if (player_id >= state.players.size()) return false;
+  for (int cell = 0; cell < GALAXY_CELL_COUNT; ++cell) {
+    if (can_influence_to_sector(state, player_id, static_cast<uint8_t>(cell)) ||
+        can_reclaim_from_sector(state, player_id, static_cast<uint8_t>(cell))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool HasLegalUpgradeChoice(const ::State& state, uint8_t player_id) {
+  if (player_id >= state.players.size()) return false;
+  constexpr size_t total_parts = sizeof(SHIP_PART_TABLE) / sizeof(SHIP_PART_TABLE[0]);
+  const ::Player& player = state.players[player_id];
+
+  for (int ship = 0; ship < UPGRADE_SHIP_COUNT; ++ship) {
+    const Blueprint& bp = player.blueprints[ship];
+    for (int slot = 0; slot < UPGRADE_SLOTS_PER_SHIP; ++slot) {
+      if (slot >= bp.capacity) continue;
+      const ShipType ship_type = static_cast<ShipType>(ship);
+      if (can_upgrade(state, player_id, ship_type, static_cast<uint8_t>(slot), ShipPartId::NONE)) {
+        return true;
+      }
+      for (size_t part_idx = 1; part_idx < total_parts && part_idx < static_cast<size_t>(UPGRADE_PART_COUNT); ++part_idx) {
+        if (can_upgrade(state, player_id, ship_type, static_cast<uint8_t>(slot), static_cast<ShipPartId>(part_idx))) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
 }  // namespace
 
 EclipseGame::EclipseGame(const GameParameters& params)
@@ -303,22 +380,22 @@ std::vector<Action> EclipseState::LegalActions() const {
       !eclipse_state_.players[current_player].has_passed) {
     const auto& player = eclipse_state_.players[current_player];
     const bool has_action_disk = player.available_influence_discs() > 0;
-    if (has_action_disk && player.resources.science >= 2) {
+    if (has_action_disk && player.resources.science >= 2 && HasLegalResearchChoice(s, current_player)) {
       actions.push_back(action_research);
     }
-    if (has_action_disk) {
+    if (has_action_disk && HasLegalBuildChoice(s, current_player)) {
       actions.push_back(action_build);
     }
     if (has_action_disk && has_explore_zone(s, current_player)) {
       actions.push_back(action_explore);
     }
-    if (has_action_disk) {
+    if (has_action_disk && HasLegalInfluenceChoice(s, current_player)) {
       actions.push_back(action_influence_start);
     }
-    if (has_action_disk) {
+    if (has_action_disk && HasLegalUpgradeChoice(s, current_player)) {
       actions.push_back(action_upgrade);
     }
-    if (has_action_disk) {
+    if (has_action_disk && !legal_move_steps(s, current_player).empty()) {
       actions.push_back(action_move);
     }
 
@@ -1131,7 +1208,10 @@ void EclipseState::ApplyBuildSubAction(Action action_id) {
     int encoded = action_id - action_build_choice_start;
     BuildType type = static_cast<BuildType>(encoded / GALAXY_CELL_COUNT);
     uint8_t cell_idx = static_cast<uint8_t>(encoded % GALAXY_CELL_COUNT);
-    SPIEL_CHECK_TRUE(execute_build(s, player, type, cell_idx));
+    if (!execute_build(s, player, type, cell_idx)) {
+      // Build failed (e.g. stale legal action). Stay in build phase so the
+      // player can try again without losing the influence disc.
+    }
   }
 }
 

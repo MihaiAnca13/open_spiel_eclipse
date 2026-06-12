@@ -33,6 +33,15 @@ export interface Blueprint {
   total_stats: ShipStats;
 }
 
+export interface BuildCosts {
+  Interceptor: number;
+  Cruiser: number;
+  Dreadnought: number;
+  Starbase: number;
+  Orbital: number;
+  Monolith: number;
+}
+
 export interface Player {
   id: number;
   score: number;
@@ -100,6 +109,21 @@ export interface InfluenceState {
   pending_returns: PendingReturn[];
 }
 
+export interface BuildState {
+  phase: 'inactive' | 'choose_build';
+  player_id: number;
+  activations_remaining: number;
+}
+
+export interface MoveState {
+  phase: 'inactive' | 'choose_move' | 'choose_warp_destination';
+  player_id: number;
+  activations_remaining: number;
+  active_unit_idx: number;
+  steps_remaining: number;
+  warp_unit_idx: number;
+}
+
 export interface GameState {
   players: Player[];
   galaxy: Sector[][];
@@ -115,9 +139,12 @@ export interface GameState {
   current_round: number;
   turn_order: number[];
   pass_order: number[];
+  build_costs_by_player?: Record<string, BuildCosts>;
   explore_state?: ExploreState;
   research_state?: ResearchState;
   influence_state?: InfluenceState;
+  build_state?: BuildState;
+  move_state?: MoveState;
   sector_bag_inner: number;
   sector_bag_middle: number;
   sector_bag_outer: number;

@@ -2,6 +2,7 @@ export const API_BASE = 'http://127.0.0.1:8000';
 export const WS_BASE = 'ws://127.0.0.1:8000';
 export const SECTOR_ASSETS_BASE = `${API_BASE}/assets/sectors`;
 export const TECH_ASSETS_BASE = `${API_BASE}/assets/tech`;
+export const SHIP_ASSETS_BASE = `${API_BASE}/assets/ships`;
 
 export function techImageUrl(name: string, category: string): string {
   const slug = name
@@ -10,6 +11,10 @@ export function techImageUrl(name: string, category: string): string {
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '');
   return `${TECH_ASSETS_BASE}/${category.toLowerCase()}/${slug}.png`;
+}
+
+export function shipImageUrl(type: string): string {
+  return `${SHIP_ASSETS_BASE}/${type.toLowerCase()}.png`;
 }
 
 export interface TechMarketEntry {

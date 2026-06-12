@@ -57,6 +57,12 @@ export default function PlayerCard({
         </span>
       </div>
       <PopulationTracks resources={player.resources} playerColor={getPlayerColor(playerId)} />
+      <ResearchTracks
+        militaryMask={player.researched_techs_military}
+        gridMask={player.researched_techs_grid}
+        nanoMask={player.researched_techs_nano}
+        techCatalog={gameMetadata.tech_catalog ?? {}}
+      />
       {isMine ? (
         <>
           <InfluenceTrack onSectors={onSectors} onActions={onActions} />
@@ -71,12 +77,6 @@ export default function PlayerCard({
             legalTradeActions={legalTradeActions}
             onTrade={submitAction}
             resources={player.resources}
-          />
-          <ResearchTracks
-            militaryMask={player.researched_techs_military}
-            gridMask={player.researched_techs_grid}
-            nanoMask={player.researched_techs_nano}
-            techCatalog={gameMetadata.tech_catalog ?? {}}
           />
         </>
       ) : (

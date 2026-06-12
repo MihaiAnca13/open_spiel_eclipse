@@ -3,8 +3,9 @@ import type { GameState, Sector, SectorLayout } from '../../types/game';
 import { ACTION } from '../../actionTypes';
 import { UNOWNED_COLOR } from '../../theme';
 import { getPlayerHexColor } from '../../utils/game';
-import { axialToPixel, getHexPoints, hexSize, IMAGE_ROTATION_OFFSET } from '../../utils/hex';
+import { axialToPixel, getHexPoints, hexSize, IMAGE_ROTATION_OFFSET, axialNeighbor } from '../../utils/hex';
 import { getPlayerColor } from '../../theme';
+import { shipImageUrl } from '../../types/lobby';
 
 
 const INITIAL_SCALE = 1;
@@ -28,6 +29,14 @@ interface GalaxyMapProps {
   clearPreview: () => void;
   influenceToCellActions?: number[];
   reclaimFromCellActions?: number[];
+  buildTargetActions?: number[];
+  selectedBuildType?: number | null;
+  moveUnitSectors?: Set<number>;
+  moveUnitIndicesBySector?: Map<number, number[]>;
+  moveTargetCells?: Map<number, number>;
+  selectedMoveUnitIdx?: number | null;
+  onSelectMoveUnit?: (idx: number | null) => void;
+  onSelectMoveSector?: (sectorId: number | null) => void;
 }
 
 export default function GalaxyMap({
@@ -49,6 +58,14 @@ export default function GalaxyMap({
   clearPreview,
   influenceToCellActions = [],
   reclaimFromCellActions = [],
+  buildTargetActions = [],
+  selectedBuildType,
+  moveUnitSectors,
+  moveUnitIndicesBySector,
+  moveTargetCells,
+  selectedMoveUnitIdx,
+  onSelectMoveUnit,
+  onSelectMoveSector,
 }: GalaxyMapProps) {
   const [hoveredSector, setHoveredSector] = useState<Sector | null>(null);
   const [brokenImages, setBrokenImages] = useState<Set<number>>(new Set());
@@ -70,11 +87,26 @@ export default function GalaxyMap({
   }, [reclaimFromCellActions]);
   const inInfluencePhase = influenceToCellActions.length > 0 || reclaimFromCellActions.length > 0;
 
+  // Build targets: cell index -> actionId for quick lookup.
+  const buildTargetCells = useMemo(() => {
+    const map = new Map<number, number>();
+    for (const a of buildTargetActions) {
+      map.set(a - ACTION.BUILD_CHOICE_START, a);
+    }
+    return map;
+  }, [buildTargetActions]);
+  const inBuildTargetPhase = selectedBuildType !== null && buildTargetActions.length > 0;
+
+  // Move phase detection & target cells for highlighting
+  const movePhase = gameState?.move_state?.phase ?? 'inactive';
+  const inMovePhase = movePhase === 'choose_move' || movePhase === 'choose_warp_destination';
+
   // Pan/zoom state
   const [viewTransform, setViewTransform] = useState({ x: 0, y: 0, scale: INITIAL_SCALE });
   const isPanning = useRef(false);
   const panStart = useRef({ x: 0, y: 0, tx: 0, ty: 0 });
   const svgRef = useRef<SVGSVGElement>(null);
+  const centeredOnce = useRef(false);
 
   // ── Zoom limits ──
   const ZOOM_MIN = 0.3;
@@ -105,22 +137,19 @@ export default function GalaxyMap({
     setViewTransform({ x: 0, y: 0, scale: INITIAL_SCALE });
   }, []);
 
-  // Zoom at center of viewport
+  // Zoom toward mouse cursor position
   const handleWheel = useCallback((e: React.WheelEvent) => {
     e.preventDefault();
     const svg = svgRef.current;
     if (!svg) return;
-    const rect = svg.getBoundingClientRect();
-    const cx = rect.width / 2;
-    const cy = rect.height / 2;
-    const centerSVG = screenToSVG(cx, cy);
+    const cursorSVG = screenToSVG(e.clientX, e.clientY);
     setViewTransform(prev => {
       const delta = e.deltaY > 0 ? 0.9 : 1.1;
       const newScale = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, prev.scale * delta));
       const ratio = newScale / prev.scale;
       return {
-        x: centerSVG.x - (centerSVG.x - prev.x) * ratio,
-        y: centerSVG.y - (centerSVG.y - prev.y) * ratio,
+        x: cursorSVG.x - (cursorSVG.x - prev.x) * ratio,
+        y: cursorSVG.y - (cursorSVG.y - prev.y) * ratio,
         scale: newScale,
       };
     });
@@ -184,6 +213,44 @@ export default function GalaxyMap({
     }
     return list;
   }, [gameState]);
+
+  // For move targets: compute destination cell for each direction
+  const moveDestCells = useMemo(() => {
+    const map = new Map<string, number>();
+    if (!moveTargetCells || selectedMoveUnitIdx == null || !gameState) return map;
+    const idx = selectedMoveUnitIdx;
+    const unit = gameState.unit_registry[idx];
+    if (!unit) return map;
+    const sectorEntry = activeSectors.find(s => s.sector.sector_id === unit.sector_id);
+    if (!sectorEntry) return map;
+    const { q, r } = sectorEntry.sector.coords;
+    for (const [dir, actionId] of moveTargetCells) {
+      if (dir < 6) {
+        const [nq, nr] = axialNeighbor(q, r, dir);
+        map.set(`${nq},${nr}`, actionId);
+      }
+    }
+    return map;
+  }, [moveTargetCells, selectedMoveUnitIdx, gameState, activeSectors]);
+
+  // Center view on sector 1 (0,0) on first render with sectors
+  useEffect(() => {
+    if (centeredOnce.current || activeSectors.length === 0) return;
+    const svg = svgRef.current;
+    if (!svg) return;
+    const rect = svg.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+    centeredOnce.current = true;
+    const centerScreen = screenToSVG(rect.width / 2, rect.height / 2);
+    const sector1 = activeSectors.find(s => s.sector.sector_id === 1);
+    if (sector1) {
+      setViewTransform({
+        x: centerScreen.x - sector1.cx,
+        y: centerScreen.y - sector1.cy,
+        scale: 1,
+      });
+    }
+  }, [activeSectors, screenToSVG]);
 
   const inZoneSelect = isMyTurn && explorePhase === 'choose_zone';
 
@@ -393,13 +460,26 @@ export default function GalaxyMap({
               </text>
 
               {units.length > 0 && (
-                <g transform={`translate(${cx}, ${cy + 18})`}>
-                  <circle r="7" fill="#dc2626" stroke="#ffffff" strokeWidth="1" />
-                  <text y="2.5" textAnchor="middle" fill="#ffffff" fontSize="8px" fontWeight="bold">
-                    {units.length}
-                  </text>
-                </g>
-              )}
+  <g transform={`translate(${cx}, ${cy + 18})`}>
+    {units.map((unit, ui) => {
+      const uColor = getPlayerColor(unit.player_id);
+      return (
+        <g key={ui} transform={`translate(${ui * 12}, 0)`}>
+          <image
+            href={shipImageUrl(String(unit.type))}
+            width={14}
+            height={14}
+            x={-7}
+            y={-7}
+            style={{ opacity: 0.9 }}
+            onError={(e) => { e.currentTarget.style.display = 'none'; }}
+          />
+          <circle cx={5} cy={5} r={3} fill={uColor} stroke="#fff" strokeWidth={0.5} />
+        </g>
+      );
+    })}
+  </g>
+)}
 
               {/* ── sector overlay: planet cubes, influence disk, structures ── */}
               {(() => {
@@ -516,6 +596,108 @@ export default function GalaxyMap({
                     onMouseLeave={() => {
                       setHoveredSector(null);
                     }}
+                  />
+                );
+              })()}
+
+              {/* ── Build target overlay: clickable sectors ── */}
+              {inBuildTargetPhase && (() => {
+                const mapSize = gameState?.galaxy.length ?? 15;
+                const cellIdx = (sector.coords.q + 7) * mapSize + (sector.coords.r + 7);
+                const encodedIdx = (selectedBuildType ?? 0) * ACTION.GALAXY_CELL_COUNT + cellIdx;
+                if (!buildTargetCells.has(encodedIdx)) return null;
+                const actionId = ACTION.BUILD_CHOICE_START + encodedIdx;
+                return (
+                  <polygon
+                    points={getHexPoints(cx, cy, r)}
+                    fill="#f59e0b"
+                    fillOpacity={0.35}
+                    stroke="#f59e0b"
+                    strokeWidth={2.5}
+                    className="build-target"
+                    style={{ cursor: 'pointer' }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      submitAction(actionId);
+                    }}
+                    onMouseEnter={() => setHoveredSector(sector)}
+                    onMouseLeave={() => setHoveredSector(null)}
+                  />
+                );
+              })()}
+
+              {/* ── Move unit sector highlight: sectors with movable units ── */}
+              {inMovePhase && movePhase === 'choose_move' && moveUnitSectors?.has(sector.sector_id) && (
+                <polygon
+                  points={getHexPoints(cx, cy, r)}
+                  fill="none"
+                  stroke="#3b82f6"
+                  strokeWidth={2.5}
+                  strokeDasharray="5 3"
+                  className="move-source"
+                  style={{ cursor: 'pointer' }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const movableUnitIndices = moveUnitIndicesBySector?.get(sector.sector_id) ?? [];
+                    if (movableUnitIndices.length === 1 && onSelectMoveUnit) {
+                      onSelectMoveSector?.(null);
+                      onSelectMoveUnit(movableUnitIndices[0]);
+                    } else if (movableUnitIndices.length > 1) {
+                      onSelectMoveUnit?.(null);
+                      onSelectMoveSector?.(sector.sector_id);
+                    }
+                  }}
+                  onMouseEnter={() => setHoveredSector(sector)}
+                  onMouseLeave={() => setHoveredSector(null)}
+                />
+              )}
+
+              {/* ── Move destination highlight: hexes adjacent to selected unit ── */}
+              {inMovePhase && movePhase === 'choose_move' && selectedMoveUnitIdx !== null && moveDestCells.size > 0 && (() => {
+                const cellKey = `${sector.coords.q},${sector.coords.r}`;
+                const targetAction = moveDestCells.get(cellKey);
+                if (!targetAction) return null;
+                return (
+                  <polygon
+                    points={getHexPoints(cx, cy, r)}
+                    fill="#22c55e"
+                    fillOpacity={0.25}
+                    stroke="#22c55e"
+                    strokeWidth={2.5}
+                    className="move-target"
+                    style={{ cursor: 'pointer' }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      submitAction(targetAction);
+                    }}
+                    onMouseEnter={() => setHoveredSector(sector)}
+                    onMouseLeave={() => setHoveredSector(null)}
+                  />
+                );
+              })()}
+
+              {/* ── Warp destination highlight ── */}
+              {inMovePhase && movePhase === 'choose_warp_destination' && (() => {
+                const mapSize = gameState?.galaxy.length ?? 15;
+                const cellIdx = (sector.coords.q + 7) * mapSize + (sector.coords.r + 7);
+                const base = ACTION.MOVE_WARP_DESTINATION_START;
+                if (!legalActions.includes(base + cellIdx)) return null;
+                return (
+                  <polygon
+                    points={getHexPoints(cx, cy, r)}
+                    fill="#f59e0b"
+                    fillOpacity={0.3}
+                    stroke="#f59e0b"
+                    strokeWidth={2.5}
+                    strokeDasharray="4 3"
+                    className="warp-target"
+                    style={{ cursor: 'pointer' }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      submitAction(base + cellIdx);
+                    }}
+                    onMouseEnter={() => setHoveredSector(sector)}
+                    onMouseLeave={() => setHoveredSector(null)}
                   />
                 );
               })()}

@@ -17,7 +17,7 @@ export default function ResearchTracks({
     const techs: { name: string; order: number }[] = [];
     for (const [name, tech] of Object.entries(techCatalog)) {
       if (tech.category === category) {
-        const bit = 1n << BigInt(tech.order);
+        const bit = BigInt(tech.order);
         if ((BigInt(mask) & bit) !== 0n) {
           techs.push({ name, order: tech.order });
         }
