@@ -272,6 +272,8 @@ set(GAME_SOURCES
   xiangqi/xiangqi.h
   yacht/yacht.cc
   yacht/yacht.h
+  eclipse/systems/scoring.cpp
+  eclipse/systems/scoring.h
 )
 
 if (${OPEN_SPIEL_BUILD_WITH_HANABI})

@@ -1,0 +1,5 @@
+- traitor card  
+- diplomacy
+- discovery tiles (parts)
+- minor species
+- warp portal
