@@ -117,17 +117,20 @@ static const TechDefinition TECH_TABLE[] = {
     { TechBit::ADVANCED_LABS,      "Advanced Labs",      TechCategory::NANO, 10, 6, 4 },
     { TechBit::MONOLITH,           "Monolith",           TechCategory::NANO, 12, 6, 3 },
     { TechBit::WORMHOLE_GENERATOR, "Wormhole Generator", TechCategory::NANO, 14, 7, 3 },
+    // TODO: Implement scoring system logic for Artifact Key
     { TechBit::ARTIFACT_KEY,       "Artifact Key",       TechCategory::NANO, 16, 8, 3 },
 
     // RARE TECHNOLOGIES
     { TechBit::ABSORPTION_SHIELD,   "Absorption Shield",   TechCategory::RARE, 7, 6, 1 },
     { TechBit::ANCIENT_LABS,        "Ancient Labs",        TechCategory::RARE, 13, 9, 1 },
+    // TODO: Implement combat logic for Antimatter Splitter
     { TechBit::ANTIMATTER_SPLITTER, "Antimatter Splitter", TechCategory::RARE, 5, 5, 1 },
     { TechBit::CLOAKING_DEVICE,     "Cloaking Device",     TechCategory::RARE, 7, 6, 1 },
     { TechBit::CONIFOLD_FIELD,      "Conifold Field",      TechCategory::RARE, 5, 5, 1 },
     { TechBit::FLUX_MISSILE,        "Flux Missile",        TechCategory::RARE, 11, 8, 1 },
     { TechBit::IMPROVED_LOGISTICS,  "Improved Logistics",  TechCategory::RARE, 7, 6, 1 },
     { TechBit::METASYNTHESIS,       "Metasynthesis",       TechCategory::RARE, 17, 11, 1 },
+    // TODO: Implement combat logic for Neutron Absorber
     { TechBit::NEUTRON_ABSORBER,    "Neutron Absorber",    TechCategory::RARE, 5, 5, 1 },
     { TechBit::PICO_MODULATOR,      "Pico Modulator",      TechCategory::RARE, 11, 8, 1 },
     { TechBit::SENTIENT_HULL,       "Sentient Hull",       TechCategory::RARE, 7, 6, 1 },

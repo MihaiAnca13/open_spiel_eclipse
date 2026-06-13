@@ -8,6 +8,7 @@
 #include <bitset>
 
 #include "../../galaxy.h"
+#include "../../discovery_tiles.h"
 #include "../../species.h"
 #include "../../state.h"
 #include "../../tech.h"
@@ -441,8 +442,92 @@ bool resolve_explore_discovery(State& state, uint8_t player_id, bool take_reward
 
     Sector& cell = state.galaxy.at(es.zone_q, es.zone_r);
     if (take_reward) {
-        // TODO: apply the discovery tile's variable reward. There is no
-        // discovery-tile bag yet, so the reward side is currently a no-op.
+        // Draw a discovery tile from the bag
+        if (state.discovery_bag.empty()) {
+            // No tiles left, give 2 VP as fallback
+            state.players[player_id].score += 2;
+        } else {
+            DiscoveryBit drawn = state.discovery_bag.back();
+            state.discovery_bag.pop_back();
+            Player& player = state.players[player_id];
+
+            // Apply the discovery tile's reward
+            switch (drawn) {
+                // Ancient structures - TODO: requires special placement/scoring logic
+                case DiscoveryBit::ANCIENT_MONOLITH:
+                case DiscoveryBit::ANCIENT_ORBITAL:
+                case DiscoveryBit::ANCIENT_TECH:
+                case DiscoveryBit::ANCIENT_CRUISER:
+                    // TODO: Implement ancient structure placement and scoring
+                    state.players[player_id].score += 2; // Fallback to 2 VP for now
+                    break;
+
+                // Ship parts - add to player's available parts
+                case DiscoveryBit::PART_ANTIMATTER_MISSILE:
+                case DiscoveryBit::PART_AXION_COMPUTER:
+                case DiscoveryBit::PART_CONFORMAL_DRIVE:
+                case DiscoveryBit::PART_FLUX_SHIELD:
+                case DiscoveryBit::PART_HYPERGRID_SOURCE:
+                case DiscoveryBit::PART_INVERSION_SHIELD:
+                case DiscoveryBit::PART_ION_DISRUPTOR:
+                case DiscoveryBit::PART_ION_MISSILE:
+                case DiscoveryBit::PART_ION_TURRET:
+                case DiscoveryBit::PART_JUMP_DRIVE:
+                case DiscoveryBit::PART_MORPH_SHIELD:
+                case DiscoveryBit::PART_NONLINEAR_DRIVE:
+                case DiscoveryBit::PART_PLASMA_TURRET:
+                case DiscoveryBit::PART_SHARD_HULL:
+                case DiscoveryBit::PART_SOLITON_CHARGER:
+                case DiscoveryBit::PART_SOLITON_MISSILE:
+                case DiscoveryBit::PART_RIFT_CONDUCTOR:
+                    // TODO: Add ship part to player's inventory
+                    state.players[player_id].score += 2; // Fallback to 2 VP for now
+                    break;
+
+                // Muon source - energy source AND ship part
+                case DiscoveryBit::MUON_SOURCE:
+                    player.resources.gold += 2; // +2 energy
+                    // TODO: Add Muon Source ship part to player's inventory
+                    break;
+
+                // Resource tiles
+                case DiscoveryBit::RESOURCE_SCIENCE_3_MONEY_3:
+                    player.resources.science += 3;
+                    player.resources.gold += 3;
+                    break;
+                case DiscoveryBit::RESOURCES_2MAT_2S_3MONEY:
+                    player.resources.materials += 2;
+                    player.resources.science += 2;
+                    player.resources.gold += 3;
+                    break;
+                case DiscoveryBit::RESOURCES_6_MATERIALS:
+                    player.resources.materials += 6;
+                    break;
+                case DiscoveryBit::RESOURCES_5_SCIENCE:
+                    player.resources.science += 5;
+                    break;
+                case DiscoveryBit::RESOURCES_8_MONEY:
+                    player.resources.gold += 8;
+                    break;
+
+                // Variable VP tiles - TODO: requires scoring system
+                case DiscoveryBit::VP_PER_3REP:
+                case DiscoveryBit::VP_PER_ARTIFACT:
+                    // TODO: Implement scoring system logic for variable VP tiles
+                    state.players[player_id].score += 2; // Fallback to 2 VP for now
+                    break;
+
+                // Warp portal - TODO: requires placement logic
+                case DiscoveryBit::WARP_PORTAL:
+                    // TODO: Implement warp portal placement logic
+                    state.players[player_id].score += 2; // Fallback to 2 VP for now
+                    break;
+
+                default:
+                    state.players[player_id].score += 2; // Default fallback
+                    break;
+            }
+        }
     } else {
         state.players[player_id].score += 2;
     }

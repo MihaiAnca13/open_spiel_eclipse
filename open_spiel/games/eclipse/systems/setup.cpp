@@ -12,6 +12,7 @@
 
 #include "../species.h"
 #include "../sectors.h"
+#include "../discovery_tiles.h"
 
 namespace {
 
@@ -73,6 +74,7 @@ State InitializeDeterministicSetupState(const SetupConfig& raw_config) {
 
     state.reputation_tiles.clear();
     state.tech_bag.clear();
+    state.discovery_bag.clear();
     state.unit_registry.clear();
     state.pass_order.clear();
     state.tech_tray.fill(0);
@@ -136,6 +138,15 @@ void ResolveInitialSetupRandomness(std::mt19937_64& rng,
     }
     std::shuffle(state.reputation_tiles.begin(), state.reputation_tiles.end(),
                  rng);
+
+    // 3.5. Populate and shuffle the discovery tile bag.
+    state.discovery_bag.clear();
+    for (const auto& tile_def : DISCOVERY_TILE_TABLE) {
+        for (uint8_t c = 0; c < tile_def.copies; ++c) {
+            state.discovery_bag.push_back(tile_def.discovery);
+        }
+    }
+    std::shuffle(state.discovery_bag.begin(), state.discovery_bag.end(), rng);
 
     // 4. Randomize initial turn order.
     std::vector<uint8_t> initial_turns(config.players);

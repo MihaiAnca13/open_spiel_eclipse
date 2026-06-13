@@ -17,6 +17,7 @@
 #include "npc.h"
 #include "fixed_vector.h"
 #include "species.h"
+#include "discovery_tiles.h"
 #include "systems/actions/explore.h"
 #include "systems/actions/research.h"
 #include "systems/actions/build.h"
@@ -167,6 +168,9 @@ struct State {
     NPCDifficulty gcds_difficulty = NPCDifficulty::EASY;
     NPCDifficulty guardian_difficulty = NPCDifficulty::EASY;
     NPCDifficulty ancient_difficulty = NPCDifficulty::EASY;
+
+    // Discovery tile bag
+    FixedVector<DiscoveryBit, 40> discovery_bag;
 
     // Turn tracking and passing queue
     uint8_t current_player = 255;
