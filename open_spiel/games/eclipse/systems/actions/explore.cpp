@@ -130,6 +130,9 @@ void collect_explore_zones(const State& state, uint8_t player_id, bool first_onl
     // the growing output list per candidate.
     std::bitset<GALAXY_CELL_COUNT> listed;
 
+    // pre-allocate output vector
+    out.reserve(GALAXY_CELL_COUNT);
+
     for (int q = -GALAXY_RADIUS; q <= GALAXY_RADIUS; ++q) {
         for (int r = -GALAXY_RADIUS; r <= GALAXY_RADIUS; ++r) {
             const Sector& sector = state.galaxy.at(q, r);

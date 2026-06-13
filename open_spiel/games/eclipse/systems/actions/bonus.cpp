@@ -11,7 +11,7 @@
 // ── Population Track helpers ──────────────────────────────────────────────────
 
 // Cubes remaining on a given track.
-static uint8_t track_cubes(const Player& player, PopTrack track) {
+static uint8_t track_cubes(const ::Player& player, PopTrack track) {
     switch (track) {
         case PopTrack::MONEY:     return player.resources.gold_prod;
         case PopTrack::SCIENCE:   return player.resources.science_prod;
@@ -25,7 +25,7 @@ static uint8_t track_cubes(const Player& player, PopTrack track) {
 // loss/graveyard path is built, reuse this in reverse: losing a colonized
 // planet INCREMENTS the chosen track (cube returns from planet → onto a track),
 // where the player likewise picks which track receives the cube.
-static uint8_t& track_ref(Player& player, PopTrack track) {
+static uint8_t& track_ref(::Player& player, PopTrack track) {
     switch (track) {
         case PopTrack::SCIENCE:   return player.resources.science_prod;
         case PopTrack::MATERIALS: return player.resources.materials_prod;
@@ -55,7 +55,7 @@ static uint8_t required_track(PlanetType slot_type) {
 
 // ── Advanced tech requirements per slot type ──────────────────────────────────
 
-static bool has_required_tech(const Player& player, PlanetType slot_type) {
+static bool has_required_tech(const ::Player& player, PlanetType slot_type) {
     switch (slot_type) {
         case PlanetType::ADV_MATERIALS:
             return player.has_tech(TechBit::ADVANCED_MINING);
@@ -72,7 +72,7 @@ static bool has_required_tech(const Player& player, PlanetType slot_type) {
 
 // ── Trade ─────────────────────────────────────────────────────────────────────
 
-bool can_trade(const Player& player, TradeConversion conv) {
+bool can_trade(const ::Player& player, TradeConversion conv) {
     uint8_t rate = player.trade_rate;
     switch (conv) {
         case TradeConversion::GOLD_TO_SCIENCE:
@@ -90,7 +90,7 @@ bool can_trade(const Player& player, TradeConversion conv) {
 
 bool execute_trade(State& state, uint8_t player_id, TradeConversion conv) {
     if (player_id >= state.players.size()) return false;
-    Player& player = state.players[player_id];
+    ::Player& player = state.players[player_id];
     if (!can_trade(player, conv)) return false;
 
     uint8_t rate = player.trade_rate;
@@ -129,7 +129,7 @@ bool can_use_colony_ship(const State& state, uint8_t player_id,
                          uint8_t galaxy_cell_idx, uint8_t slot_idx,
                          PopTrack track) {
     if (player_id >= state.players.size()) return false;
-    const Player& player = state.players[player_id];
+    const ::Player& player = state.players[player_id];
 
     if (player.colony_ships_available == 0) return false;
 
@@ -165,7 +165,7 @@ bool use_colony_ship(State& state, uint8_t player_id,
     if (!can_use_colony_ship(state, player_id, galaxy_cell_idx, slot_idx, track))
         return false;
 
-    Player& player = state.players[player_id];
+    ::Player& player = state.players[player_id];
     HexCoord coord = index_to_hex(galaxy_cell_idx);
     Sector& sector = state.galaxy.at(coord.q, coord.r);
 
@@ -181,7 +181,7 @@ bool use_colony_ship(State& state, uint8_t player_id,
     return true;
 }
 
-void refresh_colony_ships(Player& player, uint8_t count) {
+void refresh_colony_ships(::Player& player, uint8_t count) {
     uint8_t facedown = player.colony_ships_total - player.colony_ships_available;
     uint8_t to_flip  = std::min(count, facedown);
     player.colony_ships_available += to_flip;
@@ -191,7 +191,7 @@ std::vector<ColonyPlacement> legal_colony_ship_placements(
     const State& state, uint8_t player_id) {
     std::vector<ColonyPlacement> result;
     if (player_id >= state.players.size()) return result;
-    const Player& player = state.players[player_id];
+    const ::Player& player = state.players[player_id];
     if (player.colony_ships_available == 0) return result;
 
     for (int cell = 0; cell < GALAXY_CELL_COUNT; ++cell) {

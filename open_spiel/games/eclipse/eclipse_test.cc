@@ -23,6 +23,26 @@ std::shared_ptr<const Game> LoadEclipseGame(int players, int rng_seed) {
                   ",rng_seed=" + std::to_string(rng_seed) + ")");
 }
 
+int CountRegularTechTilesInTray(const ::State& raw) {
+  int regular_tiles = 0;
+  for (size_t i = 0; i < TECH_TOTAL; ++i) {
+    if (TECH_TABLE[i].category != TechCategory::RARE) {
+      regular_tiles += raw.tech_tray[i];
+    }
+  }
+  return regular_tiles;
+}
+
+int CountRareTechTilesInTray(const ::State& raw) {
+  int rare_tiles = 0;
+  for (size_t i = 0; i < TECH_TOTAL; ++i) {
+    if (TECH_TABLE[i].category == TechCategory::RARE) {
+      rare_tiles += raw.tech_tray[i];
+    }
+  }
+  return rare_tiles;
+}
+
 void BasicEclipseTests() {
   testing::LoadGameTest("eclipse(players=4,rng_seed=7)");
   testing::ChanceOutcomesTest(*LoadEclipseGame(4, 7));
@@ -904,7 +924,7 @@ void UpgradeFullActionTest() {
   Action interceptor_slot0 = -1;
   for (Action a : legal) {
     std::string name = state->ActionToString(state->CurrentPlayer(), a);
-    if (name == "UPGRADE_INTERCEPTOR_SLOT0") {
+    if (name.find("UPGRADE_INTERCEPTOR_SLOT0_") != std::string::npos) {
       interceptor_slot0 = a;
       break;
     }
@@ -914,7 +934,6 @@ void UpgradeFullActionTest() {
   // Apply upgrade action
   state->ApplyAction(interceptor_slot0);
 
-  // Activations should decrement only if a part was placed (not for removal)
   // Stop early
   legal = state->LegalActions();
   Action stop_act = -1;
@@ -942,6 +961,24 @@ void MoveFullActionTest() {
   raw.current_player = 0;
   raw.players[0].has_passed = false;
 
+  // Fixture: remove GCDS, add player Interceptor at center (sector 1).
+  // Place Castor (sector 101) adjacent East at (1,0) so the ship has a
+  // wormhole-connected destination (center mask 0b111111, Castor mask 0b011111,
+  // edge 0 from center → edge 3 from Castor).
+  raw.unit_registry.clear();
+  raw.unit_registry.push_back(Unit{0, ShipType::INTERCEPTOR, 1, 0});
+  raw.galaxy.at(1, 0) = Sector{
+      .sector_id = 101,
+      .owner_id = 255,
+      .coords = {1, 0},
+      .rotation = 0,
+      .points = 2,
+      .occupied_slots_mask = 0,
+      .discovery_tile_present = false,
+      .orbital_built = false,
+      .monolith_built = false,
+  };
+
   // Verify MOVE action is available
   std::vector<Action> legal = state->LegalActions();
   Action move_act = -1;
@@ -958,7 +995,7 @@ void MoveFullActionTest() {
   SPIEL_CHECK_TRUE(raw.move_state.phase == MoveState::Phase::choose_move);
   SPIEL_CHECK_EQ(raw.players[0].disks_on_actions, 1);
 
-  // Check if any legal move steps exist (depends on ship positions)
+  // Stop immediately (enough that move action started)
   legal = state->LegalActions();
   Action stop_act = -1;
   for (Action a : legal) {
@@ -1004,10 +1041,228 @@ void StrictMainActionFilteringTest() {
     names.push_back(state->ActionToString(state->CurrentPlayer(), action));
   }
 
-  SPIEL_CHECK_EQ(std::find(names.begin(), names.end(), "RESEARCH"), names.end());
-  SPIEL_CHECK_EQ(std::find(names.begin(), names.end(), "BUILD"), names.end());
-  SPIEL_CHECK_EQ(std::find(names.begin(), names.end(), "INFLUENCE"), names.end());
-  SPIEL_CHECK_EQ(std::find(names.begin(), names.end(), "MOVE"), names.end());
+  SPIEL_CHECK_TRUE(std::find(names.begin(), names.end(), "RESEARCH") == names.end());
+  SPIEL_CHECK_TRUE(std::find(names.begin(), names.end(), "BUILD") == names.end());
+  SPIEL_CHECK_TRUE(std::find(names.begin(), names.end(), "INFLUENCE") == names.end());
+  // MOVE is always offered when the player has an action disc; the action
+  // becomes a no-op (no disc spent, turn advances) when nothing can move.
+}
+
+void UpkeepRoundFlowTest() {
+  std::shared_ptr<const Game> game = LoadEclipseGame(2, 7);
+  std::unique_ptr<State> state = game->NewInitialState();
+  state->ApplyAction(0);
+
+  EclipseState* eclipse_state = static_cast<EclipseState*>(state.get());
+  ::State& raw = const_cast<::State&>(eclipse_state->RawState());
+  raw.turn_order[0] = 0;
+  raw.turn_order[1] = 1;
+  raw.current_player = 0;
+  raw.current_round = 1;
+  raw.players[0].resources.gold = 3;
+  raw.players[1].resources.gold = 1;
+  raw.players[0].colony_ships_total = 0;
+  raw.players[0].colony_ships_available = 0;
+  raw.players[1].colony_ships_total = 0;
+  raw.players[1].colony_ships_available = 0;
+
+  state->ApplyAction(FindActionByName(*state, "PASS"));
+  SPIEL_CHECK_EQ(raw.players[0].resources.gold, 5);
+  SPIEL_CHECK_EQ(raw.current_player, 1);
+
+  state->ApplyAction(FindActionByName(*state, "PASS"));
+  SPIEL_CHECK_TRUE(raw.current_phase == RoundPhase::UPKEEP);
+  SPIEL_CHECK_EQ(state->CurrentPlayer(), 0);
+  SPIEL_CHECK_TRUE(raw.upkeep_state.step == UpkeepState::Step::colony_ships);
+
+  state->ApplyAction(FindActionByName(*state, "UPKEEP_COLONY_DONE"));
+  state->ApplyAction(FindActionByName(*state, "UPKEEP_PAY_DONE"));
+  SPIEL_CHECK_EQ(state->CurrentPlayer(), 1);
+  SPIEL_CHECK_TRUE(raw.upkeep_state.step == UpkeepState::Step::colony_ships);
+
+  state->ApplyAction(FindActionByName(*state, "UPKEEP_COLONY_DONE"));
+  state->ApplyAction(FindActionByName(*state, "UPKEEP_PAY_DONE"));
+
+  SPIEL_CHECK_TRUE(raw.current_phase == RoundPhase::ACTION);
+  SPIEL_CHECK_EQ(raw.current_round, 2);
+  SPIEL_CHECK_EQ(raw.current_player, 0);
+  SPIEL_CHECK_TRUE(raw.pass_order.empty());
+  SPIEL_CHECK_FALSE(raw.players[0].has_passed);
+  SPIEL_CHECK_FALSE(raw.players[1].has_passed);
+}
+
+void UpkeepAbandonSectorTest() {
+  std::shared_ptr<const Game> game = LoadEclipseGame(2, 7);
+  std::unique_ptr<State> state = game->NewInitialState();
+  state->ApplyAction(0);
+
+  EclipseState* eclipse_state = static_cast<EclipseState*>(state.get());
+  ::State& raw = const_cast<::State&>(eclipse_state->RawState());
+  raw.current_phase = RoundPhase::UPKEEP;
+  raw.current_round = 1;
+  raw.turn_order[0] = 0;
+  raw.turn_order[1] = 1;
+  raw.current_player = 0;
+  raw.upkeep_state.player_id = 0;
+  raw.upkeep_state.step = UpkeepState::Step::bankruptcy;
+  raw.players[0].resources.gold = 0;
+  raw.players[0].resources.gold_prod = 12;
+  raw.players[0].resources.science_prod = 5;
+  raw.players[0].resources.materials_prod = 5;
+  raw.players[0].disks_on_sectors = 2;
+  raw.players[0].disks_on_actions = 0;
+  raw.players[0].has_passed = true;
+  raw.players[1].has_passed = true;
+
+  Sector& sector = raw.galaxy.at(1, 0);
+  sector.sector_id = 306;
+  sector.owner_id = 0;
+  sector.coords = {1, 0};
+  sector.occupied_slots_mask = (1u << 1);
+
+  Action reclaim = FindActionByName(*state, "RECLAIM_FROM_1_0");
+  SPIEL_CHECK_NE(reclaim, -1);
+  state->ApplyAction(reclaim);
+
+  SPIEL_CHECK_EQ(sector.owner_id, 255);
+  SPIEL_CHECK_EQ(sector.occupied_slots_mask, 0);
+  SPIEL_CHECK_EQ(raw.players[0].disks_on_sectors, 1);
+  SPIEL_CHECK_EQ(raw.players[0].resources.materials_prod, 6);
+  SPIEL_CHECK_TRUE(raw.upkeep_state.step == UpkeepState::Step::bankruptcy);
+  SPIEL_CHECK_NE(FindActionByName(*state, "UPKEEP_PAY_DONE"), -1);
+}
+
+void CleanupGraveyardOverflowChoiceTest() {
+  std::shared_ptr<const Game> game = LoadEclipseGame(2, 7);
+  std::unique_ptr<State> state = game->NewInitialState();
+  state->ApplyAction(0);
+
+  EclipseState* eclipse_state = static_cast<EclipseState*>(state.get());
+  ::State& raw = const_cast<::State&>(eclipse_state->RawState());
+  raw.current_phase = RoundPhase::CLEANUP;
+  raw.current_round = 1;
+  raw.turn_order[0] = 0;
+  raw.turn_order[1] = 1;
+  raw.current_player = 0;
+  raw.pass_order.clear();
+  raw.pass_order.push_back(0);
+  raw.pass_order.push_back(1);
+  raw.players[0].graveyard_counts = {1, 0, 0};
+  raw.players[0].resources.gold_prod = 12;
+  raw.players[0].resources.science_prod = 11;
+  raw.players[0].resources.materials_prod = 12;
+  raw.upkeep_state.player_id = 0;
+  raw.upkeep_state.step = UpkeepState::Step::choose_return_track;
+  raw.upkeep_state.pending_returns = {{PlanetType::MONEY, false}};
+
+  const std::vector<Action> legal = state->LegalActions();
+  SPIEL_CHECK_EQ(legal.size(), 1);
+  SPIEL_CHECK_EQ(state->ActionToString(state->CurrentPlayer(), legal[0]),
+                 "RETURN_CUBE_TO_SCIENCE");
+  state->ApplyAction(legal[0]);
+
+  SPIEL_CHECK_EQ(raw.players[0].resources.science_prod, 12);
+  SPIEL_CHECK_TRUE(raw.current_phase == RoundPhase::ACTION);
+  SPIEL_CHECK_EQ(raw.current_round, 2);
+}
+
+void CleanupDrawsNewTechTilesTest() {
+  std::shared_ptr<const Game> game = LoadEclipseGame(2, 7);
+  std::unique_ptr<State> state = game->NewInitialState();
+  state->ApplyAction(0);
+
+  EclipseState* eclipse_state = static_cast<EclipseState*>(state.get());
+  ::State& raw = const_cast<::State&>(eclipse_state->RawState());
+  raw.turn_order[0] = 0;
+  raw.turn_order[1] = 1;
+  raw.current_player = 0;
+  raw.current_round = 1;
+  raw.tech_tray.fill(0);
+  raw.tech_bag.clear();
+  raw.tech_bag.push_back(TechBit::STARBASE);
+  raw.tech_bag.push_back(TechBit::GAUSS_SHIELD);
+  raw.tech_bag.push_back(TechBit::FUSION_DRIVE);
+  raw.tech_bag.push_back(TechBit::ORBITAL);
+  raw.tech_bag.push_back(TechBit::ABSORPTION_SHIELD);
+  raw.tech_bag.push_back(TechBit::NEUTRON_BOMBS);
+  raw.tech_bag.push_back(TechBit::PLASMA_CANNON);
+  for (int player = 0; player < 2; ++player) {
+    raw.players[player].resources.gold = 20;
+    raw.players[player].colony_ships_total = 0;
+    raw.players[player].colony_ships_available = 0;
+  }
+
+  state->ApplyAction(FindActionByName(*state, "PASS"));
+  state->ApplyAction(FindActionByName(*state, "PASS"));
+  state->ApplyAction(FindActionByName(*state, "UPKEEP_COLONY_DONE"));
+  state->ApplyAction(FindActionByName(*state, "UPKEEP_PAY_DONE"));
+  state->ApplyAction(FindActionByName(*state, "UPKEEP_COLONY_DONE"));
+  state->ApplyAction(FindActionByName(*state, "UPKEEP_PAY_DONE"));
+
+  SPIEL_CHECK_EQ(CountRegularTechTilesInTray(raw), 5);
+  SPIEL_CHECK_EQ(CountRareTechTilesInTray(raw), 1);
+  SPIEL_CHECK_EQ(raw.tech_bag.size(), 1);
+}
+
+void RoundEightCleanupEndsGameTest() {
+  std::shared_ptr<const Game> game = LoadEclipseGame(2, 7);
+  std::unique_ptr<State> state = game->NewInitialState();
+  state->ApplyAction(0);
+
+  EclipseState* eclipse_state = static_cast<EclipseState*>(state.get());
+  ::State& raw = const_cast<::State&>(eclipse_state->RawState());
+  raw.turn_order[0] = 0;
+  raw.turn_order[1] = 1;
+  raw.current_player = 0;
+  raw.current_round = 8;
+  raw.tech_bag.clear();
+  for (int player = 0; player < 2; ++player) {
+    raw.players[player].resources.gold = 20;
+    raw.players[player].colony_ships_total = 0;
+    raw.players[player].colony_ships_available = 0;
+  }
+
+  SPIEL_CHECK_FALSE(state->IsTerminal());
+  state->ApplyAction(FindActionByName(*state, "PASS"));
+  state->ApplyAction(FindActionByName(*state, "PASS"));
+  state->ApplyAction(FindActionByName(*state, "UPKEEP_COLONY_DONE"));
+  state->ApplyAction(FindActionByName(*state, "UPKEEP_PAY_DONE"));
+  state->ApplyAction(FindActionByName(*state, "UPKEEP_COLONY_DONE"));
+  state->ApplyAction(FindActionByName(*state, "UPKEEP_PAY_DONE"));
+
+  SPIEL_CHECK_TRUE(state->IsTerminal());
+  SPIEL_CHECK_EQ(raw.current_round, 9);
+  SPIEL_CHECK_EQ(state->CurrentPlayer(), kTerminalPlayerId);
+}
+
+void UpkeepObservationTensorTest() {
+  std::shared_ptr<const Game> game = LoadEclipseGame(2, 7);
+  std::unique_ptr<State> state = game->NewInitialState();
+  state->ApplyAction(0);
+
+  EclipseState* eclipse_state = static_cast<EclipseState*>(state.get());
+  ::State& raw = const_cast<::State&>(eclipse_state->RawState());
+  raw.current_phase = RoundPhase::UPKEEP;
+  raw.current_player = 0;
+  raw.upkeep_state.player_id = 1;
+  raw.upkeep_state.step = UpkeepState::Step::choose_return_track;
+  raw.upkeep_state.pending_returns = {{PlanetType::MONEY, true}};
+  raw.players[0].graveyard_counts = {1, 2, 3};
+
+  std::vector<float> tensor(game->ObservationTensorShape()[0], 0.0f);
+  state->ObservationTensor(0, absl::MakeSpan(tensor));
+
+  SPIEL_CHECK_EQ(tensor[64], 1.0f);
+  SPIEL_CHECK_EQ(tensor[65], static_cast<float>(
+                                 static_cast<int>(UpkeepState::Step::choose_return_track)));
+  SPIEL_CHECK_EQ(tensor[66], 1.0f);
+  SPIEL_CHECK_EQ(tensor[67], 1.0f);
+  SPIEL_CHECK_EQ(tensor[68], static_cast<float>(
+                                 static_cast<int>(PlanetType::MONEY)));
+  SPIEL_CHECK_EQ(tensor[69], 1.0f);
+  SPIEL_CHECK_EQ(tensor[70], 1.0f);
+  SPIEL_CHECK_EQ(tensor[71], 2.0f);
+  SPIEL_CHECK_EQ(tensor[72], 3.0f);
 }
 
 }  // namespace
@@ -1039,4 +1294,10 @@ int main(int argc, char** argv) {
   open_spiel::eclipse::UpgradeFullActionTest();
   open_spiel::eclipse::MoveFullActionTest();
   open_spiel::eclipse::StrictMainActionFilteringTest();
+  open_spiel::eclipse::UpkeepRoundFlowTest();
+  open_spiel::eclipse::UpkeepAbandonSectorTest();
+  open_spiel::eclipse::CleanupGraveyardOverflowChoiceTest();
+  open_spiel::eclipse::CleanupDrawsNewTechTilesTest();
+  open_spiel::eclipse::RoundEightCleanupEndsGameTest();
+  open_spiel::eclipse::UpkeepObservationTensorTest();
 }

@@ -12,6 +12,8 @@
 
 // Forward declaration to avoid circular dependency
 struct State;
+struct Player;
+enum class PopTrack : uint8_t;
 
 struct PendingReturn
 {
@@ -42,6 +44,14 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(InfluenceState, phase, player_id, activations
 
 namespace open_spiel::eclipse
 {
+    PopTrack get_matching_track(PlanetType type);
+    bool pending_return_requires_choice(const ::Player& player, PlanetType type, bool is_orbital);
+    std::vector<PopTrack> get_legal_return_tracks(const ::Player& player, PlanetType type, bool is_orbital);
+    void apply_return_to_track(::Player& player, PopTrack track);
+    std::vector<PendingReturn> collect_sector_population_returns(const ::State& state, uint8_t galaxy_cell_idx);
+    bool abandon_sector(::State& state, uint8_t player_id, uint8_t galaxy_cell_idx,
+                        std::vector<PendingReturn>* pending_returns);
+
     // Validates whether a player can move an influence disc to a target cell
     // or reclaim a disc back to their track.
     bool can_influence_to_sector(const ::State& state, uint8_t player_id, uint8_t galaxy_cell_idx);

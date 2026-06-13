@@ -78,7 +78,7 @@ State InitializeDeterministicSetupState(const SetupConfig& raw_config) {
     state.tech_tray.fill(0);
     state.current_player = 255;
     state.current_round = 1;
-    state.current_phase = 0;
+    state.current_phase = RoundPhase::ACTION;
     for (uint8_t& player_id : state.turn_order) {
         player_id = 255;
     }
@@ -149,7 +149,7 @@ void ResolveInitialSetupRandomness(std::mt19937_64& rng,
     }
     state.current_player = state.turn_order[0];
     state.current_round = 1;
-    state.current_phase = 0;
+    state.current_phase = RoundPhase::ACTION;
     state.pass_order.clear();
 
     // 5. Populate sector bags as bitmasks.

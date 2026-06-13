@@ -3,6 +3,7 @@ set(ECLIPSE_UI_NATIVE_SOURCES
   ${CMAKE_CURRENT_SOURCE_DIR}/../../../open_spiel/games/eclipse/eclipse.cc
   ${CMAKE_CURRENT_SOURCE_DIR}/../../../open_spiel/games/eclipse/systems/setup.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../../../open_spiel/games/eclipse/systems/combat.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../../open_spiel/games/eclipse/systems/upkeep.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../../../open_spiel/games/eclipse/systems/actions/bonus.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../../../open_spiel/games/eclipse/systems/actions/explore.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../../../open_spiel/games/eclipse/systems/actions/research.cpp

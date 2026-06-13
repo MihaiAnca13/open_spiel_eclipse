@@ -64,6 +64,20 @@ static const int POPULATION_PRODUCTION_TABLE[] = { 28, 24, 21, 18, 15, 12, 10, 8
 // Index 0 means no influence disk is used
 static const int INFLUENCE_UPKEEP_TABLE[] = { 0, 0, 1, 2, 3, 5, 7, 10, 13, 17, 21, 25, 30 };
 
+enum class RoundPhase : uint8_t {
+    ACTION = 0,
+    COMBAT = 1,
+    UPKEEP = 2,
+    CLEANUP = 3
+};
+
+NLOHMANN_JSON_SERIALIZE_ENUM(RoundPhase, {
+    {RoundPhase::ACTION, "action"},
+    {RoundPhase::COMBAT, "combat"},
+    {RoundPhase::UPKEEP, "upkeep"},
+    {RoundPhase::CLEANUP, "cleanup"}
+});
+
 struct Player {
     uint8_t id;
     uint8_t score;
@@ -79,6 +93,8 @@ struct Player {
     FixedVector<ReputationTiles, 5> reputation_tiles;
     uint8_t trade_rate;
     uint8_t extra_influence_discs = 0;
+    std::array<uint8_t, 3> graveyard_counts = {0, 0, 0};
+    bool eliminated = false;
     uint64_t researched_techs_military = 0;  // standard MIL bits + rare bits
     uint64_t researched_techs_grid = 0;      // standard GRID bits + rare bits
     uint64_t researched_techs_nano = 0;      // standard NANO bits + rare bits
@@ -110,7 +126,31 @@ NLOHMANN_JSON_SERIALIZE_ENUM(ReputationTiles, {
     {FOUR, "Four"}
 });
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Player, id, score, species_id, is_ai, has_passed, disks_on_sectors, disks_on_actions, resources, colony_ships_total, colony_ships_available, orbitals, monoliths, blueprints, reputation_tiles, trade_rate, extra_influence_discs, researched_techs_military, researched_techs_grid, researched_techs_nano);
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Player, id, score, species_id, is_ai, has_passed, disks_on_sectors, disks_on_actions, resources, colony_ships_total, colony_ships_available, orbitals, monoliths, blueprints, reputation_tiles, trade_rate, extra_influence_discs, graveyard_counts, eliminated, researched_techs_military, researched_techs_grid, researched_techs_nano);
+
+struct UpkeepState {
+    enum class Step : uint8_t {
+        inactive = 0,
+        colony_ships = 1,
+        bankruptcy = 2,
+        cleanup_graveyards = 3,
+        choose_return_track = 4
+    };
+
+    Step step = Step::inactive;
+    uint8_t player_id = 255;
+    std::vector<PendingReturn> pending_returns;
+};
+
+NLOHMANN_JSON_SERIALIZE_ENUM(UpkeepState::Step, {
+    {UpkeepState::Step::inactive, "inactive"},
+    {UpkeepState::Step::colony_ships, "colony_ships"},
+    {UpkeepState::Step::bankruptcy, "bankruptcy"},
+    {UpkeepState::Step::cleanup_graveyards, "cleanup_graveyards"},
+    {UpkeepState::Step::choose_return_track, "choose_return_track"},
+});
+
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(UpkeepState, step, player_id, pending_returns);
 
 struct State {
     FixedVector<Player, MAX_PLAYERS> players;
@@ -130,7 +170,7 @@ struct State {
 
     // Turn tracking and passing queue
     uint8_t current_player = 255;
-    uint8_t current_phase = 0;
+    RoundPhase current_phase = RoundPhase::ACTION;
     uint8_t current_round = 0;
     uint8_t turn_order[MAX_PLAYERS] = {255, 255, 255, 255, 255, 255};
     FixedVector<uint8_t, MAX_PLAYERS> pass_order;
@@ -155,6 +195,9 @@ struct State {
 
     // In-flight Move action (inactive when no Move is being resolved).
     MoveState move_state;
+
+    // In-flight Upkeep / Cleanup round-end state.
+    UpkeepState upkeep_state;
 
     // Helper functions for tech market tray (allocation-free representation)
     uint8_t get_tech_tray_count(TechBit tech) const {
@@ -194,15 +237,15 @@ inline void to_json(nlohmann::json& j, const State& s) {
             tray_j[tech.name] = entry;
         }
     }
-    for (const Player& player : s.players) {
-        build_costs_by_player[std::to_string(player.id)] = {
-            {"Interceptor", open_spiel::eclipse::calculate_build_cost(player, open_spiel::eclipse::BuildType::INTERCEPTOR)},
-            {"Cruiser", open_spiel::eclipse::calculate_build_cost(player, open_spiel::eclipse::BuildType::CRUISER)},
-            {"Dreadnought", open_spiel::eclipse::calculate_build_cost(player, open_spiel::eclipse::BuildType::DREADNOUGHT)},
-            {"Starbase", open_spiel::eclipse::calculate_build_cost(player, open_spiel::eclipse::BuildType::STARBASE)},
-            {"Orbital", open_spiel::eclipse::calculate_build_cost(player, open_spiel::eclipse::BuildType::ORBITAL)},
-            {"Monolith", open_spiel::eclipse::calculate_build_cost(player, open_spiel::eclipse::BuildType::MONOLITH)},
-        };
+    for (const ::Player& player : s.players) {
+        nlohmann::json costs = nlohmann::json::object();
+        costs["Interceptor"] = open_spiel::eclipse::calculate_build_cost(player, open_spiel::eclipse::BuildType::INTERCEPTOR);
+        costs["Cruiser"] = open_spiel::eclipse::calculate_build_cost(player, open_spiel::eclipse::BuildType::CRUISER);
+        costs["Dreadnought"] = open_spiel::eclipse::calculate_build_cost(player, open_spiel::eclipse::BuildType::DREADNOUGHT);
+        costs["Starbase"] = open_spiel::eclipse::calculate_build_cost(player, open_spiel::eclipse::BuildType::STARBASE);
+        costs["Orbital"] = open_spiel::eclipse::calculate_build_cost(player, open_spiel::eclipse::BuildType::ORBITAL);
+        costs["Monolith"] = open_spiel::eclipse::calculate_build_cost(player, open_spiel::eclipse::BuildType::MONOLITH);
+        build_costs_by_player[std::to_string(player.id)] = costs;
     }
 
     j = nlohmann::json{
@@ -229,7 +272,8 @@ inline void to_json(nlohmann::json& j, const State& s) {
         {"build_costs_by_player", build_costs_by_player},
         {"influence_state", s.influence_state},
         {"upgrade_state", s.upgrade_state},
-        {"move_state", s.move_state}
+        {"move_state", s.move_state},
+        {"upkeep_state", s.upkeep_state}
     };
 }
 
@@ -301,6 +345,11 @@ inline void from_json(const nlohmann::json& j, State& s) {
         j.at("influence_state").get_to(s.influence_state);
     } else {
         s.influence_state = InfluenceState{};
+    }
+    if (j.contains("upkeep_state")) {
+        j.at("upkeep_state").get_to(s.upkeep_state);
+    } else {
+        s.upkeep_state = UpkeepState{};
     }
 
     if (j.contains("upgrade_state")) {

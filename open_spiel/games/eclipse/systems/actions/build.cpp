@@ -79,7 +79,7 @@ namespace open_spiel::eclipse
         }
     } // namespace
 
-    uint8_t calculate_build_cost(const Player& player, const BuildType type)
+    uint8_t calculate_build_cost(const ::Player& player, const BuildType type)
     {
         // Check if the species is Mechanema for discount structures
         bool is_mechanema = (player.species_id == Species::MECHANEMA);

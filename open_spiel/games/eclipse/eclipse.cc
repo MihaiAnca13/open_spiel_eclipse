@@ -5,6 +5,7 @@
 #include "open_spiel/games/eclipse/eclipse.h"
 
 #include <algorithm>
+#include <bitset>
 #include <sstream>
 #include <stdexcept>
 
@@ -17,6 +18,7 @@
 #include "open_spiel/games/eclipse/systems/actions/upgrade.h"
 #include "open_spiel/games/eclipse/systems/actions/move.h"
 #include "open_spiel/games/eclipse/systems/setup.h"
+#include "open_spiel/games/eclipse/systems/upkeep.h"
 #include "open_spiel/json/include/nlohmann/json.hpp"
 #include "open_spiel/observer.h"
 
@@ -99,7 +101,9 @@ constexpr Action action_move_choice_start = action_move_stop + 1; // 8504
 constexpr int MAX_MOVE_UNITS = 128; // unit_registry capacity
 constexpr Action action_move_warp_start = action_move_choice_start + MAX_MOVE_UNITS * MOVE_CODES_PER_UNIT; // 8504 + 896 = 9400
 constexpr Action action_move_warp_destination_start = action_move_warp_start + MAX_MOVE_UNITS; // 9400 + 128 = 9528
-constexpr int num_distinct_actions = action_move_warp_destination_start + GALAXY_CELL_COUNT; // 9528 + 225 = 9753
+constexpr Action action_upkeep_colony_done = action_move_warp_destination_start + GALAXY_CELL_COUNT; // 9753
+constexpr Action action_upkeep_pay_done = action_upkeep_colony_done + 1; // 9754
+constexpr int num_distinct_actions = action_upkeep_pay_done + 1; // 9755
 
 const GameType game_type{
     /*short_name=*/"eclipse",
@@ -237,6 +241,138 @@ bool HasLegalUpgradeChoice(const ::State& state, uint8_t player_id) {
   return false;
 }
 
+bool SectorHasOpponentShips(const ::State& state, uint8_t player_id,
+                            uint8_t galaxy_cell_idx) {
+  const HexCoord coord = index_to_hex(galaxy_cell_idx);
+  const Sector& sector = state.galaxy.at(coord.q, coord.r);
+  if (sector.sector_id == 0) return false;
+  for (const Unit& unit : state.unit_registry) {
+    if (unit.sector_id == sector.sector_id &&
+        unit.player_id != player_id &&
+        unit.player_id != NPC_PLAYER_ID) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void AppendLegalUpkeepColonyShipActions(const ::State& state, uint8_t player_id,
+                                        std::vector<Action>& actions) {
+  if (player_id >= state.players.size()) return;
+  const ::Player& player = state.players[player_id];
+  if (player.colony_ships_available == 0) return;
+
+  constexpr int max_sector_id = 512;
+  std::bitset<max_sector_id> sectors_with_opponent_player_ships;
+  for (const Unit& unit : state.unit_registry) {
+    if (unit.sector_id < max_sector_id && unit.player_id != player_id &&
+        unit.player_id != NPC_PLAYER_ID) {
+      sectors_with_opponent_player_ships.set(unit.sector_id);
+    }
+  }
+
+  for (int cell = 0; cell < GALAXY_CELL_COUNT; ++cell) {
+    const HexCoord coord = index_to_hex(cell);
+    const Sector& sector = state.galaxy.at(coord.q, coord.r);
+    if (sector.sector_id == 0 || sector.owner_id != player_id ||
+        sector.sector_id >= max_sector_id ||
+        sectors_with_opponent_player_ships.test(sector.sector_id)) {
+      continue;
+    }
+
+    const SectorDefinition* def = get_sector_definition(sector.sector_id);
+    if (!def) continue;
+    for (uint8_t slot = 0; slot < static_cast<uint8_t>(def->slots.size());
+         ++slot) {
+      for (uint8_t track_id = 0; track_id < POP_TRACK_COUNT; ++track_id) {
+        const PopTrack track = static_cast<PopTrack>(track_id);
+        if (can_use_colony_ship(state, player_id, static_cast<uint8_t>(cell),
+                                slot, track)) {
+          actions.push_back(action_colony_ship_start +
+                            cell * COLONY_SHIP_CODES_PER_CELL +
+                            slot * COLONY_SHIP_TRACKS +
+                            static_cast<int>(track));
+        }
+      }
+    }
+  }
+}
+
+void AppendReclaimActions(const ::State& state, uint8_t player_id,
+                          std::vector<Action>& actions) {
+  for (int cell = 0; cell < GALAXY_CELL_COUNT; ++cell) {
+    if (can_reclaim_from_sector(state, player_id, static_cast<uint8_t>(cell))) {
+      actions.push_back(action_reclaim_from_cell_start + cell);
+    }
+  }
+}
+
+bool HasReclaimableSector(const ::State& state, uint8_t player_id) {
+  for (int cell = 0; cell < GALAXY_CELL_COUNT; ++cell) {
+    if (can_reclaim_from_sector(state, player_id, static_cast<uint8_t>(cell))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool ProcessCurrentPendingReturnsAuto(::State& state) {
+  UpkeepState& us = state.upkeep_state;
+  if (us.player_id >= state.players.size()) return true;
+  ::Player& player = state.players[us.player_id];
+
+  while (!us.pending_returns.empty()) {
+    const PendingReturn pending = us.pending_returns.front();
+    if (pending_return_requires_choice(player, pending.type,
+                                       pending.is_orbital)) {
+      us.step = UpkeepState::Step::choose_return_track;
+      return false;
+    }
+    apply_return_to_track(player, get_matching_track(pending.type));
+    us.pending_returns.erase(us.pending_returns.begin());
+  }
+  return true;
+}
+
+void RemovePlayerFromBoard(::State& state, uint8_t player_id) {
+  for (int q = -GALAXY_RADIUS; q <= GALAXY_RADIUS; ++q) {
+    for (int r = -GALAXY_RADIUS; r <= GALAXY_RADIUS; ++r) {
+      Sector& sector = state.galaxy.at(q, r);
+      if (sector.owner_id == player_id) {
+        sector.owner_id = 255;
+        sector.occupied_slots_mask = 0;
+      }
+    }
+  }
+  FixedVector<Unit, 128> filtered_units;
+  for (const Unit& unit : state.unit_registry) {
+    if (unit.player_id != player_id) {
+      filtered_units.push_back(unit);
+    }
+  }
+  state.unit_registry = filtered_units;
+}
+
+void QueueCleanupGraveyardReturns(::State& state, uint8_t player_id) {
+  state.upkeep_state.pending_returns.clear();
+  if (player_id >= state.players.size()) return;
+  ::Player& player = state.players[player_id];
+  const size_t total_returns = player.graveyard_counts[0] +
+                               player.graveyard_counts[1] +
+                               player.graveyard_counts[2];
+  state.upkeep_state.pending_returns.resize(total_returns);
+  static const PlanetType kTrackTypes[3] = {
+      PlanetType::MONEY, PlanetType::SCIENCE, PlanetType::MATERIALS};
+  size_t pending_index = 0;
+  for (int track = 0; track < 3; ++track) {
+    while (player.graveyard_counts[track] > 0) {
+      state.upkeep_state.pending_returns[pending_index++] = {
+          kTrackTypes[track], false};
+      --player.graveyard_counts[track];
+    }
+  }
+}
+
 }  // namespace
 
 EclipseGame::EclipseGame(const GameParameters& params)
@@ -325,6 +461,9 @@ Player EclipseState::CurrentPlayer() const {
   if (pending_random_event_ != PendingRandomEvent::none) {
     return kChancePlayerId;
   }
+  if (eclipse_state_.upkeep_state.step != UpkeepState::Step::inactive) {
+    return eclipse_state_.upkeep_state.player_id;
+  }
   return eclipse_state_.current_player;
 }
 
@@ -372,7 +511,16 @@ std::vector<Action> EclipseState::LegalActions() const {
     return MoveLegalActions();
   }
 
+  if (s.upkeep_state.step != UpkeepState::Step::inactive) {
+    return UpkeepLegalActions();
+  }
+
   std::vector<Action> actions;
+
+  if (s.current_phase != RoundPhase::ACTION) {
+    return actions;
+  }
+
   actions.push_back(action_pass);
 
   uint8_t current_player = eclipse_state_.current_player;
@@ -395,7 +543,7 @@ std::vector<Action> EclipseState::LegalActions() const {
     if (has_action_disk && HasLegalUpgradeChoice(s, current_player)) {
       actions.push_back(action_upgrade);
     }
-    if (has_action_disk && !legal_move_steps(s, current_player).empty()) {
+    if (has_action_disk) {
       actions.push_back(action_move);
     }
 
@@ -670,6 +818,55 @@ std::vector<Action> EclipseState::MoveLegalActions() const {
   return actions;
 }
 
+std::vector<Action> EclipseState::UpkeepLegalActions() const {
+  const ::State& s = eclipse_state_;
+  const UpkeepState& us = s.upkeep_state;
+  std::vector<Action> actions;
+  if (us.player_id >= s.players.size()) return actions;
+
+  const ::Player& player = s.players[us.player_id];
+  switch (us.step) {
+    case UpkeepState::Step::colony_ships: {
+      AppendLegalUpkeepColonyShipActions(s, us.player_id, actions);
+      actions.push_back(action_upkeep_colony_done);
+      break;
+    }
+    case UpkeepState::Step::bankruptcy: {
+      if (IsPlayerSolvent(player)) {
+        actions.push_back(action_upkeep_pay_done);
+        break;
+      }
+      for (int conv = 0; conv < TRADE_CONVERSION_COUNT; ++conv) {
+        const TradeConversion trade = static_cast<TradeConversion>(conv);
+        if ((trade == TradeConversion::SCIENCE_TO_GOLD ||
+             trade == TradeConversion::MATERIALS_TO_GOLD) &&
+            can_trade(player, trade)) {
+          actions.push_back(action_trade_start + conv);
+        }
+      }
+      AppendReclaimActions(s, us.player_id, actions);
+      break;
+    }
+    case UpkeepState::Step::choose_return_track: {
+      if (!us.pending_returns.empty()) {
+        for (PopTrack track : get_legal_return_tracks(
+                 player, us.pending_returns.front().type,
+                 us.pending_returns.front().is_orbital)) {
+          actions.push_back(action_choose_return_track_start +
+                            static_cast<int>(track));
+        }
+      }
+      break;
+    }
+    case UpkeepState::Step::cleanup_graveyards:
+    case UpkeepState::Step::inactive:
+      break;
+  }
+
+  std::sort(actions.begin(), actions.end());
+  return actions;
+}
+
 std::string EclipseState::ActionToString(Player player, Action action_id) const {
   if (pending_random_event_ == PendingRandomEvent::explore_draw) {
     uint32_t bag = ring_bag_value(eclipse_state_, eclipse_state_.explore_state.ring);
@@ -790,7 +987,7 @@ std::string EclipseState::ActionToString(Player player, Action action_id) const 
   }
   if (action_id >= action_choose_return_track_start && action_id < action_choose_return_track_start + 3) {
     static const char* kTrackNames[3] = {"MONEY", "SCIENCE", "MATERIALS"};
-    return "RETURN_TO_" + std::string(kTrackNames[action_id - action_choose_return_track_start]);
+    return "RETURN_CUBE_TO_" + std::string(kTrackNames[action_id - action_choose_return_track_start]);
   }
   if (action_id == action_upgrade) {
     return "UPGRADE";
@@ -831,6 +1028,12 @@ std::string EclipseState::ActionToString(Player player, Action action_id) const 
     return "MOVE_UNIT_" + std::to_string(unit_idx) + "_" + kDirNames[direction];
   }
   if (action_id >= action_move_warp_destination_start && action_id < num_distinct_actions) {
+    if (action_id == action_upkeep_colony_done) {
+      return "UPKEEP_COLONY_DONE";
+    }
+    if (action_id == action_upkeep_pay_done) {
+      return "UPKEEP_PAY_DONE";
+    }
     HexCoord c = index_to_hex(action_id - action_move_warp_destination_start);
     return "MOVE_WARP_TO_" + std::to_string(c.q) + "_" + std::to_string(c.r);
   }
@@ -871,7 +1074,7 @@ std::string EclipseState::ToString() const {
 
 bool EclipseState::IsTerminal() const {
   return pending_random_event_ == PendingRandomEvent::none &&
-         eclipse_state_.current_round > 9;
+         eclipse_state_.current_round > 8;
 }
 
 std::vector<double> EclipseState::Returns() const {
@@ -942,6 +1145,12 @@ std::string EclipseState::ObservationString(Player player) const {
      << ", Money: " << static_cast<int>(me.resources.gold)
      << ", Science: " << static_cast<int>(me.resources.science)
      << ", Materials: " << static_cast<int>(me.resources.materials) << "\n";
+  const UpkeepState& us = eclipse_state_.upkeep_state;
+  if (us.step != UpkeepState::Step::inactive) {
+    ss << "Upkeep: step=" << nlohmann::json(us.step).get<std::string>()
+       << ", player=" << static_cast<int>(us.player_id)
+       << ", pending_returns=" << us.pending_returns.size() << "\n";
+  }
   ss << "Visible sectors owned by me or empty near me.\n";
 
   // The Explore sub-state is public once a tile is flipped, so report it to all.
@@ -1018,6 +1227,30 @@ void EclipseState::ObservationTensor(Player player, absl::Span<float> values) co
     values[61] = static_cast<float>(es.drawn_sector_ids[1]);
     values[62] = static_cast<float>(es.selected_sector_id);
     values[63] = static_cast<float>(es.chosen_rotation);
+  }
+
+  const UpkeepState& us = eclipse_state_.upkeep_state;
+  values[64] = us.step != UpkeepState::Step::inactive ? 1.0f : 0.0f;
+  values[65] = static_cast<float>(static_cast<int>(us.step));
+  values[66] = static_cast<float>(us.player_id);
+  values[67] = static_cast<float>(us.pending_returns.size());
+  if (!us.pending_returns.empty()) {
+    values[68] =
+        static_cast<float>(static_cast<int>(us.pending_returns.front().type));
+    values[69] = us.pending_returns.front().is_orbital ? 1.0f : 0.0f;
+  }
+  values[70] = static_cast<float>(me.graveyard_counts[0]);
+  values[71] = static_cast<float>(me.graveyard_counts[1]);
+  values[72] = static_cast<float>(me.graveyard_counts[2]);
+  values[73] = me.eliminated ? 1.0f : 0.0f;
+  values[74] = static_cast<float>(
+      me.colony_ships_total - me.colony_ships_available);
+  values[75] = static_cast<float>(me.available_influence_discs());
+  if (us.player_id < eclipse_state_.players.size()) {
+    const ::Player& upkeep_player = eclipse_state_.players[us.player_id];
+    values[76] = IsPlayerSolvent(upkeep_player) ? 1.0f : 0.0f;
+    values[77] = static_cast<float>(PlayerIncome(upkeep_player));
+    values[78] = static_cast<float>(PlayerUpkeepCost(upkeep_player));
   }
 }
 
@@ -1264,6 +1497,273 @@ void EclipseState::ApplyMoveSubAction(Action action_id) {
   }
 }
 
+void EclipseState::BeginUpkeep() {
+  eclipse_state_.current_phase = RoundPhase::UPKEEP;
+  eclipse_state_.upkeep_state = UpkeepState{};
+  eclipse_state_.upkeep_state.player_id =
+      FirstActivePlayerInTurnOrder(eclipse_state_, NumPlayers());
+  if (eclipse_state_.upkeep_state.player_id != 255) {
+    eclipse_state_.upkeep_state.step = UpkeepState::Step::colony_ships;
+    AdvanceUpkeepState();
+    return;
+  }
+  BeginCleanup();
+}
+
+void EclipseState::BeginCleanup() {
+  eclipse_state_.current_phase = RoundPhase::CLEANUP;
+  eclipse_state_.upkeep_state = UpkeepState{};
+  for (auto& player : eclipse_state_.players) {
+    player.disks_on_actions = 0;
+  }
+
+  DrawCleanupTechTiles(eclipse_state_, setup_config_.players);
+
+  eclipse_state_.upkeep_state.player_id =
+      FirstActivePlayerInTurnOrder(eclipse_state_, NumPlayers());
+  if (eclipse_state_.upkeep_state.player_id != 255) {
+    eclipse_state_.upkeep_state.step = UpkeepState::Step::cleanup_graveyards;
+    QueueCleanupGraveyardReturns(eclipse_state_,
+                                 eclipse_state_.upkeep_state.player_id);
+    AdvanceCleanupState();
+    return;
+  }
+  FinishCleanup();
+}
+
+void EclipseState::FinishCleanup() {
+  for (auto& player : eclipse_state_.players) {
+    if (player.eliminated) continue;
+    player.has_passed = false;
+    player.colony_ships_available = player.colony_ships_total;
+  }
+
+  uint8_t next_start = 255;
+  for (uint8_t player_id : eclipse_state_.pass_order) {
+    if (player_id < eclipse_state_.players.size() &&
+        !eclipse_state_.players[player_id].eliminated) {
+      next_start = player_id;
+      break;
+    }
+  }
+  if (next_start != 255) {
+    std::vector<uint8_t> reordered;
+    reordered.reserve(NumPlayers());
+    int start_index = 0;
+    for (int i = 0; i < NumPlayers(); ++i) {
+      if (eclipse_state_.turn_order[i] == next_start) {
+        start_index = i;
+        break;
+      }
+    }
+    for (int step = 0; step < NumPlayers(); ++step) {
+      reordered.push_back(
+          eclipse_state_.turn_order[(start_index + step) % NumPlayers()]);
+    }
+    for (int i = 0; i < MAX_PLAYERS; ++i) {
+      eclipse_state_.turn_order[i] =
+          i < reordered.size() ? reordered[i] : static_cast<uint8_t>(255);
+    }
+  }
+
+  eclipse_state_.pass_order.clear();
+  eclipse_state_.upkeep_state = UpkeepState{};
+  if (eclipse_state_.current_round >= 8) {
+    eclipse_state_.current_round = 9;
+    eclipse_state_.current_player = 255;
+    return;
+  }
+
+  eclipse_state_.current_phase = RoundPhase::ACTION;
+  eclipse_state_.current_round += 1;
+  eclipse_state_.current_player = eclipse_state_.turn_order[0];
+}
+
+void EclipseState::AdvanceUpkeepState() {
+  while (eclipse_state_.upkeep_state.player_id < eclipse_state_.players.size()) {
+    const uint8_t player_id = eclipse_state_.upkeep_state.player_id;
+    ::Player& player = eclipse_state_.players[player_id];
+    if (player.eliminated) {
+      const uint8_t next_player =
+          NextActivePlayerInTurnOrder(eclipse_state_, player_id, NumPlayers());
+      if (next_player == 255) {
+        BeginCleanup();
+        return;
+      }
+      eclipse_state_.upkeep_state.player_id = next_player;
+      eclipse_state_.upkeep_state.step = UpkeepState::Step::colony_ships;
+      eclipse_state_.upkeep_state.pending_returns.clear();
+      continue;
+    }
+
+    if (eclipse_state_.upkeep_state.step == UpkeepState::Step::choose_return_track) {
+      return;
+    }
+    if (eclipse_state_.upkeep_state.step == UpkeepState::Step::colony_ships) {
+      return;
+    }
+    if (eclipse_state_.upkeep_state.step == UpkeepState::Step::bankruptcy) {
+      if (IsPlayerSolvent(player)) {
+        return;
+      }
+      bool has_option = can_trade(player, TradeConversion::SCIENCE_TO_GOLD) ||
+                        can_trade(player, TradeConversion::MATERIALS_TO_GOLD);
+      if (!has_option) {
+        has_option = HasReclaimableSector(eclipse_state_, player_id);
+      }
+      if (has_option) {
+        return;
+      }
+
+      player.eliminated = true;
+      player.has_passed = true;
+      RemovePlayerFromBoard(eclipse_state_, player_id);
+    }
+
+    const uint8_t next_player =
+        NextActivePlayerInTurnOrder(eclipse_state_, player_id, NumPlayers());
+    if (next_player != 255) {
+      eclipse_state_.upkeep_state.player_id = next_player;
+      eclipse_state_.upkeep_state.step = UpkeepState::Step::colony_ships;
+      eclipse_state_.upkeep_state.pending_returns.clear();
+      continue;
+    }
+    BeginCleanup();
+    return;
+  }
+  BeginCleanup();
+}
+
+void EclipseState::AdvancePastCurrentUpkeepPlayer() {
+  const uint8_t player_id = eclipse_state_.upkeep_state.player_id;
+  const uint8_t next_player =
+      NextActivePlayerInTurnOrder(eclipse_state_, player_id, NumPlayers());
+  if (next_player != 255) {
+    eclipse_state_.upkeep_state.player_id = next_player;
+    eclipse_state_.upkeep_state.step = UpkeepState::Step::colony_ships;
+    eclipse_state_.upkeep_state.pending_returns.clear();
+    AdvanceUpkeepState();
+  } else {
+    BeginCleanup();
+  }
+}
+
+void EclipseState::AdvanceCleanupState() {
+  while (eclipse_state_.upkeep_state.player_id < eclipse_state_.players.size()) {
+    const uint8_t player_id = eclipse_state_.upkeep_state.player_id;
+    if (eclipse_state_.upkeep_state.step == UpkeepState::Step::choose_return_track) {
+      return;
+    }
+
+    if (eclipse_state_.upkeep_state.pending_returns.empty()) {
+      const uint8_t next_player =
+          NextActivePlayerInTurnOrder(eclipse_state_, player_id, NumPlayers());
+      if (next_player != 255) {
+        eclipse_state_.upkeep_state.player_id = next_player;
+        eclipse_state_.upkeep_state.step = UpkeepState::Step::cleanup_graveyards;
+        QueueCleanupGraveyardReturns(eclipse_state_, next_player);
+        continue;
+      }
+      FinishCleanup();
+      return;
+    }
+
+    if (!ProcessCurrentPendingReturnsAuto(eclipse_state_)) {
+      return;
+    }
+  }
+  FinishCleanup();
+}
+
+void EclipseState::ApplyUpkeepAction(Action action_id) {
+  UpkeepState& us = eclipse_state_.upkeep_state;
+  const uint8_t player_id = us.player_id;
+  ::Player& player = eclipse_state_.players[player_id];
+
+  if (us.step == UpkeepState::Step::colony_ships) {
+    if (action_id == action_upkeep_colony_done) {
+      us.step = UpkeepState::Step::bankruptcy;
+      AdvanceUpkeepState();
+      return;
+    }
+    if (action_id >= action_colony_ship_start && action_id < action_influence_start) {
+      int encoded = static_cast<int>(action_id - action_colony_ship_start);
+      int cell = encoded / COLONY_SHIP_CODES_PER_CELL;
+      int rem = encoded % COLONY_SHIP_CODES_PER_CELL;
+      SPIEL_CHECK_TRUE(!SectorHasOpponentShips(eclipse_state_, player_id,
+                                               static_cast<uint8_t>(cell)));
+      SPIEL_CHECK_TRUE(use_colony_ship(
+          eclipse_state_, player_id, static_cast<uint8_t>(cell),
+          static_cast<uint8_t>(rem / COLONY_SHIP_TRACKS),
+          static_cast<PopTrack>(rem % COLONY_SHIP_TRACKS)));
+      return;
+    }
+  }
+
+  if (us.step == UpkeepState::Step::bankruptcy) {
+    if (action_id == action_upkeep_pay_done) {
+      player.resources.gold = static_cast<uint8_t>(
+          static_cast<int>(player.resources.gold) + PlayerIncome(player) -
+          PlayerUpkeepCost(player));
+      player.resources.materials = static_cast<uint8_t>(
+          static_cast<int>(player.resources.materials) +
+          PlayerMaterialsProduction(player));
+      player.resources.science = static_cast<uint8_t>(
+          static_cast<int>(player.resources.science) +
+          PlayerScienceProduction(player));
+      AdvancePastCurrentUpkeepPlayer();
+      return;
+    }
+    if (action_id >= action_trade_start && action_id < action_colony_ship_start) {
+      SPIEL_CHECK_TRUE(execute_trade(
+          eclipse_state_, player_id,
+          static_cast<TradeConversion>(action_id - action_trade_start)));
+      AdvanceUpkeepState();
+      return;
+    }
+    if (action_id >= action_reclaim_from_cell_start &&
+        action_id < action_choose_return_track_start) {
+      std::vector<PendingReturn> pending_returns;
+      const uint8_t cell_idx =
+          static_cast<uint8_t>(action_id - action_reclaim_from_cell_start);
+      SPIEL_CHECK_TRUE(
+          abandon_sector(eclipse_state_, player_id, cell_idx, &pending_returns));
+      us.pending_returns = std::move(pending_returns);
+      if (!ProcessCurrentPendingReturnsAuto(eclipse_state_)) {
+        return;
+      }
+      AdvanceUpkeepState();
+      return;
+    }
+  }
+
+  if (us.step == UpkeepState::Step::choose_return_track) {
+    if (action_id >= action_choose_return_track_start &&
+        action_id < action_choose_return_track_start + 3 &&
+        !us.pending_returns.empty()) {
+      const PopTrack track = static_cast<PopTrack>(
+          action_id - action_choose_return_track_start);
+      const std::vector<PopTrack> legal = get_legal_return_tracks(
+          player, us.pending_returns.front().type, us.pending_returns.front().is_orbital);
+      SPIEL_CHECK_TRUE(std::find(legal.begin(), legal.end(), track) != legal.end());
+      apply_return_to_track(player, track);
+      us.pending_returns.erase(us.pending_returns.begin());
+      us.step = eclipse_state_.current_phase == RoundPhase::UPKEEP
+                    ? UpkeepState::Step::bankruptcy
+                    : UpkeepState::Step::cleanup_graveyards;
+      if (eclipse_state_.current_phase == RoundPhase::UPKEEP) {
+        if (!ProcessCurrentPendingReturnsAuto(eclipse_state_)) {
+          return;
+        }
+        AdvanceUpkeepState();
+      } else {
+        AdvanceCleanupState();
+      }
+      return;
+    }
+  }
+}
+
 void EclipseState::DoApplyAction(Action action_id) {
   if (pending_random_event_ != PendingRandomEvent::none) {
     bool was_explore_draw =
@@ -1351,11 +1851,24 @@ void EclipseState::DoApplyAction(Action action_id) {
     return;
   }
 
+  if (eclipse_state_.upkeep_state.step != UpkeepState::Step::inactive) {
+    ApplyUpkeepAction(action_id);
+    return;
+  }
+
   uint8_t current_player = eclipse_state_.current_player;
 
   if (action_id == action_pass) {
     if (current_player < eclipse_state_.players.size()) {
-      eclipse_state_.players[current_player].has_passed = true;
+      ::Player& player = eclipse_state_.players[current_player];
+      if (!player.has_passed) {
+        player.has_passed = true;
+        eclipse_state_.pass_order.push_back(current_player);
+        if (eclipse_state_.pass_order.size() == 1) {
+          player.resources.gold = static_cast<uint8_t>(
+              static_cast<int>(player.resources.gold) + 2);
+        }
+      }
     }
   } else if (action_id == action_explore) {
     if (current_player < eclipse_state_.players.size()) {
@@ -1462,21 +1975,14 @@ void EclipseState::AdvanceTurn() {
 
   bool all_passed = true;
   for (const auto& player : eclipse_state_.players) {
-    if (!player.has_passed) {
+    if (!player.eliminated && !player.has_passed) {
       all_passed = false;
       break;
     }
   }
 
   if (all_passed) {
-    eclipse_state_.current_round += 1;
-    if (eclipse_state_.current_round <= 9) {
-      for (auto& player : eclipse_state_.players) {
-        player.has_passed = false;
-        player.disks_on_actions = 0;
-      }
-      eclipse_state_.current_player = eclipse_state_.turn_order[0];
-    }
+    BeginUpkeep();
     return;
   }
 
@@ -1493,6 +1999,7 @@ void EclipseState::AdvanceTurn() {
     const int next_index = (current_index + step) % num_players;
     const uint8_t next_player_id = eclipse_state_.turn_order[next_index];
     if (next_player_id < eclipse_state_.players.size() &&
+        !eclipse_state_.players[next_player_id].eliminated &&
         !eclipse_state_.players[next_player_id].has_passed) {
       eclipse_state_.current_player = next_player_id;
       return;

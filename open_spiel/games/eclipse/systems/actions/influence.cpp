@@ -103,103 +103,22 @@ namespace open_spiel::eclipse
             }
         }
 
-        PopTrack get_matching_track(PlanetType type)
-        {
-            if (type == PlanetType::SCIENCE || type == PlanetType::ADV_SCIENCE)
-            {
-                return PopTrack::SCIENCE;
-            }
-            if (type == PlanetType::MATERIALS || type == PlanetType::ADV_MATERIALS)
-            {
-                return PopTrack::MATERIALS;
-            }
-            return PopTrack::MONEY;
-        }
-
-        bool return_requires_choice(const Player& player, PlanetType type, bool is_orbital)
-        {
-            if (is_orbital) return true;
-            if (type == PlanetType::ANY || type == PlanetType::ADV_ANY) return true;
-
-            PopTrack matching = get_matching_track(type);
-            uint8_t current_val = 0;
-            if (matching == PopTrack::MONEY) current_val = player.resources.gold_prod;
-            else if (matching == PopTrack::SCIENCE) current_val = player.resources.science_prod;
-            else current_val = player.resources.materials_prod;
-
-            return (current_val >= 12);
-        }
-
-        std::vector<PopTrack> get_legal_return_tracks(const Player& player, PlanetType type, bool is_orbital)
-        {
-            std::vector<PopTrack> tracks;
-
-            if (is_orbital)
-            {
-                if (player.resources.gold_prod < 12) {
-                    tracks.push_back(PopTrack::MONEY);
-                }
-                if (player.resources.science_prod < 12) {
-                    tracks.push_back(PopTrack::SCIENCE);
-                }
-                if (tracks.empty() && player.resources.materials_prod < 12) {
-                    tracks.push_back(PopTrack::MATERIALS);
-                }
-                return tracks;
-            }
-
-            if (type == PlanetType::ANY || type == PlanetType::ADV_ANY)
-            {
-                if (player.resources.gold_prod < 12) tracks.push_back(PopTrack::MONEY);
-                if (player.resources.science_prod < 12) tracks.push_back(PopTrack::SCIENCE);
-                if (player.resources.materials_prod < 12) tracks.push_back(PopTrack::MATERIALS);
-                return tracks;
-            }
-
-            PopTrack matching = get_matching_track(type);
-            uint8_t current_val = 0;
-            if (matching == PopTrack::MONEY) current_val = player.resources.gold_prod;
-            else if (matching == PopTrack::SCIENCE) current_val = player.resources.science_prod;
-            else current_val = player.resources.materials_prod;
-
-            if (current_val < 12)
-            {
-                tracks.push_back(matching);
-            }
-            else
-            {
-                if (matching != PopTrack::MONEY && player.resources.gold_prod < 12) {
-                    tracks.push_back(PopTrack::MONEY);
-                }
-                if (matching != PopTrack::SCIENCE && player.resources.science_prod < 12) {
-                    tracks.push_back(PopTrack::SCIENCE);
-                }
-                if (matching != PopTrack::MATERIALS && player.resources.materials_prod < 12) {
-                    tracks.push_back(PopTrack::MATERIALS);
-                }
-            }
-            return tracks;
-        }
-
         void process_pending_returns(::State& state)
         {
             InfluenceState& is = state.influence_state;
-            Player& player = state.players[is.player_id];
+            ::Player& player = state.players[is.player_id];
 
             while (!is.pending_returns.empty())
             {
                 const auto& pending = is.pending_returns.front();
 
-                if (return_requires_choice(player, pending.type, pending.is_orbital))
+                if (pending_return_requires_choice(player, pending.type, pending.is_orbital))
                 {
                     is.phase = InfluenceState::Phase::choose_return_track;
                     return;
                 }
 
-                PopTrack matching = get_matching_track(pending.type);
-                if (matching == PopTrack::SCIENCE) player.resources.science_prod++;
-                else if (matching == PopTrack::MATERIALS) player.resources.materials_prod++;
-                else player.resources.gold_prod++;
+                apply_return_to_track(player, get_matching_track(pending.type));
 
                 is.pending_returns.erase(is.pending_returns.begin());
             }
@@ -209,10 +128,150 @@ namespace open_spiel::eclipse
 
     } // namespace
 
+    PopTrack get_matching_track(PlanetType type)
+    {
+        if (type == PlanetType::SCIENCE || type == PlanetType::ADV_SCIENCE)
+        {
+            return PopTrack::SCIENCE;
+        }
+        if (type == PlanetType::MATERIALS || type == PlanetType::ADV_MATERIALS)
+        {
+            return PopTrack::MATERIALS;
+        }
+        return PopTrack::MONEY;
+    }
+
+    bool pending_return_requires_choice(const ::Player& player, PlanetType type, bool is_orbital)
+    {
+        if (is_orbital) return true;
+        if (type == PlanetType::ANY || type == PlanetType::ADV_ANY) return true;
+
+        PopTrack matching = get_matching_track(type);
+        uint8_t current_val = 0;
+        if (matching == PopTrack::MONEY) current_val = player.resources.gold_prod;
+        else if (matching == PopTrack::SCIENCE) current_val = player.resources.science_prod;
+        else current_val = player.resources.materials_prod;
+
+        return current_val >= 12;
+    }
+
+    std::vector<PopTrack> get_legal_return_tracks(const ::Player& player, PlanetType type, bool is_orbital)
+    {
+        std::vector<PopTrack> tracks;
+
+        if (is_orbital)
+        {
+            if (player.resources.gold_prod < 12) {
+                tracks.push_back(PopTrack::MONEY);
+            }
+            if (player.resources.science_prod < 12) {
+                tracks.push_back(PopTrack::SCIENCE);
+            }
+            if (tracks.empty() && player.resources.materials_prod < 12) {
+                tracks.push_back(PopTrack::MATERIALS);
+            }
+            return tracks;
+        }
+
+        if (type == PlanetType::ANY || type == PlanetType::ADV_ANY)
+        {
+            if (player.resources.gold_prod < 12) tracks.push_back(PopTrack::MONEY);
+            if (player.resources.science_prod < 12) tracks.push_back(PopTrack::SCIENCE);
+            if (player.resources.materials_prod < 12) tracks.push_back(PopTrack::MATERIALS);
+            return tracks;
+        }
+
+        PopTrack matching = get_matching_track(type);
+        uint8_t current_val = 0;
+        if (matching == PopTrack::MONEY) current_val = player.resources.gold_prod;
+        else if (matching == PopTrack::SCIENCE) current_val = player.resources.science_prod;
+        else current_val = player.resources.materials_prod;
+
+        if (current_val < 12)
+        {
+            tracks.push_back(matching);
+        }
+        else
+        {
+            if (matching != PopTrack::MONEY && player.resources.gold_prod < 12) {
+                tracks.push_back(PopTrack::MONEY);
+            }
+            if (matching != PopTrack::SCIENCE && player.resources.science_prod < 12) {
+                tracks.push_back(PopTrack::SCIENCE);
+            }
+            if (matching != PopTrack::MATERIALS && player.resources.materials_prod < 12) {
+                tracks.push_back(PopTrack::MATERIALS);
+            }
+        }
+        return tracks;
+    }
+
+    void apply_return_to_track(::Player& player, PopTrack track)
+    {
+        if (track == PopTrack::SCIENCE) player.resources.science_prod++;
+        else if (track == PopTrack::MATERIALS) player.resources.materials_prod++;
+        else player.resources.gold_prod++;
+    }
+
+    std::vector<PendingReturn> collect_sector_population_returns(
+        const ::State& state, uint8_t galaxy_cell_idx)
+    {
+        std::vector<PendingReturn> pending_returns;
+
+        HexCoord coord = index_to_hex(galaxy_cell_idx);
+        const Sector& sector = state.galaxy.at(coord.q, coord.r);
+        const SectorDefinition* def = get_sector_definition(sector.sector_id);
+        if (!def) {
+            return pending_returns;
+        }
+
+        for (size_t i = 0; i < def->slots.size(); ++i)
+        {
+            if ((sector.occupied_slots_mask >> i) & 1u)
+            {
+                pending_returns.push_back({def->slots[i].type, false});
+            }
+        }
+        if (sector.orbital_built)
+        {
+            size_t orbital_slot_idx = def->slots.size();
+            if ((sector.occupied_slots_mask >> orbital_slot_idx) & 1u)
+            {
+                pending_returns.push_back({PlanetType::MONEY, true});
+            }
+        }
+
+        return pending_returns;
+    }
+
+    bool abandon_sector(::State& state, uint8_t player_id, uint8_t galaxy_cell_idx,
+                        std::vector<PendingReturn>* pending_returns)
+    {
+        if (!can_reclaim_from_sector(state, player_id, galaxy_cell_idx)) return false;
+
+        ::Player& player = state.players[player_id];
+        HexCoord coord = index_to_hex(galaxy_cell_idx);
+        Sector& sector = state.galaxy.at(coord.q, coord.r);
+
+        sector.owner_id = 255;
+        if (player.disks_on_sectors > 0)
+        {
+            player.disks_on_sectors--;
+        }
+
+        if (pending_returns != nullptr)
+        {
+            *pending_returns = collect_sector_population_returns(state, galaxy_cell_idx);
+        }
+
+        sector.occupied_slots_mask = 0;
+        return true;
+    }
+
     bool can_influence_to_sector(const ::State& state, uint8_t player_id, uint8_t galaxy_cell_idx)
     {
         if (player_id >= state.players.size()) return false;
-        const Player& player = state.players[player_id];
+        const ::Player& player = state.players[player_id];
         // Must have discs available on your internal sheet tracker track
         if (player.available_influence_discs() == 0) return false;
 
@@ -269,7 +328,7 @@ namespace open_spiel::eclipse
     {
         if (!can_influence_to_sector(state, player_id, galaxy_cell_idx)) return false;
 
-        Player& player = state.players[player_id];
+        ::Player& player = state.players[player_id];
         HexCoord coord = index_to_hex(galaxy_cell_idx);
         Sector& sector = state.galaxy.at(coord.q, coord.r);
 
@@ -283,48 +342,11 @@ namespace open_spiel::eclipse
 
     bool execute_reclaim_from_sector(::State& state, uint8_t player_id, uint8_t galaxy_cell_idx)
     {
-        if (!can_reclaim_from_sector(state, player_id, galaxy_cell_idx)) return false;
-
-        Player& player = state.players[player_id];
-        HexCoord coord = index_to_hex(galaxy_cell_idx);
-        Sector& sector = state.galaxy.at(coord.q, coord.r);
-
-        // Lift ownership disc and return to your track pool
-        sector.owner_id = 255;
-        if (player.disks_on_sectors > 0)
-        {
-            player.disks_on_sectors--;
-        }
-
-        // Rule requirement: Removing an influence disc forces ALL population cubes
-        // off that sector back onto the player track architecture
-        const SectorDefinition* def = get_sector_definition(sector.sector_id);
+        std::vector<PendingReturn> pending_returns;
+        if (!abandon_sector(state, player_id, galaxy_cell_idx, &pending_returns)) return false;
 
         state.influence_state.player_id = player_id;
-        state.influence_state.pending_returns.clear();
-
-        if (def)
-        {
-            for (size_t i = 0; i < def->slots.size(); ++i)
-            {
-                // Check if slot bit is flagged occupied inside the mask bitset
-                if ((sector.occupied_slots_mask >> i) & 1u)
-                {
-                    state.influence_state.pending_returns.push_back({def->slots[i].type, false});
-                }
-            }
-            if (sector.orbital_built)
-            {
-                size_t orbital_slot_idx = def->slots.size();
-                if ((sector.occupied_slots_mask >> orbital_slot_idx) & 1u)
-                {
-                    state.influence_state.pending_returns.push_back({PlanetType::MONEY, true}); // Orbital cube
-                }
-            }
-        }
-
-        // Reset occupancy status of the vacated tile slots
-        sector.occupied_slots_mask = 0;
+        state.influence_state.pending_returns = std::move(pending_returns);
 
         // Process the queued returns
         process_pending_returns(state);
@@ -343,7 +365,7 @@ namespace open_spiel::eclipse
             return false;
         }
 
-        Player& player = state.players[player_id];
+        ::Player& player = state.players[player_id];
         const auto& pending = is.pending_returns.front();
         auto track = static_cast<PopTrack>(track_code);
 
@@ -364,9 +386,7 @@ namespace open_spiel::eclipse
         }
 
         // Apply choice
-        if (track == PopTrack::SCIENCE) player.resources.science_prod++;
-        else if (track == PopTrack::MATERIALS) player.resources.materials_prod++;
-        else player.resources.gold_prod++;
+        apply_return_to_track(player, track);
 
         // Remove the pending return
         is.pending_returns.erase(is.pending_returns.begin());
@@ -383,7 +403,7 @@ namespace open_spiel::eclipse
         {
             return {};
         }
-        const Player& player = state.players[is.player_id];
+        const ::Player& player = state.players[is.player_id];
         const auto& [type, is_orbital] = is.pending_returns.front();
         const std::vector<PopTrack> tracks = get_legal_return_tracks(player, type, is_orbital);
         std::vector<uint8_t> result;

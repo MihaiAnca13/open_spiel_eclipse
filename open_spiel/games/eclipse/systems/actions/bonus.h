@@ -27,7 +27,7 @@ enum class TradeConversion : uint8_t {
 
 constexpr int TRADE_CONVERSION_COUNT = 6;
 
-bool can_trade(const Player& player, TradeConversion conv);
+bool can_trade(const ::Player& player, TradeConversion conv);
 bool execute_trade(State& state, uint8_t player_id, TradeConversion conv);
 
 // ── Colony Ships ──────────────────────────────────────────────────────────────
@@ -54,7 +54,7 @@ bool use_colony_ship(State& state, uint8_t player_id,
                      PopTrack track);
 
 // Flip up to `count` facedown colony ships faceup (called by Influence action).
-void refresh_colony_ships(Player& player, uint8_t count = 2);
+void refresh_colony_ships(::Player& player, uint8_t count = 2);
 
 struct ColonyPlacement {
     uint8_t cell;

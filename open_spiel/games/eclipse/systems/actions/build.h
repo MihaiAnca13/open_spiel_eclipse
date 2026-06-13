@@ -46,7 +46,7 @@ namespace open_spiel::eclipse
     constexpr int BUILD_TYPE_COUNT = 6;
 
     // Returns the material cost for the specific construct adjusted for species rules.
-    uint8_t calculate_build_cost(const Player& player, BuildType type);
+    uint8_t calculate_build_cost(const ::Player& player, BuildType type);
 
     // Validates whether a player can execute a specific build action at a target galaxy cell hex.
     bool can_build(const ::State& state, uint8_t player_id, BuildType type, uint8_t galaxy_cell_idx);

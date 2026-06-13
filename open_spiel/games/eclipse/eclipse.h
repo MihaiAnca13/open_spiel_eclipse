@@ -93,13 +93,21 @@ class EclipseState : public State {
   std::vector<Action> BuildLegalActions() const;
   std::vector<Action> UpgradeLegalActions() const;
   std::vector<Action> MoveLegalActions() const;
+  std::vector<Action> UpkeepLegalActions() const;
   void ApplyExploreSubAction(Action action_id);
   void ApplyResearchSubAction(Action action_id);
   void ApplyInfluenceSubAction(Action action_id);
   void ApplyBuildSubAction(Action action_id);
   void ApplyUpgradeSubAction(Action action_id);
   void ApplyMoveSubAction(Action action_id);
+  void ApplyUpkeepAction(Action action_id);
   void AdvanceTurn();
+  void BeginUpkeep();
+  void BeginCleanup();
+  void AdvanceUpkeepState();
+  void AdvancePastCurrentUpkeepPlayer();
+  void AdvanceCleanupState();
+  void FinishCleanup();
 
   ::State eclipse_state_;
   SetupConfig setup_config_;
