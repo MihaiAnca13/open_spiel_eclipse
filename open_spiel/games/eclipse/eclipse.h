@@ -55,6 +55,7 @@ class EclipseState : public State {
     explore_draw = 2,
     discovery_draw = 3,
     combat_roll = 4,
+    reputation_draw = 5,
   };
 
   explicit EclipseState(std::shared_ptr<const Game> game);
@@ -94,6 +95,7 @@ class EclipseState : public State {
   std::vector<Action> UpgradeLegalActions() const;
   std::vector<Action> MoveLegalActions() const;
   std::vector<Action> UpkeepLegalActions() const;
+  std::vector<Action> CombatLegalActions() const;
   void ApplyExploreSubAction(Action action_id);
   void ApplyResearchSubAction(Action action_id);
   void ApplyInfluenceSubAction(Action action_id);
@@ -101,8 +103,16 @@ class EclipseState : public State {
   void ApplyUpgradeSubAction(Action action_id);
   void ApplyMoveSubAction(Action action_id);
   void ApplyUpkeepAction(Action action_id);
+  void ApplyCombatSubAction(Action action_id);
   void AdvanceTurn();
   void BeginUpkeep();
+  void BeginCombat();
+  // Drive the combat state machine forward until it needs a chance roll
+  // (arming pending_random_event_), a player decision, or completes. Called
+  // after BeginCombat, after each combat sub-action, and after each combat
+  // chance outcome is resolved.
+  void DriveCombat();
+  void FinishCombat();
   void BeginCleanup();
   void AdvanceUpkeepState();
   void AdvancePastCurrentUpkeepPlayer();

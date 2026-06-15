@@ -9,10 +9,11 @@
 #include <vector>
 #include <nlohmann/json.hpp>
 
+#include "../../types.h"
+
 // Forward declarations to avoid circular dependency
 struct State;
 struct Player;
-enum class ShipType;
 
 // Sub-state machine driving multi-activation move actions.
 // Each activation moves one ship up to its Movement Value, one hex per step,

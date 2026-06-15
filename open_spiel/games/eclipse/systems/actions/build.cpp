@@ -158,16 +158,16 @@ namespace open_spiel::eclipse
             sector.monolith_built = true;
             break;
         case BuildType::INTERCEPTOR:
-            state.unit_registry.push_back(Unit{player_id, ShipType::INTERCEPTOR, sector.sector_id, 0});
+            state.unit_registry.push_back(Unit{player_id, ShipType::INTERCEPTOR, sector.sector_id, 0, state.AllocateArrivalOrder()});
             break;
         case BuildType::CRUISER:
-            state.unit_registry.push_back(Unit{player_id, ShipType::CRUISER, sector.sector_id, 0});
+            state.unit_registry.push_back(Unit{player_id, ShipType::CRUISER, sector.sector_id, 0, state.AllocateArrivalOrder()});
             break;
         case BuildType::DREADNOUGHT:
-            state.unit_registry.push_back(Unit{player_id, ShipType::DREADNOUGHT, sector.sector_id, 0});
+            state.unit_registry.push_back(Unit{player_id, ShipType::DREADNOUGHT, sector.sector_id, 0, state.AllocateArrivalOrder()});
             break;
         case BuildType::STARBASE:
-            state.unit_registry.push_back(Unit{player_id, ShipType::STARBASE, sector.sector_id, 0});
+            state.unit_registry.push_back(Unit{player_id, ShipType::STARBASE, sector.sector_id, 0, state.AllocateArrivalOrder()});
             break;
         }
 

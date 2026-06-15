@@ -194,14 +194,19 @@ void ResolveInitialSetupRandomness(std::mt19937_64& rng,
         .points = 4,
         .occupied_slots_mask = 0,
         .discovery_tile_present = true,
+        .discovery_tile = state.discovery_bag.empty()
+            ? DiscoveryBit::NONE
+            : state.discovery_bag.back(),
         .orbital_built = false,
         .monolith_built = false,
     };
+    if (!state.discovery_bag.empty()) state.discovery_bag.pop_back();
     state.unit_registry.push_back(Unit{
         .player_id = NPC_PLAYER_ID,
         .type = ShipType::GCDS,
         .sector_id = 1,
         .damage = 0,
+        .arrival_order = state.AllocateArrivalOrder(),
     });
 
     const auto guardian_positions = GuardianPositionIndices(config.players);
@@ -224,14 +229,19 @@ void ResolveInitialSetupRandomness(std::mt19937_64& rng,
                 .points = sector_def ? sector_def->points : static_cast<uint8_t>(2),
                 .occupied_slots_mask = 0,
                 .discovery_tile_present = true,
+                .discovery_tile = state.discovery_bag.empty()
+                    ? DiscoveryBit::NONE
+                    : state.discovery_bag.back(),
                 .orbital_built = false,
                 .monolith_built = false,
             };
+            if (!state.discovery_bag.empty()) state.discovery_bag.pop_back();
             state.unit_registry.push_back(Unit{
                 .player_id = NPC_PLAYER_ID,
                 .type = ShipType::GUARDIAN,
                 .sector_id = sector_id,
                 .damage = 0,
+                .arrival_order = state.AllocateArrivalOrder(),
             });
         }
     }
@@ -440,6 +450,7 @@ void FinalizeGameSetup(State& state,
             .type = starting_ship,
             .sector_id = start_sector_id,
             .damage = 0,
+            .arrival_order = state.AllocateArrivalOrder(),
         });
     }
 }

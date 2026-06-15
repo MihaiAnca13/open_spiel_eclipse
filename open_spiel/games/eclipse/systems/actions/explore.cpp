@@ -393,6 +393,12 @@ bool apply_explore_rotation(State& state, uint8_t player_id, uint8_t rotation) {
     cell.points = def->points;
     cell.occupied_slots_mask = 0;
     cell.discovery_tile_present = def->start_with_discovery;
+    if (cell.discovery_tile_present && !state.discovery_bag.empty()) {
+        cell.discovery_tile = state.discovery_bag.back();
+        state.discovery_bag.pop_back();
+    } else {
+        cell.discovery_tile = DiscoveryBit::NONE;
+    }
     cell.orbital_built = false;
     cell.monolith_built = false;
 
@@ -402,6 +408,7 @@ bool apply_explore_rotation(State& state, uint8_t player_id, uint8_t rotation) {
             .type = ShipType::ANCIENT,
             .sector_id = es.selected_sector_id,
             .damage = 0,
+            .arrival_order = state.AllocateArrivalOrder(),
         });
     }
 
@@ -442,13 +449,15 @@ bool resolve_explore_discovery(State& state, uint8_t player_id, bool take_reward
 
     Sector& cell = state.galaxy.at(es.zone_q, es.zone_r);
     if (take_reward) {
-        // Draw a discovery tile from the bag
-        if (state.discovery_bag.empty()) {
+        DiscoveryBit drawn = cell.discovery_tile;
+        if (drawn == DiscoveryBit::NONE && !state.discovery_bag.empty()) {
+            drawn = state.discovery_bag.back();
+            state.discovery_bag.pop_back();
+        }
+        if (drawn == DiscoveryBit::NONE) {
             // No tiles left, give 2 VP as fallback
             state.players[player_id].score += 2;
         } else {
-            DiscoveryBit drawn = state.discovery_bag.back();
-            state.discovery_bag.pop_back();
             Player& player = state.players[player_id];
 
             // Apply the discovery tile's reward
@@ -532,6 +541,7 @@ bool resolve_explore_discovery(State& state, uint8_t player_id, bool take_reward
         state.players[player_id].score += 2;
     }
     cell.discovery_tile_present = false;
+    cell.discovery_tile = DiscoveryBit::NONE;
     end_explore_activation(state);
     return true;
 }

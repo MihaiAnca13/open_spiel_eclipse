@@ -9,6 +9,8 @@
 #include <vector>
 #include <nlohmann/json.hpp>
 
+#include "discovery_tiles.h"
+
 struct HexCoord {
     int8_t q, r;
 };
@@ -26,12 +28,49 @@ struct Sector {
     uint16_t occupied_slots_mask; // Bit i is 1 if SECTOR_TABLE[id].slots[i] has a cube
 
     bool discovery_tile_present; // Flips to false once claimed
+    DiscoveryBit discovery_tile = DiscoveryBit::NONE;
     bool orbital_built;
     bool monolith_built;
     bool has_player_warp_portal = false; // True if the player places a warp portal
 };
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Sector, sector_id, owner_id, coords, rotation, points, occupied_slots_mask, discovery_tile_present, orbital_built, monolith_built, has_player_warp_portal);
+inline void to_json(nlohmann::json& j, const Sector& s) {
+    j = nlohmann::json{
+        {"sector_id", s.sector_id},
+        {"owner_id", s.owner_id},
+        {"coords", s.coords},
+        {"rotation", s.rotation},
+        {"points", s.points},
+        {"occupied_slots_mask", s.occupied_slots_mask},
+        {"discovery_tile_present", s.discovery_tile_present},
+        {"discovery_tile", s.discovery_tile},
+        {"orbital_built", s.orbital_built},
+        {"monolith_built", s.monolith_built},
+        {"has_player_warp_portal", s.has_player_warp_portal},
+    };
+}
+
+inline void from_json(const nlohmann::json& j, Sector& s) {
+    j.at("sector_id").get_to(s.sector_id);
+    j.at("owner_id").get_to(s.owner_id);
+    j.at("coords").get_to(s.coords);
+    j.at("rotation").get_to(s.rotation);
+    j.at("points").get_to(s.points);
+    j.at("occupied_slots_mask").get_to(s.occupied_slots_mask);
+    j.at("discovery_tile_present").get_to(s.discovery_tile_present);
+    if (j.contains("discovery_tile")) {
+        j.at("discovery_tile").get_to(s.discovery_tile);
+    } else {
+        s.discovery_tile = DiscoveryBit::NONE;
+    }
+    j.at("orbital_built").get_to(s.orbital_built);
+    j.at("monolith_built").get_to(s.monolith_built);
+    if (j.contains("has_player_warp_portal")) {
+        j.at("has_player_warp_portal").get_to(s.has_player_warp_portal);
+    } else {
+        s.has_player_warp_portal = false;
+    }
+}
 
 
 enum class PlanetType : uint8_t {

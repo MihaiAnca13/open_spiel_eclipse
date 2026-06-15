@@ -103,7 +103,28 @@ constexpr Action action_move_warp_start = action_move_choice_start + MAX_MOVE_UN
 constexpr Action action_move_warp_destination_start = action_move_warp_start + MAX_MOVE_UNITS; // 9400 + 128 = 9528
 constexpr Action action_upkeep_colony_done = action_move_warp_destination_start + GALAXY_CELL_COUNT; // 9753
 constexpr Action action_upkeep_pay_done = action_upkeep_colony_done + 1; // 9754
-constexpr int num_distinct_actions = action_upkeep_pay_done + 1; // 9755
+
+// Combat action IDs (appended after upkeep).
+constexpr Action action_combat_continue = action_upkeep_pay_done + 1; // 9755
+constexpr Action action_combat_attack    = action_combat_continue + 1; // 9756
+constexpr Action action_combat_retreat_to_cell_start = action_combat_attack + 1; // 9757 (+ 225 cells)
+constexpr Action action_combat_dice_target_start =
+    action_combat_retreat_to_cell_start + GALAXY_CELL_COUNT; // 9982 (+ 128 units)
+constexpr Action action_combat_rep_select_start =
+    action_combat_dice_target_start + 128; // 10110 (+ 5 tiles)
+constexpr Action action_combat_rep_skip =
+    action_combat_rep_select_start + 5; // 10115
+constexpr Action action_combat_pop_target_start =
+    action_combat_rep_skip + 1; // 10116 (+ 16 slots)
+constexpr Action action_combat_influence_yes =
+    action_combat_pop_target_start + 16; // 10132
+constexpr Action action_combat_influence_no = action_combat_influence_yes + 1; // 10133
+constexpr Action action_combat_discovery_reward = action_combat_influence_no + 1; // 10134
+constexpr Action action_combat_discovery_vp = action_combat_discovery_reward + 1; // 10135
+constexpr Action action_combat_influence_to_cell_start =
+    action_combat_discovery_vp + 1; // 10136 (+ 225 cells)
+constexpr int num_distinct_actions =
+    action_combat_influence_to_cell_start + GALAXY_CELL_COUNT; // 10361
 
 const GameType game_type{
     /*short_name=*/"eclipse",
@@ -152,13 +173,16 @@ std::string PendingRandomEventToString(
       return "discovery_draw";
     case EclipseState::PendingRandomEvent::combat_roll:
       return "combat_roll";
+    case EclipseState::PendingRandomEvent::reputation_draw:
+      return "reputation_draw";
   }
   return "unknown";
 }
 
 EclipseState::PendingRandomEvent PendingRandomEventFromInt(int value) {
   if (value < 0 ||
-      value > static_cast<int>(EclipseState::PendingRandomEvent::combat_roll)) {
+      value >
+          static_cast<int>(EclipseState::PendingRandomEvent::reputation_draw)) {
     throw std::invalid_argument("invalid pending random event");
   }
   return static_cast<EclipseState::PendingRandomEvent>(value);
@@ -464,6 +488,26 @@ Player EclipseState::CurrentPlayer() const {
   if (eclipse_state_.upkeep_state.step != UpkeepState::Step::inactive) {
     return eclipse_state_.upkeep_state.player_id;
   }
+  if (eclipse_state_.current_phase == RoundPhase::COMBAT &&
+      eclipse_state_.combat_state.phase != CombatState::Phase::inactive) {
+    if (eclipse_state_.combat_state.pending_player != kNoPlayer) {
+      return eclipse_state_.combat_state.pending_player;
+    }
+    if (eclipse_state_.combat_state.pending_target_group_player != kNoPlayer &&
+        eclipse_state_.combat_state.pending_die_index <
+            eclipse_state_.combat_state.pending_die_count) {
+      return eclipse_state_.combat_state.pending_target_group_player;
+    }
+    if (eclipse_state_.combat_state.tile_select_player != kNoPlayer) {
+      return eclipse_state_.combat_state.tile_select_player;
+    }
+    if (eclipse_state_.combat_state.influence_decision_player != kNoPlayer) {
+      return eclipse_state_.combat_state.influence_decision_player;
+    }
+    if (eclipse_state_.combat_state.discovery_decision_player != kNoPlayer) {
+      return eclipse_state_.combat_state.discovery_decision_player;
+    }
+  }
   return eclipse_state_.current_player;
 }
 
@@ -513,6 +557,11 @@ std::vector<Action> EclipseState::LegalActions() const {
 
   if (s.upkeep_state.step != UpkeepState::Step::inactive) {
     return UpkeepLegalActions();
+  }
+
+  if (s.current_phase == RoundPhase::COMBAT &&
+      s.combat_state.phase != CombatState::Phase::inactive) {
+    return CombatLegalActions();
   }
 
   std::vector<Action> actions;
@@ -878,6 +927,12 @@ std::string EclipseState::ActionToString(Player player, Action action_id) const 
     }
     return "EXPLORE_DRAW_SECTOR_" + std::to_string(sector_id);
   }
+  if (pending_random_event_ == PendingRandomEvent::combat_roll) {
+    return "COMBAT_ROLL_" + std::to_string(action_id);  // die face 1-6
+  }
+  if (pending_random_event_ == PendingRandomEvent::reputation_draw) {
+    return "REP_DRAW_" + std::to_string(action_id);  // tile value enum 0-3
+  }
   if (pending_random_event_ != PendingRandomEvent::none) {
     return "RESOLVE_" + PendingRandomEventToString(pending_random_event_);
   }
@@ -1027,15 +1082,64 @@ std::string EclipseState::ActionToString(Player player, Action action_id) const 
     static const char* kDirNames[6] = {"E", "NE", "NW", "W", "SW", "SE"};
     return "MOVE_UNIT_" + std::to_string(unit_idx) + "_" + kDirNames[direction];
   }
-  if (action_id >= action_move_warp_destination_start && action_id < num_distinct_actions) {
-    if (action_id == action_upkeep_colony_done) {
-      return "UPKEEP_COLONY_DONE";
-    }
-    if (action_id == action_upkeep_pay_done) {
-      return "UPKEEP_PAY_DONE";
-    }
+  if (action_id >= action_move_warp_destination_start &&
+      action_id < action_upkeep_colony_done) {
     HexCoord c = index_to_hex(action_id - action_move_warp_destination_start);
     return "MOVE_WARP_TO_" + std::to_string(c.q) + "_" + std::to_string(c.r);
+  }
+  if (action_id == action_upkeep_colony_done) {
+    return "UPKEEP_COLONY_DONE";
+  }
+  if (action_id == action_upkeep_pay_done) {
+    return "UPKEEP_PAY_DONE";
+  }
+  if (action_id == action_combat_continue) {
+    return "COMBAT_CONTINUE";
+  }
+  if (action_id == action_combat_attack) {
+    return "COMBAT_ATTACK";
+  }
+  if (action_id >= action_combat_retreat_to_cell_start &&
+      action_id < action_combat_dice_target_start) {
+    HexCoord c = index_to_hex(action_id - action_combat_retreat_to_cell_start);
+    return "COMBAT_RETREAT_TO_" + std::to_string(c.q) + "_" +
+           std::to_string(c.r);
+  }
+  if (action_id >= action_combat_dice_target_start &&
+      action_id < action_combat_rep_select_start) {
+    return "COMBAT_TARGET_UNIT_" +
+           std::to_string(action_id - action_combat_dice_target_start);
+  }
+  if (action_id >= action_combat_rep_select_start &&
+      action_id < action_combat_rep_skip) {
+    return "COMBAT_REPUTATION_SELECT_" +
+           std::to_string(action_id - action_combat_rep_select_start);
+  }
+  if (action_id == action_combat_rep_skip) {
+    return "COMBAT_REPUTATION_SKIP";
+  }
+  if (action_id >= action_combat_pop_target_start &&
+      action_id < action_combat_influence_yes) {
+    return "COMBAT_POP_TARGET_" +
+           std::to_string(action_id - action_combat_pop_target_start);
+  }
+  if (action_id == action_combat_influence_yes) {
+    return "COMBAT_INFLUENCE_YES";
+  }
+  if (action_id == action_combat_influence_no) {
+    return "COMBAT_INFLUENCE_NO";
+  }
+  if (action_id == action_combat_discovery_reward) {
+    return "COMBAT_DISCOVERY_REWARD";
+  }
+  if (action_id == action_combat_discovery_vp) {
+    return "COMBAT_DISCOVERY_VP";
+  }
+  if (action_id >= action_combat_influence_to_cell_start &&
+      action_id < num_distinct_actions) {
+    HexCoord c = index_to_hex(action_id - action_combat_influence_to_cell_start);
+    return "COMBAT_INFLUENCE_TO_" + std::to_string(c.q) + "_" +
+           std::to_string(c.r);
   }
   return "UNKNOWN_ACTION(" + std::to_string(action_id) + ")";
 }
@@ -1074,7 +1178,8 @@ std::string EclipseState::ToString() const {
 
 bool EclipseState::IsTerminal() const {
   return pending_random_event_ == PendingRandomEvent::none &&
-         eclipse_state_.current_round > 8;
+         (eclipse_state_.current_round > 8 ||
+          MoveNumber() >= game_->MaxGameLength());
 }
 
 std::vector<double> EclipseState::Returns() const {
@@ -1106,6 +1211,37 @@ ActionsAndProbs EclipseState::ChanceOutcomes() const {
     for (int bit = 0; bit < 22; ++bit) {
       if (bag & (1u << bit)) {
         outcomes.push_back({static_cast<Action>(bit), prob});
+      }
+    }
+    return outcomes;
+  }
+  if (pending_random_event_ == PendingRandomEvent::combat_roll) {
+    // Uniform d6 for the weapon die awaiting a roll. Action id = face (1-6).
+    ActionsAndProbs outcomes;
+    for (int face = 1; face <= 6; ++face) {
+      outcomes.push_back({static_cast<Action>(face), 1.0 / 6.0});
+    }
+    return outcomes;
+  }
+  if (pending_random_event_ == PendingRandomEvent::reputation_draw) {
+    // Draw one tile from the reputation bag. Action id = tile-value enum (0-3),
+    // probability proportional to that value's multiplicity in the bag.
+    const auto& bag = eclipse_state_.reputation_tiles;
+    int counts[4] = {0, 0, 0, 0};
+    int total = 0;
+    for (size_t i = 0; i < bag.size(); ++i) {
+      const int v = static_cast<int>(bag[i]);
+      if (v >= 0 && v < 4) {
+        ++counts[v];
+        ++total;
+      }
+    }
+    if (total == 0) return {{chance_resolve, 1.0}};
+    ActionsAndProbs outcomes;
+    for (int v = 0; v < 4; ++v) {
+      if (counts[v] > 0) {
+        outcomes.push_back({static_cast<Action>(v),
+                            static_cast<double>(counts[v]) / total});
       }
     }
     return outcomes;
@@ -1289,10 +1425,29 @@ void EclipseState::ResolveChanceEvent(Action action_id) {
       // Caller (DoApplyAction) inspects explore_state.phase to re-arm or finish.
       return;
     }
+    case PendingRandomEvent::combat_roll: {
+      // action_id is the d6 face (1-6) for the die awaiting a roll.
+      ResolveCombatDie(eclipse_state_, static_cast<uint8_t>(action_id));
+      return;
+    }
+    case PendingRandomEvent::reputation_draw: {
+      // action_id is the drawn tile value enum (0-3), or chance_resolve if the
+      // bag was empty.
+      CombatState& cs = eclipse_state_.combat_state;
+      if (eclipse_state_.reputation_tiles.empty()) {
+        // Bag exhausted: stop drawing for this participant so the state machine
+        // proceeds to selection (or to the next participant if nothing drawn).
+        cs.rep_draw_target = cs.drawn_tiles_size;
+        if (cs.drawn_tiles_size == 0) cs.tile_select_player = kNoPlayer;
+        return;
+      }
+      DrawOneReputationTile(eclipse_state_,
+                            static_cast<ReputationTiles>(action_id));
+      return;
+    }
     case PendingRandomEvent::none:
       SpielFatalError("no pending random event to resolve");
     case PendingRandomEvent::discovery_draw:
-    case PendingRandomEvent::combat_roll:
       SpielFatalError("pending random event is declared but unimplemented");
   }
 }
@@ -1491,7 +1646,8 @@ void EclipseState::ApplyMoveSubAction(Action action_id) {
     } else {
       SPIEL_CHECK_TRUE(execute_move_step(s, player, unit_idx, direction));
     }
-  } else if (action_id >= action_move_warp_destination_start && action_id < num_distinct_actions) {
+  } else if (action_id >= action_move_warp_destination_start &&
+             action_id < action_upkeep_colony_done) {
     uint8_t cell_idx = static_cast<uint8_t>(action_id - action_move_warp_destination_start);
     SPIEL_CHECK_TRUE(execute_warp_move(s, player, cell_idx));
   }
@@ -1675,6 +1831,412 @@ void EclipseState::AdvanceCleanupState() {
   FinishCleanup();
 }
 
+void EclipseState::BeginCombat() {
+  begin_combat_phase(eclipse_state_);
+  DriveCombat();
+}
+
+void EclipseState::DriveCombat() {
+  CombatState& cs = eclipse_state_.combat_state;
+  for (int steps = 0;
+       steps < 4000 && cs.phase != CombatState::Phase::inactive; ++steps) {
+    const bool volley_active = cs.pending_target_group_player != kNoPlayer &&
+                               cs.pending_die_index < cs.pending_die_count;
+    // A queued die still needs rolling -> arm a chance node (one per die).
+    if (volley_active &&
+        cs.pending_die_values[cs.pending_die_index] == 0) {
+      pending_random_event_ = PendingRandomEvent::combat_roll;
+      return;
+    }
+    // A rolled die is awaiting the firing player's target choice.
+    if (volley_active &&
+        cs.pending_die_values[cs.pending_die_index] != 0) {
+      return;
+    }
+    // A reputation tile still needs drawing -> arm a chance node (one per tile).
+    if (cs.phase == CombatState::Phase::select_reputation_tile &&
+        cs.tile_select_player != kNoPlayer &&
+        cs.drawn_tiles_size < cs.rep_draw_target) {
+      pending_random_event_ = PendingRandomEvent::reputation_draw;
+      return;
+    }
+    // Player decisions.
+    if (cs.phase == CombatState::Phase::choose_engagement_action &&
+        cs.pending_player != kNoPlayer) {
+      return;
+    }
+    if (cs.phase == CombatState::Phase::attack_population &&
+        cs.pop_attack_damage_remaining > 0) {
+      return;
+    }
+    if (cs.phase == CombatState::Phase::select_reputation_tile &&
+        cs.tile_select_player != kNoPlayer && cs.drawn_tiles_size > 0) {
+      return;
+    }
+    if (cs.phase == CombatState::Phase::influence_sectors &&
+        cs.influence_decision_player != kNoPlayer &&
+        cs.influence_decision_sector != 0) {
+      return;
+    }
+    if (cs.phase == CombatState::Phase::discovery_award &&
+        cs.discovery_decision_player != kNoPlayer) {
+      return;
+    }
+    advance_combat_state(eclipse_state_);
+  }
+  if (cs.phase == CombatState::Phase::inactive) {
+    FinishCombat();
+  }
+}
+
+void EclipseState::FinishCombat() {
+  // Repair: zero all unit damage, reset combat state, set phase to UPKEEP.
+  for (Unit& u : const_cast<FixedVector<Unit, 128>&>(eclipse_state_.unit_registry)) {
+    u.damage = 0;
+  }
+  eclipse_state_.combat_state.Reset();
+  BeginUpkeep();
+}
+
+std::vector<Action> EclipseState::CombatLegalActions() const {
+  std::vector<Action> actions;
+  const ::State& s = eclipse_state_;
+  const CombatState& cs = s.combat_state;
+  if (cs.phase == CombatState::Phase::inactive) return actions;
+
+  // A rolled die awaiting the firing player's target choice. Legal targets are
+  // the enemy ships in the active pair (the player may assign to any of them;
+  // hits are resolved on application).
+  if (cs.pending_target_group_player != kNoPlayer &&
+      cs.pending_die_index < cs.pending_die_count &&
+      cs.pending_die_values[cs.pending_die_index] != 0) {
+    const uint8_t attacker = cs.pending_target_group_player;
+    for (size_t i = 0; i < s.unit_registry.size() && i < 128; ++i) {
+      if (IsLegalDieTarget(s, attacker, i)) {
+        actions.push_back(action_combat_dice_target_start +
+                          static_cast<Action>(i));
+      }
+    }
+    std::sort(actions.begin(), actions.end());
+    return actions;
+  }
+
+  if (cs.phase == CombatState::Phase::attack_population &&
+      cs.pop_attack_damage_remaining > 0) {
+    for (int q = -GALAXY_RADIUS; q <= GALAXY_RADIUS; ++q) {
+      for (int r = -GALAXY_RADIUS; r <= GALAXY_RADIUS; ++r) {
+        if (!in_galaxy_bounds(q, r)) continue;
+        const Sector& sec = s.galaxy.at(q, r);
+        if (sec.sector_id != cs.pop_attack_sector_id) continue;
+        for (int slot = 0; slot < 16; ++slot) {
+          if ((sec.occupied_slots_mask & static_cast<uint16_t>(1u << slot)) != 0) {
+            actions.push_back(action_combat_pop_target_start + slot);
+          }
+        }
+      }
+    }
+    std::sort(actions.begin(), actions.end());
+    return actions;
+  }
+
+  switch (cs.phase) {
+    case CombatState::Phase::choose_engagement_action: {
+      if (cs.pending_player != kNoPlayer) {
+        actions.push_back(action_combat_attack);
+        for (uint8_t i = 0; i < cs.retreat_destinations_size; ++i) {
+          const uint16_t sid = cs.retreat_destinations[i];
+          for (int cell = 0; cell < GALAXY_CELL_COUNT; ++cell) {
+            const HexCoord h = index_to_hex(cell);
+            const Sector& sec = s.galaxy.at(h.q, h.r);
+            if (sec.sector_id == sid) {
+              actions.push_back(action_combat_retreat_to_cell_start + cell);
+              break;
+            }
+          }
+        }
+      } else {
+        actions.push_back(action_combat_continue);
+      }
+      break;
+    }
+    case CombatState::Phase::select_reputation_tile: {
+      if (cs.tile_select_player != kNoPlayer && cs.drawn_tiles_size > 0) {
+        for (uint8_t i = 0; i < cs.drawn_tiles_size; ++i) {
+          actions.push_back(action_combat_rep_select_start + i);
+        }
+        actions.push_back(action_combat_rep_skip);
+      } else {
+        actions.push_back(action_combat_continue);
+      }
+      break;
+    }
+    case CombatState::Phase::influence_sectors: {
+      if (cs.influence_decision_player != kNoPlayer &&
+          cs.influence_decision_sector != 0) {
+        actions.push_back(action_combat_influence_yes);
+        actions.push_back(action_combat_influence_no);
+      } else {
+        actions.push_back(action_combat_continue);
+      }
+      break;
+    }
+    case CombatState::Phase::discovery_award: {
+      if (cs.discovery_decision_player != kNoPlayer) {
+        actions.push_back(action_combat_discovery_reward);
+        actions.push_back(action_combat_discovery_vp);
+      } else {
+        actions.push_back(action_combat_continue);
+      }
+      break;
+    }
+    case CombatState::Phase::missile_phase:
+    case CombatState::Phase::engagement_firing:
+    case CombatState::Phase::attack_population:
+    case CombatState::Phase::repair:
+    case CombatState::Phase::determine_battles:
+      actions.push_back(action_combat_continue);
+      break;
+    default:
+      break;
+  }
+  std::sort(actions.begin(), actions.end());
+  return actions;
+}
+
+void EclipseState::ApplyCombatSubAction(Action action_id) {
+  ::State& s = eclipse_state_;
+  CombatState& cs = s.combat_state;
+
+  // Firing player assigns the rolled die awaiting a target. Volley completion
+  // (advancing the initiative cursor and phase) is handled inside the combat
+  // system's ApplyPlayerDieTarget / OnVolleyComplete.
+  if (cs.pending_target_group_player != kNoPlayer &&
+      cs.pending_die_index < cs.pending_die_count &&
+      cs.pending_die_values[cs.pending_die_index] != 0) {
+    if (action_id < action_combat_dice_target_start ||
+        action_id >= action_combat_rep_select_start) {
+      return;
+    }
+    const size_t target_idx =
+        static_cast<size_t>(action_id - action_combat_dice_target_start);
+    if (!IsLegalDieTarget(s, cs.pending_target_group_player, target_idx)) {
+      return;
+    }
+    ApplyPlayerDieTarget(s, target_idx);
+    return;
+  }
+
+  if (cs.phase == CombatState::Phase::attack_population &&
+      cs.pop_attack_damage_remaining > 0) {
+    if (action_id < action_combat_pop_target_start ||
+        action_id >= action_combat_influence_yes) {
+      return;
+    }
+    const int slot = action_id - action_combat_pop_target_start;
+    if (slot < 0 || slot >= 16) return;
+    for (int q = -GALAXY_RADIUS; q <= GALAXY_RADIUS; ++q) {
+      for (int r = -GALAXY_RADIUS; r <= GALAXY_RADIUS; ++r) {
+        if (!in_galaxy_bounds(q, r)) continue;
+        Sector& sec = s.galaxy.at(q, r);
+        if (sec.sector_id != cs.pop_attack_sector_id) continue;
+        const uint16_t bit = static_cast<uint16_t>(1u << slot);
+        if ((sec.occupied_slots_mask & bit) == 0) return;
+        sec.occupied_slots_mask &= static_cast<uint16_t>(~bit);
+        int graveyard = 0;
+        const SectorDefinition* def = get_sector_definition(sec.sector_id);
+        if (def && slot < static_cast<int>(def->slots.size())) {
+          switch (def->slots[slot].type) {
+            case PlanetType::MONEY:
+            case PlanetType::ADV_MONEY:
+            case PlanetType::ANY:
+            case PlanetType::ADV_ANY:
+              graveyard = 0;
+              break;
+            case PlanetType::SCIENCE:
+            case PlanetType::ADV_SCIENCE:
+              graveyard = 1;
+              break;
+            case PlanetType::MATERIALS:
+            case PlanetType::ADV_MATERIALS:
+              graveyard = 2;
+              break;
+          }
+        }
+        if (cs.pop_attack_owner < s.players.size()) {
+          s.players[cs.pop_attack_owner].graveyard_counts[graveyard]++;
+        }
+        --cs.pop_attack_damage_remaining;
+        if (cs.pop_attack_damage_remaining == 0) {
+          cs.pop_attack_sector_id = 0;
+          cs.pop_attack_player = kNoPlayer;
+          cs.pop_attack_owner = kNoPlayer;
+        }
+        return;
+      }
+    }
+    return;
+  }
+
+  switch (cs.phase) {
+    case CombatState::Phase::choose_engagement_action: {
+      if (cs.pending_player == kNoPlayer) return;
+      if (action_id == action_combat_attack) {
+        cs.pending_player = kNoPlayer;
+        cs.phase = CombatState::Phase::engagement_firing;
+        return;
+      }
+      if (action_id >= action_combat_retreat_to_cell_start &&
+          action_id < action_combat_dice_target_start) {
+        const int cell = action_id - action_combat_retreat_to_cell_start;
+        if (cell < 0 || cell >= GALAXY_CELL_COUNT) return;
+        const HexCoord h = index_to_hex(cell);
+        const uint16_t destination_sector_id = s.galaxy.at(h.q, h.r).sector_id;
+        bool legal_destination = false;
+        for (uint8_t i = 0; i < cs.retreat_destinations_size; ++i) {
+          if (cs.retreat_destinations[i] == destination_sector_id) {
+            legal_destination = true;
+            break;
+          }
+        }
+        if (!legal_destination) return;
+
+        const InitiativeGroup& g = cs.initiative_timeline[cs.initiative_idx];
+        AddRetreatingGroup(s, g.player_id, g.type, destination_sector_id);
+        ++cs.initiative_idx;
+        cs.pending_player = kNoPlayer;
+        return;
+      }
+      return;
+    }
+    case CombatState::Phase::select_reputation_tile: {
+      if (cs.tile_select_player == kNoPlayer || cs.drawn_tiles_size == 0) return;
+      const uint8_t player = cs.tile_select_player;
+      bool keep_tile = false;
+      uint8_t idx = 0;
+      if (action_id >= action_combat_rep_select_start &&
+          action_id < action_combat_rep_select_start + cs.drawn_tiles_size) {
+        idx = static_cast<uint8_t>(action_id - action_combat_rep_select_start);
+        keep_tile = true;
+      } else if (action_id == action_combat_rep_skip) {
+        keep_tile = false;
+      } else {
+        return;
+      }
+      if (keep_tile) {
+        // Cap at 5: force replace the last tile.
+        if (s.players[player].reputation_tiles.size() >= 5) {
+          s.players[player].reputation_tiles.pop_back();
+        }
+        s.players[player].reputation_tiles.push_back(cs.drawn_tiles[idx]);
+      }
+      // Return the unselected tiles to the bag. Order is irrelevant because
+      // future draws sample from the bag via reputation_draw chance nodes, so
+      // no reshuffle (and no hidden RNG) is needed.
+      for (uint8_t i = 0; i < cs.drawn_tiles_size; ++i) {
+        if (keep_tile && i == idx) continue;
+        s.reputation_tiles.push_back(cs.drawn_tiles[i]);
+      }
+      cs.drawn_tiles_size = 0;
+      cs.rep_draw_target = 0;
+      cs.tile_select_player = kNoPlayer;
+      return;
+    }
+    case CombatState::Phase::influence_sectors: {
+      if (cs.influence_decision_player == kNoPlayer) return;
+      if (action_id == action_combat_influence_yes) {
+        ::Player& p = s.players[cs.influence_decision_player];
+        if (p.available_influence_discs() > 0) {
+          p.disks_on_sectors++;
+          for (int q = -GALAXY_RADIUS; q <= GALAXY_RADIUS; ++q) {
+            for (int r = -GALAXY_RADIUS; r <= GALAXY_RADIUS; ++r) {
+              if (!in_galaxy_bounds(q, r)) continue;
+              Sector& sec = s.galaxy.at(q, r);
+              if (sec.sector_id == cs.influence_decision_sector) {
+                sec.owner_id = cs.influence_decision_player;
+                break;
+              }
+            }
+          }
+        }
+        ++cs.influence_scan_index;
+        cs.influence_turn_order_index = 0;
+      } else if (action_id == action_combat_influence_no) {
+        ++cs.influence_turn_order_index;
+      }
+      cs.influence_decision_player = kNoPlayer;
+      cs.influence_decision_sector = 0;
+      return;
+    }
+    case CombatState::Phase::discovery_award: {
+      if (cs.discovery_decision_player == kNoPlayer) return;
+      Sector* discovery_sector = nullptr;
+      for (int q = -GALAXY_RADIUS; q <= GALAXY_RADIUS; ++q) {
+        for (int r = -GALAXY_RADIUS; r <= GALAXY_RADIUS; ++r) {
+          if (!in_galaxy_bounds(q, r)) continue;
+          Sector& sec = s.galaxy.at(q, r);
+          if (sec.sector_id == cs.discovery_decision_sector) {
+            discovery_sector = &sec;
+            break;
+          }
+        }
+        if (discovery_sector != nullptr) break;
+      }
+      if (discovery_sector == nullptr) return;
+      if (action_id == action_combat_discovery_reward) {
+        const uint8_t p = cs.discovery_decision_player;
+        DiscoveryBit drawn = discovery_sector->discovery_tile;
+        if (drawn == DiscoveryBit::NONE && !s.discovery_bag.empty()) {
+          drawn = s.discovery_bag.back();
+          s.discovery_bag.pop_back();
+        }
+        ::Player& player = s.players[p];
+        switch (drawn) {
+          case DiscoveryBit::RESOURCE_SCIENCE_3_MONEY_3:
+            player.resources.science += 3;
+            player.resources.gold += 3;
+            break;
+          case DiscoveryBit::RESOURCES_2MAT_2S_3MONEY:
+            player.resources.materials += 2;
+            player.resources.science += 2;
+            player.resources.gold += 3;
+            break;
+          case DiscoveryBit::RESOURCES_6_MATERIALS:
+            player.resources.materials += 6;
+            break;
+          case DiscoveryBit::RESOURCES_5_SCIENCE:
+            player.resources.science += 5;
+            break;
+          case DiscoveryBit::RESOURCES_8_MONEY:
+            player.resources.gold += 8;
+            break;
+          case DiscoveryBit::MUON_SOURCE:
+            player.resources.gold += 2;
+            break;
+          case DiscoveryBit::WARP_PORTAL:
+            discovery_sector->has_player_warp_portal = true;
+            break;
+          case DiscoveryBit::NONE:
+            player.score = static_cast<uint8_t>(player.score + 2);
+            break;
+          default:
+            player.score = static_cast<uint8_t>(player.score + 2);
+            break;
+        }
+      } else if (action_id == action_combat_discovery_vp) {
+        s.players[cs.discovery_decision_player].score =
+            static_cast<uint8_t>(s.players[cs.discovery_decision_player].score + 2);
+      }
+      discovery_sector->discovery_tile_present = false;
+      discovery_sector->discovery_tile = DiscoveryBit::NONE;
+      cs.discovery_decision_player = kNoPlayer;
+      cs.discovery_decision_sector = 0;
+      return;
+    }
+    default:
+      break;
+  }
+}
+
 void EclipseState::ApplyUpkeepAction(Action action_id) {
   UpkeepState& us = eclipse_state_.upkeep_state;
   const uint8_t player_id = us.player_id;
@@ -1766,10 +2328,9 @@ void EclipseState::ApplyUpkeepAction(Action action_id) {
 
 void EclipseState::DoApplyAction(Action action_id) {
   if (pending_random_event_ != PendingRandomEvent::none) {
-    bool was_explore_draw =
-        pending_random_event_ == PendingRandomEvent::explore_draw;
+    const PendingRandomEvent event = pending_random_event_;
     ResolveChanceEvent(action_id);
-    if (was_explore_draw) {
+    if (event == PendingRandomEvent::explore_draw) {
       pending_random_event_ = PendingRandomEvent::none;
       // An empty ring bag can end the last activation outright; otherwise a
       // player decision phase (place/draw-again/select) follows. Any further
@@ -1777,6 +2338,12 @@ void EclipseState::DoApplyAction(Action action_id) {
       if (eclipse_state_.explore_state.phase == ExplorePhase::inactive) {
         AdvanceTurn();
       }
+    } else if (event == PendingRandomEvent::combat_roll ||
+               event == PendingRandomEvent::reputation_draw) {
+      // One die / tile resolved. Re-arm the next chance node, stop at a player
+      // decision, or finish combat.
+      pending_random_event_ = PendingRandomEvent::none;
+      DriveCombat();
     }
     return;
   }
@@ -1853,6 +2420,15 @@ void EclipseState::DoApplyAction(Action action_id) {
 
   if (eclipse_state_.upkeep_state.step != UpkeepState::Step::inactive) {
     ApplyUpkeepAction(action_id);
+    return;
+  }
+
+  if (eclipse_state_.current_phase == RoundPhase::COMBAT &&
+      eclipse_state_.combat_state.phase != CombatState::Phase::inactive) {
+    ApplyCombatSubAction(action_id);
+    // Drive forward to the next chance roll / player decision / completion.
+    // Dice and tile draws are resolved via chance nodes, so no RNG here.
+    DriveCombat();
     return;
   }
 
@@ -1955,7 +2531,8 @@ void EclipseState::DoApplyAction(Action action_id) {
         eclipse_state_, current_player,
         static_cast<TradeConversion>(action_id - action_trade_start)));
     return;
-  } else if (action_id >= action_colony_ship_start) {
+  } else if (action_id >= action_colony_ship_start &&
+             action_id < action_influence_start) {
     // Bonus action: colony ship — no disc, no turn advance.
     int encoded = static_cast<int>(action_id - action_colony_ship_start);
     int cell = encoded / COLONY_SHIP_CODES_PER_CELL;
@@ -1982,7 +2559,7 @@ void EclipseState::AdvanceTurn() {
   }
 
   if (all_passed) {
-    BeginUpkeep();
+    BeginCombat();
     return;
   }
 

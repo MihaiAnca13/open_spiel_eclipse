@@ -1,5 +1,6 @@
 #include "open_spiel/games/eclipse/eclipse.h"
 
+#include <iostream>
 #include <algorithm>
 #include <vector>
 
@@ -175,6 +176,16 @@ Action FindActionByName(const State& state, const std::string& name) {
     if (state.ActionToString(state.CurrentPlayer(), action) == name) {
       return action;
     }
+  }
+  const EclipseState* es = dynamic_cast<const EclipseState*>(&state);
+  if (es) {
+    std::cerr << "FindActionByName: not found: " << name
+              << " current_player=" << (int)es->RawState().current_player
+              << " upkeep_player=" << (int)es->RawState().upkeep_state.player_id
+              << " upkeep_step=" << (int)es->RawState().upkeep_state.step
+              << " phase=" << (int)es->RawState().current_phase
+              << " combat_phase=" << (int)es->RawState().combat_state.phase
+              << std::endl;
   }
   return -1;
 }
@@ -422,8 +433,9 @@ void ExploreFullActionViaApiTest() {
     return;  // no legal explore zones at game start (not expected, but safe)
   }
 
+  const Player acting_player = state->CurrentPlayer();
   state->ApplyAction(explore_start);
-  SPIEL_CHECK_EQ(eclipse_state->RawState().players[0].disks_on_actions, 1);
+  SPIEL_CHECK_EQ(eclipse_state->RawState().players[acting_player].disks_on_actions, 1);
   bool placed = false;
 
   int steps = 0;
@@ -463,7 +475,7 @@ void ExploreFullActionViaApiTest() {
   SPIEL_CHECK_TRUE(eclipse_state->RawState().explore_state.phase ==
                    ExplorePhase::inactive);
   SPIEL_CHECK_FALSE(state->IsChanceNode());
-  SPIEL_CHECK_EQ(eclipse_state->RawState().players[0].disks_on_actions, 1);
+  SPIEL_CHECK_EQ(eclipse_state->RawState().players[acting_player].disks_on_actions, 1);
 }
 
 void ResearchRareTechTrackTest() {
@@ -1265,39 +1277,124 @@ void UpkeepObservationTensorTest() {
   SPIEL_CHECK_EQ(tensor[72], 3.0f);
 }
 
+// Forces a two-player ship battle, then drives the whole combat phase through
+// the public API. Verifies that weapon dice are resolved as chance nodes
+// (PendingRandomEvent::combat_roll), that the phase terminates without hanging,
+// and that no decision node is ever offered to a non-current player.
+void CombatDiceChanceFlowTest() {
+  std::shared_ptr<const Game> game = LoadEclipseGame(2, 7);
+  std::unique_ptr<State> state = game->NewInitialState();
+  state->ApplyAction(0);  // resolve setup
+
+  EclipseState* eclipse_state = static_cast<EclipseState*>(state.get());
+  ::State& raw = const_cast<::State&>(eclipse_state->RawState());
+  raw.turn_order[0] = 0;
+  raw.turn_order[1] = 1;
+  raw.current_player = 0;
+  raw.current_round = 1;
+  for (int p = 0; p < 2; ++p) {
+    raw.players[p].resources.gold = 5;
+    raw.players[p].colony_ships_total = 0;
+    raw.players[p].colony_ships_available = 0;
+    // Guarantee every interceptor rolls one yellow cannon die.
+    raw.players[p].blueprints[static_cast<size_t>(ShipType::INTERCEPTOR)]
+        .total_stats.cannons[0] = 1;
+  }
+
+  // Pick a real sector and stage an interceptor from each player there.
+  uint16_t battle_sector = 0;
+  for (const Unit& u : raw.unit_registry) {
+    if (u.player_id == 0 && u.sector_id != 0) {
+      battle_sector = u.sector_id;
+      break;
+    }
+  }
+  SPIEL_CHECK_GT(battle_sector, 0);
+  for (int p = 0; p < 2; ++p) {
+    Unit ship{};
+    ship.player_id = static_cast<uint8_t>(p);
+    ship.type = ShipType::INTERCEPTOR;
+    ship.sector_id = battle_sector;
+    ship.damage = 0;
+    ship.arrival_order = raw.AllocateArrivalOrder();
+    raw.unit_registry.push_back(ship);
+  }
+
+  // End the action phase; combat begins with the staged battle.
+  state->ApplyAction(FindActionByName(*state, "PASS"));
+  state->ApplyAction(FindActionByName(*state, "PASS"));
+  SPIEL_CHECK_TRUE(raw.current_phase == RoundPhase::COMBAT);
+
+  int combat_rolls = 0;
+  int steps = 0;
+  const int kMaxSteps = 8000;
+  while (!state->IsTerminal() &&
+         raw.current_phase == RoundPhase::COMBAT && steps < kMaxSteps) {
+    ++steps;
+    if (state->IsChanceNode()) {
+      const ActionsAndProbs outcomes = state->ChanceOutcomes();
+      SPIEL_CHECK_GT(outcomes.size(), 0);
+      double sum = 0.0;
+      for (const auto& [a, p] : outcomes) sum += p;
+      SPIEL_CHECK_TRUE(std::abs(sum - 1.0) < 1e-9);
+      const Action chosen = outcomes[0].first;
+      if (state->ActionToString(kChancePlayerId, chosen).rfind("COMBAT_ROLL", 0) ==
+          0) {
+        ++combat_rolls;
+      }
+      state->ApplyAction(chosen);
+    } else {
+      const std::vector<Action> legal = state->LegalActions();
+      SPIEL_CHECK_GT(legal.size(), 0);
+      state->ApplyAction(legal[0]);
+    }
+  }
+  SPIEL_CHECK_LT(steps, kMaxSteps);   // no hang
+  SPIEL_CHECK_GT(combat_rolls, 0);    // dice resolved as chance nodes
+}
+
 }  // namespace
 }  // namespace eclipse
 }  // namespace open_spiel
 
 int main(int argc, char** argv) {
-  open_spiel::eclipse::BasicEclipseTests();
-  open_spiel::eclipse::InitialStateChanceNodeTest();
-  open_spiel::eclipse::RandomSimulationAndSerializationTest();
-  open_spiel::eclipse::DeterministicReplayTest();
-  open_spiel::eclipse::SetupHelperParityTest();
-  open_spiel::eclipse::AppConfigSnapshotTest();
-  open_spiel::eclipse::ExplorePureHelpersTest();
-  open_spiel::eclipse::ExploreZoneAndConnectionTest();
-  open_spiel::eclipse::ExploreExhaustedRingTest();
-  open_spiel::eclipse::ExploreClaimControlTest();
-  open_spiel::eclipse::ExploreAncientBlocksControlTest();
-  open_spiel::eclipse::ExploreDiscoveryVpTest();
-  open_spiel::eclipse::ExploreStopAndDracoDrawTest();
-  open_spiel::eclipse::ExploreSpeciesRandomSimTest();
-  open_spiel::eclipse::ExploreFullActionViaApiTest();
-  open_spiel::eclipse::ResearchRareTechTrackTest();
-  open_spiel::eclipse::ResearchInfluenceDiscRewardsTest();
-  open_spiel::eclipse::ResearchActionTest();
-  open_spiel::eclipse::InfluenceReclaimCubesTest();
-  open_spiel::eclipse::InfluenceFullActionTest();
-  open_spiel::eclipse::BuildFullActionTest();
-  open_spiel::eclipse::UpgradeFullActionTest();
-  open_spiel::eclipse::MoveFullActionTest();
-  open_spiel::eclipse::StrictMainActionFilteringTest();
-  open_spiel::eclipse::UpkeepRoundFlowTest();
-  open_spiel::eclipse::UpkeepAbandonSectorTest();
-  open_spiel::eclipse::CleanupGraveyardOverflowChoiceTest();
-  open_spiel::eclipse::CleanupDrawsNewTechTilesTest();
-  open_spiel::eclipse::RoundEightCleanupEndsGameTest();
-  open_spiel::eclipse::UpkeepObservationTensorTest();
+#define RUN_TEST(test_func) \
+  std::cout << "[ RUN      ] eclipse_test." << #test_func << std::endl; \
+  open_spiel::eclipse::test_func(); \
+  std::cout << "[       OK ] eclipse_test." << #test_func << std::endl;
+
+  RUN_TEST(BasicEclipseTests);
+  RUN_TEST(InitialStateChanceNodeTest);
+  RUN_TEST(RandomSimulationAndSerializationTest);
+  RUN_TEST(DeterministicReplayTest);
+  RUN_TEST(SetupHelperParityTest);
+  RUN_TEST(AppConfigSnapshotTest);
+  RUN_TEST(ExplorePureHelpersTest);
+  RUN_TEST(ExploreZoneAndConnectionTest);
+  RUN_TEST(ExploreExhaustedRingTest);
+  RUN_TEST(ExploreClaimControlTest);
+  RUN_TEST(ExploreAncientBlocksControlTest);
+  RUN_TEST(ExploreDiscoveryVpTest);
+  RUN_TEST(ExploreStopAndDracoDrawTest);
+  RUN_TEST(ExploreSpeciesRandomSimTest);
+  RUN_TEST(ExploreFullActionViaApiTest);
+  RUN_TEST(ResearchRareTechTrackTest);
+  RUN_TEST(ResearchInfluenceDiscRewardsTest);
+  RUN_TEST(ResearchActionTest);
+  RUN_TEST(InfluenceReclaimCubesTest);
+  RUN_TEST(InfluenceFullActionTest);
+  RUN_TEST(BuildFullActionTest);
+  RUN_TEST(UpgradeFullActionTest);
+  RUN_TEST(MoveFullActionTest);
+  RUN_TEST(StrictMainActionFilteringTest);
+  RUN_TEST(UpkeepRoundFlowTest);
+  RUN_TEST(UpkeepAbandonSectorTest);
+  RUN_TEST(CleanupGraveyardOverflowChoiceTest);
+  RUN_TEST(CleanupDrawsNewTechTilesTest);
+  RUN_TEST(RoundEightCleanupEndsGameTest);
+  RUN_TEST(UpkeepObservationTensorTest);
+  RUN_TEST(CombatDiceChanceFlowTest);
+
+#undef RUN_TEST
+  std::cout << "[==========] 31 tests passed." << std::endl;
 }

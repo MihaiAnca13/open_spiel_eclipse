@@ -11,6 +11,7 @@
 #include <unordered_map>
 #include <nlohmann/json.hpp>
 
+#include "types.h"
 #include "tech.h"
 #include "galaxy.h"
 #include "resources.h"
@@ -24,23 +25,15 @@
 #include "systems/actions/influence.h"
 #include "systems/actions/upgrade.h"
 #include "systems/actions/move.h"
+#include "systems/combat.h"
 #include "absl/container/fixed_array.h"
 
 using open_spiel::eclipse::FixedVector;
+using open_spiel::eclipse::ShipType;
+using open_spiel::eclipse::ReputationTiles;
+using open_spiel::eclipse::CombatState;
 
 #define MAX_PLAYERS 6
-
-enum class ShipType { INTERCEPTOR, CRUISER, DREADNOUGHT, STARBASE, ANCIENT, GUARDIAN, GCDS };
-
-NLOHMANN_JSON_SERIALIZE_ENUM( ShipType, {
-    {ShipType::INTERCEPTOR, "Interceptor"},
-    {ShipType::CRUISER, "Cruiser"},
-    {ShipType::DREADNOUGHT, "Dreadnought"},
-    {ShipType::STARBASE, "Starbase"},
-    {ShipType::ANCIENT, "Ancient"},
-    {ShipType::GUARDIAN, "Guardian"},
-    {ShipType::GCDS, "GCDS"}
-});
 
 constexpr uint8_t NPC_PLAYER_ID = 255;
 constexpr int total_influence_discs = 12;
@@ -50,11 +43,30 @@ struct Unit {
     ShipType type;
     uint16_t sector_id; // Current location (matches Sector::sector_id)
     uint8_t damage;     // Damage cubes currently assigned
+    uint32_t arrival_order = 0; // Monotonic counter from State::next_arrival_order; 0 = legacy/default
 };
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Unit, player_id, type, sector_id, damage);
+inline void to_json(nlohmann::json& j, const Unit& u) {
+    j = nlohmann::json{
+        {"player_id", u.player_id},
+        {"type", u.type},
+        {"sector_id", u.sector_id},
+        {"damage", u.damage},
+        {"arrival_order", u.arrival_order}
+    };
+}
 
-enum ReputationTiles { ONE, TWO, THREE, FOUR };
+inline void from_json(const nlohmann::json& j, Unit& u) {
+    j.at("player_id").get_to(u.player_id);
+    j.at("type").get_to(u.type);
+    j.at("sector_id").get_to(u.sector_id);
+    j.at("damage").get_to(u.damage);
+    if (j.contains("arrival_order")) {
+        j.at("arrival_order").get_to(u.arrival_order);
+    } else {
+        u.arrival_order = 0;
+    }
+}
 
 constexpr int REPUTATION_TILE_COUNTS[] = { 12, 10, 7, 4 }; // values are 1, 2, 3, 4
 
@@ -119,13 +131,6 @@ struct Player {
 };
 
 static_assert(static_cast<size_t>(ShipType::STARBASE) + 1 == 4, "The first 4 ShipType values must map to blueprints index 0-3");
-
-NLOHMANN_JSON_SERIALIZE_ENUM(ReputationTiles, {
-    {ONE, "One"},
-    {TWO, "Two"},
-    {THREE, "Three"},
-    {FOUR, "Four"}
-});
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Player, id, score, species_id, is_ai, has_passed, disks_on_sectors, disks_on_actions, resources, colony_ships_total, colony_ships_available, orbitals, monoliths, blueprints, reputation_tiles, trade_rate, extra_influence_discs, graveyard_counts, eliminated, researched_techs_military, researched_techs_grid, researched_techs_nano);
 
@@ -203,6 +208,19 @@ struct State {
     // In-flight Upkeep / Cleanup round-end state.
     UpkeepState upkeep_state;
 
+    // In-flight Combat phase state.
+    CombatState combat_state;
+
+    // Monotonic counter for Unit::arrival_order. Bumped whenever a unit is
+    // added to unit_registry (setup, build, explore, move, warp). 0 is the
+    // "uninitialised" sentinel for legacy units lacking the field.
+    uint32_t next_arrival_order = 0;
+
+    // Allocates the next arrival_order value. Call sites wrap push_back into
+    // unit_registry so participant ordering in combat reflects the rulebook's
+    // "reverse entry order" rule deterministically.
+    uint32_t AllocateArrivalOrder() { return ++next_arrival_order; }
+
     // Helper functions for tech market tray (allocation-free representation)
     uint8_t get_tech_tray_count(TechBit tech) const {
         if (tech == TechBit::NONE) return 0;
@@ -277,7 +295,9 @@ inline void to_json(nlohmann::json& j, const State& s) {
         {"influence_state", s.influence_state},
         {"upgrade_state", s.upgrade_state},
         {"move_state", s.move_state},
-        {"upkeep_state", s.upkeep_state}
+        {"upkeep_state", s.upkeep_state},
+        {"combat_state", s.combat_state},
+        {"next_arrival_order", s.next_arrival_order}
     };
 }
 
@@ -366,6 +386,18 @@ inline void from_json(const nlohmann::json& j, State& s) {
         j.at("move_state").get_to(s.move_state);
     } else {
         s.move_state = MoveState{};
+    }
+
+    if (j.contains("combat_state")) {
+        j.at("combat_state").get_to(s.combat_state);
+    } else {
+        s.combat_state = CombatState{};
+    }
+
+    if (j.contains("next_arrival_order")) {
+        j.at("next_arrival_order").get_to(s.next_arrival_order);
+    } else {
+        s.next_arrival_order = 0;
     }
 }
 

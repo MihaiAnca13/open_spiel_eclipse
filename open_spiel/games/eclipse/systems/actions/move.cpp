@@ -513,6 +513,7 @@ namespace open_spiel::eclipse
         if (!validate_regular_step(state, player_id, unit_idx, direction, cache, validation)) return false;
 
         state.unit_registry[unit_idx].sector_id = validation.dest_sector_id;
+        state.unit_registry[unit_idx].arrival_order = state.AllocateArrivalOrder();
         apply_step_bookkeeping(state, unit_idx, validation.movement_value);
         return true;
     }
@@ -554,6 +555,7 @@ namespace open_spiel::eclipse
         if (dest_sector_id == 0 || dest_sector_id == unit.sector_id) return false;
 
         unit.sector_id = dest_sector_id;
+        unit.arrival_order = state.AllocateArrivalOrder();
         apply_step_bookkeeping(state, unit_idx, movement_value);
         return true;
     }

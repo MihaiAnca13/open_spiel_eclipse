@@ -9,11 +9,11 @@
 #include <vector>
 #include <nlohmann/json.hpp>
 #include "open_spiel/games/eclipse/tech.h"
+#include "../../types.h"
 
 // Forward declarations to prevent circular dependencies
 struct State;
 struct Player;
-enum class ShipType;
 
 // Tracks the structural sub-state loop of a multi-activation Upgrade action phase.
 struct UpgradeState
