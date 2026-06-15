@@ -124,6 +124,18 @@ export interface MoveState {
   warp_unit_idx: number;
 }
 
+export interface PlayerScoreBreakdown {
+  reputation_vp: number;
+  ambassador_vp: number;
+  sector_vp: number;
+  monolith_vp: number;
+  discovery_vp: number;
+  tech_track_vp: number;
+  traitor_vp: number;
+  species_vp: number;
+  total_vp: number;
+}
+
 export interface GameState {
   players: Player[];
   galaxy: Sector[][];
@@ -140,6 +152,7 @@ export interface GameState {
   turn_order: number[];
   pass_order: number[];
   build_costs_by_player?: Record<string, BuildCosts>;
+  scores?: Record<string, PlayerScoreBreakdown>;
   explore_state?: ExploreState;
   research_state?: ResearchState;
   influence_state?: InfluenceState;

@@ -594,12 +594,28 @@ function App({
     const onActions = player.disks_on_actions ?? 0;
     const discsLeft = Math.max(0, INFLUENCE_TOTAL - onSectors - onActions);
     const isActive = playerId === gameState?.current_player;
+    const scoreBreakdown = gameState?.scores?.[playerId];
 
     return (
       <div key={playerId} className={`economy-card ${isActive ? 'active' : ''}`}>
         <div className="economy-name">
           <span style={{ color: getPlayerColor(playerId) }}>{playerLabel(playerId)} {player.species_id ? `(${player.species_id})` : ''}</span>
-          <span className="economy-score">⭐ {player.score}</span>
+          <span className="economy-score" title={scoreBreakdown ? "Hover for VP Breakdown" : undefined}>
+            ⭐ {player.score}
+            {scoreBreakdown && (
+              <div className="score-tooltip">
+                <div className="score-tooltip-row"><span>Reputation:</span> <span>+{scoreBreakdown.reputation_vp}</span></div>
+                <div className="score-tooltip-row"><span>Ambassadors:</span> <span>+{scoreBreakdown.ambassador_vp}</span></div>
+                <div className="score-tooltip-row"><span>Sectors:</span> <span>+{scoreBreakdown.sector_vp}</span></div>
+                <div className="score-tooltip-row"><span>Monoliths:</span> <span>+{scoreBreakdown.monolith_vp}</span></div>
+                <div className="score-tooltip-row"><span>Discoveries:</span> <span>+{scoreBreakdown.discovery_vp}</span></div>
+                <div className="score-tooltip-row"><span>Tech tracks:</span> <span>+{scoreBreakdown.tech_track_vp}</span></div>
+                <div className="score-tooltip-row"><span>Traitor:</span> <span>{scoreBreakdown.traitor_vp}</span></div>
+                <div className="score-tooltip-row"><span>Species:</span> <span>+{scoreBreakdown.species_vp}</span></div>
+                <div className="score-tooltip-row score-tooltip-total"><span>Total VP:</span> <span>{scoreBreakdown.total_vp}</span></div>
+              </div>
+            )}
+          </span>
         </div>
         <div className="economy-resources">
           <span className="res gold">

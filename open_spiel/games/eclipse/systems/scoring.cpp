@@ -3,6 +3,10 @@
 //
 
 #include "scoring.h"
+#include "../state.h"
+#include "../galaxy.h"
+#include "../types.h"
+#include "../species.h"
 
 namespace open_spiel {
 namespace eclipse {

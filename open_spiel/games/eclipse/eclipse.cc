@@ -19,6 +19,7 @@
 #include "open_spiel/games/eclipse/systems/actions/move.h"
 #include "open_spiel/games/eclipse/systems/setup.h"
 #include "open_spiel/games/eclipse/systems/upkeep.h"
+#include "open_spiel/games/eclipse/systems/scoring.h"
 #include "open_spiel/json/include/nlohmann/json.hpp"
 #include "open_spiel/observer.h"
 
@@ -1187,9 +1188,9 @@ std::vector<double> EclipseState::Returns() const {
   if (!IsTerminal()) {
     return returns;
   }
-  for (size_t i = 0; i < returns.size() && i < eclipse_state_.players.size();
-       ++i) {
-    returns[i] = static_cast<double>(eclipse_state_.players[i].score);
+  auto final_returns = open_spiel::eclipse::evaluate_final_returns(eclipse_state_);
+  for (size_t i = 0; i < returns.size(); ++i) {
+    returns[i] = final_returns[i];
   }
   return returns;
 }

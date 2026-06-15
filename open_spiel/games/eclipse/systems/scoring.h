@@ -7,7 +7,13 @@
 
 #include <cstdint>
 #include <array>
-#include "../state.h"
+#include <nlohmann/json.hpp>
+
+struct State;
+
+#ifndef MAX_PLAYERS
+#define MAX_PLAYERS 6
+#endif
 
 namespace open_spiel {
     namespace eclipse {
@@ -23,6 +29,20 @@ namespace open_spiel {
             int16_t species_vp    = 0;
             int16_t total_vp      = 0;
         };
+
+        inline void to_json(nlohmann::json& j, const PlayerScoreBreakdown& sb) {
+            j = nlohmann::json{
+                {"reputation_vp", sb.reputation_vp},
+                {"ambassador_vp", sb.ambassador_vp},
+                {"sector_vp", sb.sector_vp},
+                {"monolith_vp", sb.monolith_vp},
+                {"discovery_vp", sb.discovery_vp},
+                {"tech_track_vp", sb.tech_track_vp},
+                {"traitor_vp", sb.traitor_vp},
+                {"species_vp", sb.species_vp},
+                {"total_vp", sb.total_vp}
+            };
+        }
 
         // Computes absolute total and itemized breakdown values for a specific player
         PlayerScoreBreakdown compute_player_score(const ::State& state, uint8_t player_id);

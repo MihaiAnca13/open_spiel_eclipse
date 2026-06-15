@@ -1,4 +1,4 @@
-import type { Player } from '../../types/game';
+import type { Player, PlayerScoreBreakdown } from '../../types/game';
 import { getPlayerColor } from '../../theme';
 import { POPULATION_PRODUCTION_TABLE, POP_TRACK_MAX, INFLUENCE_TOTAL } from '../../utils/game';
 import PopulationTracks from '../ui/PopulationTracks';
@@ -17,6 +17,7 @@ interface PlayerCardProps {
   legalTradeActions: number[];
   submitAction: (actionId: number) => void;
   gameMetadata: any;
+  scoreBreakdown?: PlayerScoreBreakdown;
 }
 
 export default function PlayerCard({
@@ -29,6 +30,7 @@ export default function PlayerCard({
   legalTradeActions,
   submitAction,
   gameMetadata,
+  scoreBreakdown,
 }: PlayerCardProps) {
   const onSectors = player.disks_on_sectors ?? 0;
   const onActions = player.disks_on_actions ?? 0;
@@ -40,7 +42,22 @@ export default function PlayerCard({
     <div className={`economy-card ${isMine ? 'mine' : ''} ${isActive ? 'active' : ''}`}>
       <div className="economy-name">
         <span style={{ color: getPlayerColor(playerId) }}>{playerLabel(playerId)}</span>
-        <span className="economy-score">⭐ {player.score}</span>
+        <span className="economy-score" title={scoreBreakdown ? "Hover for VP Breakdown" : undefined}>
+          ⭐ {player.score}
+          {scoreBreakdown && (
+            <div className="score-tooltip">
+              <div className="score-tooltip-row"><span>Reputation:</span> <span>+{scoreBreakdown.reputation_vp}</span></div>
+              <div className="score-tooltip-row"><span>Ambassadors:</span> <span>+{scoreBreakdown.ambassador_vp}</span></div>
+              <div className="score-tooltip-row"><span>Sectors:</span> <span>+{scoreBreakdown.sector_vp}</span></div>
+              <div className="score-tooltip-row"><span>Monoliths:</span> <span>+{scoreBreakdown.monolith_vp}</span></div>
+              <div className="score-tooltip-row"><span>Discoveries:</span> <span>+{scoreBreakdown.discovery_vp}</span></div>
+              <div className="score-tooltip-row"><span>Tech tracks:</span> <span>+{scoreBreakdown.tech_track_vp}</span></div>
+              <div className="score-tooltip-row"><span>Traitor:</span> <span>{scoreBreakdown.traitor_vp}</span></div>
+              <div className="score-tooltip-row"><span>Species:</span> <span>+{scoreBreakdown.species_vp}</span></div>
+              <div className="score-tooltip-row score-tooltip-total"><span>Total VP:</span> <span>{scoreBreakdown.total_vp}</span></div>
+            </div>
+          )}
+        </span>
       </div>
       <div className="economy-resources">
         <span className="res gold" title="Money">

@@ -26,6 +26,7 @@
 #include "systems/actions/upgrade.h"
 #include "systems/actions/move.h"
 #include "systems/combat.h"
+#include "systems/scoring.h"
 #include "absl/container/fixed_array.h"
 
 using open_spiel::eclipse::FixedVector;
@@ -269,6 +270,10 @@ inline void to_json(nlohmann::json& j, const State& s) {
         costs["Monolith"] = open_spiel::eclipse::calculate_build_cost(player, open_spiel::eclipse::BuildType::MONOLITH);
         build_costs_by_player[std::to_string(player.id)] = costs;
     }
+    nlohmann::json scores = nlohmann::json::object();
+    for (const ::Player& player : s.players) {
+        scores[std::to_string(player.id)] = open_spiel::eclipse::compute_player_score(s, player.id);
+    }
 
     j = nlohmann::json{
         {"players", s.players},
@@ -292,6 +297,7 @@ inline void to_json(nlohmann::json& j, const State& s) {
         {"research_state", s.research_state},
         {"build_state", s.build_state},
         {"build_costs_by_player", build_costs_by_player},
+        {"scores", scores},
         {"influence_state", s.influence_state},
         {"upgrade_state", s.upgrade_state},
         {"move_state", s.move_state},

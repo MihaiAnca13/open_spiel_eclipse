@@ -41,6 +41,7 @@ export default function EconomyPanel({
                 legalTradeActions={legalTradeActions}
                 submitAction={submitAction}
                 gameMetadata={gameMetadata}
+                scoreBreakdown={gameState.scores?.[pid]}
               />
             );
           })}
