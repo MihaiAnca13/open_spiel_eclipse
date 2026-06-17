@@ -124,6 +124,83 @@ export interface MoveState {
   warp_unit_idx: number;
 }
 
+// ── Combat phase ── mirrors open_spiel/games/eclipse/systems/combat.h.
+export type CombatPhase =
+  | 'inactive'
+  | 'determine_battles'
+  | 'missile_phase'
+  | 'choose_engagement_action'
+  | 'engagement_firing'
+  | 'select_reputation_tile'
+  | 'attack_population'
+  | 'influence_sectors'
+  | 'discovery_award'
+  | 'repair';
+
+export interface InitiativeGroup {
+  player_id: number;
+  type: string;
+  initiative: number;
+  is_npc: boolean;
+  destroyed: boolean;
+  retreating: boolean;
+  alive_count: number;
+  destroyed_count: number;
+}
+
+export interface DestroyedShipRecord {
+  player_id: number;
+  type: string;
+  count: number;
+  destroyed_by: number;
+}
+
+export interface CombatState {
+  phase: CombatPhase;
+  active_sector_id: number;
+  engagement_round: number;
+  current_attacker_id: number;
+  current_defender_id: number;
+  pending_player: number;
+  active_ship_type: string;
+  initiative_timeline: InitiativeGroup[];
+  initiative_size: number;
+  initiative_idx: number;
+  retreat_destinations: number[];
+  retreat_destinations_size: number;
+  drawn_tiles: string[];
+  drawn_tiles_size: number;
+  tile_select_player: number;
+  reputation_earned: number;
+  pending_target_group_player: number;
+  pending_target_group_type: string;
+  pending_target_indices: number[];
+  pending_target_count: number;
+  pending_die_values: number[];
+  pending_die_colors: number[];
+  pending_die_count: number;
+  pending_die_index: number;
+  pending_dice_are_missiles: boolean;
+  pending_dice_pop_attack: boolean;
+  destroyed_ships: DestroyedShipRecord[];
+  destroyed_ships_size: number;
+  pop_attack_sector_id: number;
+  pop_attack_player: number;
+  pop_attack_owner: number;
+  pop_attack_damage_remaining: number;
+  influence_decision_player: number;
+  influence_decision_sector: number;
+  discovery_decision_player: number;
+  discovery_decision_sector: number;
+}
+
+// ── Upkeep / Cleanup phase ── mirrors UpkeepState in state.h.
+export interface UpkeepState {
+  step: 'inactive' | 'colony_ships' | 'bankruptcy' | 'cleanup_graveyards' | 'choose_return_track';
+  player_id: number;
+  pending_returns: PendingReturn[];
+}
+
 export interface PlayerScoreBreakdown {
   reputation_vp: number;
   ambassador_vp: number;
@@ -147,7 +224,7 @@ export interface GameState {
   guardian_difficulty: string;
   ancient_difficulty: string;
   current_player: number;
-  current_phase: number;
+  current_phase: 'action' | 'combat' | 'upkeep' | 'cleanup';
   current_round: number;
   turn_order: number[];
   pass_order: number[];
@@ -158,6 +235,8 @@ export interface GameState {
   influence_state?: InfluenceState;
   build_state?: BuildState;
   move_state?: MoveState;
+  combat_state?: CombatState;
+  upkeep_state?: UpkeepState;
   sector_bag_inner: number;
   sector_bag_middle: number;
   sector_bag_outer: number;

@@ -37,6 +37,9 @@ interface GalaxyMapProps {
   selectedMoveUnitIdx?: number | null;
   onSelectMoveUnit?: (idx: number | null) => void;
   onSelectMoveSector?: (sectorId: number | null) => void;
+  combatActiveSectorId?: number;
+  combatRetreatActions?: number[];
+  combatTargetActions?: number[];
 }
 
 export default function GalaxyMap({
@@ -66,6 +69,9 @@ export default function GalaxyMap({
   selectedMoveUnitIdx,
   onSelectMoveUnit,
   onSelectMoveSector,
+  combatActiveSectorId = 0,
+  combatRetreatActions = [],
+  combatTargetActions = [],
 }: GalaxyMapProps) {
   const [hoveredSector, setHoveredSector] = useState<Sector | null>(null);
   const [brokenImages, setBrokenImages] = useState<Set<number>>(new Set());
@@ -100,6 +106,20 @@ export default function GalaxyMap({
   // Move phase detection & target cells for highlighting
   const movePhase = gameState?.move_state?.phase ?? 'inactive';
   const inMovePhase = movePhase === 'choose_move' || movePhase === 'choose_warp_destination';
+
+  // Combat: retreat-destination cells (cell index -> actionId) and targetable
+  // ships (global unit_registry index -> actionId).
+  const combatRetreatCells = useMemo(() => {
+    const map = new Map<number, number>();
+    for (const a of combatRetreatActions) map.set(a - ACTION.COMBAT_RETREAT_TO_CELL_START, a);
+    return map;
+  }, [combatRetreatActions]);
+  const combatTargetUnits = useMemo(() => {
+    const map = new Map<number, number>();
+    for (const a of combatTargetActions) map.set(a - ACTION.COMBAT_DICE_TARGET_START, a);
+    return map;
+  }, [combatTargetActions]);
+  const inCombat = combatActiveSectorId > 0;
 
   // Pan/zoom state
   const [viewTransform, setViewTransform] = useState({ x: 0, y: 0, scale: INITIAL_SCALE });
@@ -463,18 +483,36 @@ export default function GalaxyMap({
   <g transform={`translate(${cx}, ${cy + 18})`}>
     {units.map((unit, ui) => {
       const uColor = getPlayerColor(unit.player_id);
+      const globalIdx = gameState!.unit_registry.indexOf(unit);
+      const targetAction = combatTargetUnits.get(globalIdx);
+      const isTargetable = targetAction !== undefined;
+      const damage = unit.damage ?? 0;
       return (
-        <g key={ui} transform={`translate(${ui * 12}, 0)`}>
+        <g
+          key={ui}
+          transform={`translate(${ui * 12}, 0)`}
+          style={{ cursor: isTargetable ? 'pointer' : 'default' }}
+          onClick={isTargetable ? (e) => { e.stopPropagation(); submitAction(targetAction!); } : undefined}
+        >
+          {isTargetable && (
+            <circle cx={0} cy={0} r={9} fill="#ef4444" fillOpacity={0.25} stroke="#ef4444" strokeWidth={1.2}>
+              <animate attributeName="r" values="8;10;8" dur="1s" repeatCount="indefinite" />
+            </circle>
+          )}
           <image
             href={shipImageUrl(String(unit.type))}
             width={14}
             height={14}
             x={-7}
             y={-7}
-            style={{ opacity: 0.9 }}
+            style={{ opacity: 0.9, pointerEvents: isTargetable ? 'all' : 'none' }}
             onError={(e) => { e.currentTarget.style.display = 'none'; }}
           />
           <circle cx={5} cy={5} r={3} fill={uColor} stroke="#fff" strokeWidth={0.5} />
+          {/* Damage cubes */}
+          {damage > 0 && Array.from({ length: Math.min(damage, 4) }, (_, di) => (
+            <rect key={di} x={-7 + di * 3.5} y={-11} width={3} height={3} rx={0.5} fill="#ef4444" stroke="#000" strokeWidth={0.3} />
+          ))}
         </g>
       );
     })}
@@ -596,6 +634,43 @@ export default function GalaxyMap({
                     onMouseLeave={() => {
                       setHoveredSector(null);
                     }}
+                  />
+                );
+              })()}
+
+              {/* ── Combat: battle sector outline ── */}
+              {inCombat && sector.sector_id === combatActiveSectorId && (
+                <polygon
+                  points={getHexPoints(cx, cy, r)}
+                  fill="none"
+                  stroke="#ef4444"
+                  strokeWidth={3}
+                  className="combat-battle"
+                  style={{ pointerEvents: 'none' }}
+                >
+                  <animate attributeName="stroke-opacity" values="1;0.4;1" dur="1.2s" repeatCount="indefinite" />
+                </polygon>
+              )}
+
+              {/* ── Combat: retreat-destination hexes (clickable) ── */}
+              {inCombat && combatRetreatCells.size > 0 && (() => {
+                const mapSize = gameState?.galaxy.length ?? 15;
+                const cellIdx = (sector.coords.q + 7) * mapSize + (sector.coords.r + 7);
+                const action = combatRetreatCells.get(cellIdx);
+                if (action === undefined) return null;
+                return (
+                  <polygon
+                    points={getHexPoints(cx, cy, r)}
+                    fill="#22c55e"
+                    fillOpacity={0.25}
+                    stroke="#22c55e"
+                    strokeWidth={2.5}
+                    strokeDasharray="5 3"
+                    className="combat-retreat"
+                    style={{ cursor: 'pointer' }}
+                    onClick={(e) => { e.stopPropagation(); submitAction(action); }}
+                    onMouseEnter={() => setHoveredSector(sector)}
+                    onMouseLeave={() => setHoveredSector(null)}
                   />
                 );
               })()}

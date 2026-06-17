@@ -18,6 +18,8 @@ import { bagCount, EMPTY_LEGAL_ACTIONS, INFLUENCE_TOTAL, POPULATION_PRODUCTION_T
 // Components
 import SetupPanel from './components/setup/SetupPanel';
 import GalaxyMap from './components/game/GalaxyMap';
+import CombatPanel from './components/game/CombatPanel';
+import UpkeepPanel from './components/ui/UpkeepPanel';
 import DebugPanel from './components/overlays/DebugPanel';
 import JsonInspector from './components/overlays/JsonInspector';
 import PopulationTracks from './components/ui/PopulationTracks';
@@ -317,6 +319,10 @@ function App({
   const buildState = gameState?.build_state;
   const moveState = gameState?.move_state;
   const influencePhase = influenceState?.phase ?? 'inactive';
+  const combatState = gameState?.combat_state;
+  const upkeepState = gameState?.upkeep_state;
+  const currentPhase = gameState?.current_phase ?? 'action';
+  const actionStrings = snapshot?.action_strings;
   const isTerminal = snapshot?.is_terminal ?? false;
   const isStarted = setupFinalized && snapshot?.current_player !== undefined;
   const isMyTurn = isStarted && snapshot?.current_player === mySeatIdx && !isTerminal;
@@ -419,6 +425,18 @@ function App({
   const reclaimFromCellActions = isInfluencePhase
     ? legalActions.filter(a => a >= ACTION.RECLAIM_FROM_CELL_START && a < ACTION.CHOOSE_RETURN_TRACK_START)
     : [];
+
+  // Combat overlays: retreat-destination hexes and targetable ships on the map.
+  const inCombatPhase = currentPhase === 'combat';
+  const combatRetreatActions = (isMyTurn && inCombatPhase)
+    ? legalActions.filter(a => a >= ACTION.COMBAT_RETREAT_TO_CELL_START && a < ACTION.COMBAT_DICE_TARGET_START)
+    : EMPTY_LEGAL_ACTIONS;
+  const combatTargetActions = (isMyTurn && inCombatPhase)
+    ? legalActions.filter(a => a >= ACTION.COMBAT_DICE_TARGET_START && a < ACTION.COMBAT_REP_SELECT_START)
+    : EMPTY_LEGAL_ACTIONS;
+  const combatActiveSectorId = (inCombatPhase && combatState && combatState.phase !== 'inactive')
+    ? combatState.active_sector_id
+    : 0;
 
   // Decode colony ship actions into (sectorId, slotIdx, track) for display.
   const colonyShipPlacements = legalColonyShipActions.map(actionId => {
@@ -773,10 +791,43 @@ function App({
               selectedMoveUnitIdx={selectedMoveUnitIdx}
               onSelectMoveUnit={setSelectedMoveUnitIdx}
               onSelectMoveSector={setSelectedMoveSectorId}
+              combatActiveSectorId={combatActiveSectorId}
+              combatRetreatActions={combatRetreatActions}
+              combatTargetActions={combatTargetActions}
             />
 
+            {/* Floating combat panel */}
+            {isStarted && isMyTurn && !isTerminal && currentPhase === 'combat' && combatState && (
+              <div className="action-float">
+                <CombatPanel
+                  combat={combatState}
+                  gameState={gameState}
+                  legalActions={legalActions}
+                  actionStrings={actionStrings}
+                  busy={actionInProgress}
+                  onAction={submitAction}
+                  playerLabel={playerLabel}
+                />
+              </div>
+            )}
+
+            {/* Floating upkeep / cleanup panel */}
+            {isStarted && isMyTurn && !isTerminal && (currentPhase === 'upkeep' || currentPhase === 'cleanup') && (
+              <div className="action-float">
+                <UpkeepPanel
+                  upkeep={upkeepState}
+                  player={gameState.players[mySeatIdx]}
+                  gameState={gameState}
+                  legalActions={legalActions}
+                  actionStrings={actionStrings}
+                  busy={actionInProgress}
+                  onAction={submitAction}
+                />
+              </div>
+            )}
+
             {/* Floating action panel — only show when it's my turn */}
-            {isStarted && isMyTurn && (
+            {isStarted && isMyTurn && currentPhase === 'action' && (
               <div className="action-float">
                 <ActionPanel
                   explore={exploreState}
