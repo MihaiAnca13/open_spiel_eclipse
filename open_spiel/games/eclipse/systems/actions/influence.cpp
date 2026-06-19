@@ -49,7 +49,9 @@ namespace open_spiel::eclipse
                 const Sector& nb = state.galaxy.at(nq, nr);
                 if (nb.sector_id == 0) continue;
 
-                // Neighbor must be controlled or hold an unpinned ship to source the connection
+                // Neighbor must be controlled or hold a ship to source the connection.
+                // Influence counts any ship (pinned or not) per the rulebook ("a Ship
+                // or Control"); only Explore requires an Unpinned ship.
                 if (!is_sector_anchor(state, player_id, nb)) continue;
 
                 if (wormhole_generator)

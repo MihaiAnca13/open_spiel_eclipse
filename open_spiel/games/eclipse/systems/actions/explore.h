@@ -68,8 +68,8 @@ namespace open_spiel::eclipse {
 // ::State& and returning bool/containers, with no OpenSpiel dependency.
 
 
-// True if `sector` is one the player Controls or has a (unpinned) ship in, so it
-// can anchor an Explore zone. Pinning is ignored until movement/combat exists.
+// True if `sector` is one the player Controls or holds at least one Unpinned Ship
+// in, so it can anchor an Explore zone / wormhole connection (rulebook p.13).
 bool is_explore_anchor(const ::State& state, uint8_t player_id, const ::Sector& sector);
 
 // The current bitmask bag for a ring (INNER / MIDDLE / OUTER).

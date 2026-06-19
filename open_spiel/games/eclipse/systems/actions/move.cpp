@@ -124,6 +124,11 @@ namespace open_spiel::eclipse
                         continue;
                     }
 
+                    if (unit.type == ShipType::STARBASE)
+                    {
+                        continue; // Starbases do not count for pinning.
+                    }
+
                     if (unit.player_id == player_id)
                     {
                         ++friendly[sector_idx];
@@ -391,6 +396,7 @@ namespace open_spiel::eclipse
         {
             if (unit.sector_id != sector_id) continue;
             if (unit.type == ShipType::GCDS) return false;  // GCDS pins all ships.
+            if (unit.type == ShipType::STARBASE) continue;  // Starbases do not count for pinning.
             if (unit.player_id == player_id) ++friendly;
             else ++opponents;
         }

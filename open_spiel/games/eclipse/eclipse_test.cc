@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <algorithm>
+#include <random>
 #include <vector>
 
 #include "open_spiel/games/eclipse/systems/actions/explore.h"
@@ -68,8 +69,37 @@ void InitialStateChanceNodeTest() {
 }
 
 void RandomSimulationAndSerializationTest() {
-  testing::RandomSimTest(*LoadEclipseGame(4, 7), /*num_sims=*/10,
-                         /*serialize=*/true, /*verbose=*/false);
+  // Exercise clone / serialize / observation invariants across several seeds.
+  for (int seed : {7, 13, 42}) {
+    testing::RandomSimTest(*LoadEclipseGame(4, seed), /*num_sims=*/5,
+                           /*serialize=*/true, /*verbose=*/false);
+  }
+
+  // Regression guard for the historical OOM. RandomSimTest keeps one state
+  // clone per move in its history vector, so a game that fails to terminate
+  // through the normal round logic grows that history without bound and
+  // exhausts memory. The MoveNumber() >= MaxGameLength() backstop in
+  // IsTerminal() caps the worst case, but reaching it means round
+  // advancement is broken. Assert random games end well below the backstop.
+  std::mt19937 rng(12345);
+  for (int seed = 0; seed < 30; ++seed) {
+    auto game = LoadEclipseGame(4, seed);
+    const int cap = game->MaxGameLength();
+    auto state = game->NewInitialState();
+    while (!state->IsTerminal()) {
+      std::vector<open_spiel::Action> actions;
+      if (state->IsChanceNode()) {
+        for (const auto& outcome : state->ChanceOutcomes()) {
+          actions.push_back(outcome.first);
+        }
+      } else {
+        actions = state->LegalActions();
+      }
+      std::uniform_int_distribution<int> dis(0, actions.size() - 1);
+      state->ApplyAction(actions[dis(rng)]);
+    }
+    SPIEL_CHECK_LT(state->MoveNumber(), cap);
+  }
 }
 
 void DeterministicReplayTest() {
@@ -245,6 +275,74 @@ void ExploreExhaustedRingTest() {
   s.sector_bag_inner = 1;
   SPIEL_CHECK_TRUE(is_legal_explore_zone(s, 0, 1, -1));
   SPIEL_CHECK_TRUE(has_explore_zone(s, 0));
+}
+
+// Explore anchors require Control or an *Unpinned* Ship; Influence (is_sector_anchor)
+// counts any Ship. Pinning: each opponent ship pins one of yours, GCDS pins all.
+void ExplorePinningAnchorTest() {
+  ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+  s.unit_registry.clear();
+  Sector& sec = s.galaxy.at(2, 0);
+  sec.sector_id = 200;
+  sec.owner_id = 255;  // uncontrolled
+  sec.coords = {2, 0};
+
+  // One friendly ship, no enemies: anchors for both Explore and Influence.
+  s.unit_registry.push_back(Unit{0, ShipType::INTERCEPTOR, 200, 0});
+  SPIEL_CHECK_TRUE(is_explore_anchor(s, 0, sec));
+  SPIEL_CHECK_TRUE(is_sector_anchor(s, 0, sec));
+
+  // One enemy ship pins the lone friendly: Explore no longer anchors here, but
+  // Influence still counts the (pinned) ship.
+  s.unit_registry.push_back(Unit{1, ShipType::INTERCEPTOR, 200, 0});
+  SPIEL_CHECK_FALSE(is_explore_anchor(s, 0, sec));
+  SPIEL_CHECK_TRUE(is_sector_anchor(s, 0, sec));
+
+  // A second friendly ship leaves one unpinned: Explore anchors again.
+  s.unit_registry.push_back(Unit{0, ShipType::INTERCEPTOR, 200, 0});
+  SPIEL_CHECK_TRUE(is_explore_anchor(s, 0, sec));
+
+  // Control anchors Explore regardless of pinning (GCDS present pins all ships).
+  s.unit_registry.push_back(Unit{NPC_PLAYER_ID, ShipType::GCDS, 200, 0});
+  SPIEL_CHECK_FALSE(is_explore_anchor(s, 0, sec));  // GCDS pins all; no control
+  sec.owner_id = 0;
+  SPIEL_CHECK_TRUE(is_explore_anchor(s, 0, sec));   // controlled → anchors
+}
+
+void ExploreAndMovePinningStarbaseTest() {
+  ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+  s.sector_bag_middle = (1u << 10) - 1;
+  s.sector_bag_outer = (1u << 10) - 1;
+  s.unit_registry.clear();
+  Sector& sec = s.galaxy.at(2, 0);
+  sec.sector_id = 201;
+  sec.owner_id = 255;  // uncontrolled
+  sec.coords = {2, 0};
+
+  // 1. Starbase is not counted as a ship for pinning:
+  // Add 1 friendly ship and 1 enemy STARBASE.
+  // The Starbase does not pin the friendly ship, so the friendly ship is UNPINNED.
+  s.unit_registry.push_back(Unit{0, ShipType::INTERCEPTOR, 201, 0});
+  s.unit_registry.push_back(Unit{1, ShipType::STARBASE, 201, 0});
+  SPIEL_CHECK_TRUE(is_explore_anchor(s, 0, sec));
+
+  // Add 1 friendly STARBASE and 1 enemy Ship.
+  // The friendly Starbase does not absorb pinning, so the friendly ship is PINNED.
+  s.unit_registry.clear();
+  s.unit_registry.push_back(Unit{0, ShipType::INTERCEPTOR, 201, 0});
+  s.unit_registry.push_back(Unit{0, ShipType::STARBASE, 201, 0});
+  s.unit_registry.push_back(Unit{1, ShipType::INTERCEPTOR, 201, 0});
+  SPIEL_CHECK_FALSE(is_explore_anchor(s, 0, sec));
+
+  // 2. Check that collect_explore_zones / legal_explore_zones respects pinning:
+  // If the player only has a pinned ship in the sector, legal_explore_zones should NOT list adjacent zones.
+  std::vector<HexCoord> zones = legal_explore_zones(s, 0);
+  SPIEL_CHECK_TRUE(zones.empty());
+
+  // But if we add another friendly ship to unpin, zones should be collected.
+  s.unit_registry.push_back(Unit{0, ShipType::INTERCEPTOR, 201, 0});
+  zones = legal_explore_zones(s, 0);
+  SPIEL_CHECK_FALSE(zones.empty());
 }
 
 void ExploreClaimControlTest() {
@@ -1372,6 +1470,8 @@ int main(int argc, char** argv) {
   RUN_TEST(ExplorePureHelpersTest);
   RUN_TEST(ExploreZoneAndConnectionTest);
   RUN_TEST(ExploreExhaustedRingTest);
+  RUN_TEST(ExplorePinningAnchorTest);
+  RUN_TEST(ExploreAndMovePinningStarbaseTest);
   RUN_TEST(ExploreClaimControlTest);
   RUN_TEST(ExploreAncientBlocksControlTest);
   RUN_TEST(ExploreDiscoveryVpTest);
@@ -1396,5 +1496,5 @@ int main(int argc, char** argv) {
   RUN_TEST(CombatDiceChanceFlowTest);
 
 #undef RUN_TEST
-  std::cout << "[==========] 31 tests passed." << std::endl;
+  std::cout << "[==========] 32 tests passed." << std::endl;
 }

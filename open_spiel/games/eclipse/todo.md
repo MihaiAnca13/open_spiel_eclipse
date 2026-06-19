@@ -1,5 +1,4 @@
 - integrate scoring
-- RandomSimulationAndSerializationTest OOM fix
 - initiative? (same player ship order selection?)
 - traitor card  
 - diplomacy

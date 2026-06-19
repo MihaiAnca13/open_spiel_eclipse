@@ -407,8 +407,9 @@ inline void from_json(const nlohmann::json& j, State& s) {
     }
 }
 
-// Helper: Check if a sector is an anchor for a player (controlled or has a ship present)
-// TODO: respect Pinning once movement/combat exists; any own ship anchors.
+// Helper: Check if a sector anchors an Influence connection for a player: Control
+// or any Ship present. Influence counts pinned ships too (rulebook: "a Ship or
+// Control"); Explore needs an Unpinned ship instead — see is_explore_anchor().
 inline bool is_sector_anchor(const State& state, uint8_t player_id, const Sector& sector) {
     if (sector.sector_id == 0) return false;
     if (sector.owner_id == player_id) return true;

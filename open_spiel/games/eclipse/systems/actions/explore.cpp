@@ -12,6 +12,7 @@
 #include "../../species.h"
 #include "../../state.h"
 #include "../../tech.h"
+#include "move.h"  // can_leave_sector (pinning) for is_explore_anchor
 
 namespace open_spiel::eclipse {
 
@@ -95,7 +96,7 @@ bool zone_has_wormhole_access(const State& state, uint8_t player_id, int q, int 
         int nr = r + HEX_DIRECTIONS[d].second;
         if (!in_galaxy_bounds(nq, nr)) continue;
         const Sector& nb = state.galaxy.at(nq, nr);
-        if (nb.sector_id == 0 || !is_sector_anchor(state, player_id, nb)) continue;
+        if (nb.sector_id == 0 || !is_explore_anchor(state, player_id, nb)) continue;
         if (wormhole_generator) return true;
         const SectorDefinition* ndef = get_sector_definition(nb.sector_id);
         if (ndef == nullptr) continue;
@@ -122,7 +123,9 @@ void collect_explore_zones(const State& state, uint8_t player_id, bool first_onl
     std::bitset<kMaxSectorId> ship_sector;
     for (const Unit& unit : state.unit_registry) {
         if (unit.player_id == player_id && unit.sector_id < kMaxSectorId) {
-            ship_sector.set(unit.sector_id);
+            if (can_leave_sector(state, player_id, unit.sector_id)) {
+                ship_sector.set(unit.sector_id);
+            }
         }
     }
     const bool wormhole_generator =
@@ -190,6 +193,15 @@ void end_explore_activation(State& state) {
 }  // namespace
 
 
+// Explore anchors require Control or at least one *Unpinned* Ship (rulebook p.13),
+// unlike Influence which counts any Ship (is_sector_anchor). can_leave_sector()
+// already computes "≥1 friendly ship survives pinning" (each opponent ship pins
+// one, two with Cloaking Device; the GCDS pins all), so reuse it for the ship case.
+bool is_explore_anchor(const ::State& state, uint8_t player_id, const ::Sector& sector) {
+    if (sector.sector_id == 0) return false;
+    if (sector.owner_id == player_id) return true;  // Control anchors regardless of pinning.
+    return can_leave_sector(state, player_id, sector.sector_id);
+}
 
 uint32_t ring_bag_value(const State& state, SectorType ring) {
     switch (ring) {
@@ -234,7 +246,7 @@ std::vector<uint8_t> legal_explore_rotations(const State& state, uint8_t player_
         int nr = es.zone_r + HEX_DIRECTIONS[d].second;
         if (!in_galaxy_bounds(nq, nr)) continue;
         const Sector& nb = state.galaxy.at(nq, nr);
-        if (nb.sector_id == 0 || !is_sector_anchor(state, player_id, nb)) continue;
+        if (nb.sector_id == 0 || !is_explore_anchor(state, player_id, nb)) continue;
         const SectorDefinition* ndef = get_sector_definition(nb.sector_id);
         if (ndef == nullptr) continue;
         neighbours[d] = {true, rotate_edge_mask(ndef->wormholes_mask, nb.rotation)};
