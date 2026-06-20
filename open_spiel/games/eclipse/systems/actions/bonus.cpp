@@ -216,15 +216,23 @@ std::vector<ColonyPlacement> legal_colony_ship_placements(
 }
 
 bool can_place_warp_portal(const State& state, uint8_t player_id, uint8_t galaxy_cell_idx) {
-    // TODO: Implement Warp Portal placement logic later.
-    // 1. Verify player is eligible (either by claiming the Warp Portal Discovery Tile
-    //    or having researched the Warp Portal Rare Tech).
-    // 2. Consume the eligibility flag/tile.
-    // 3. Mark the target sector as containing a player warp portal (set has_player_warp_portal = true).
-    return false;
+    if (player_id >= state.players.size()) return false;
+    if (!state.players[player_id].warp_portal_eligible) return false;
+    if (galaxy_cell_idx >= GALAXY_CELL_COUNT) return false;
+    HexCoord coord = index_to_hex(static_cast<int>(galaxy_cell_idx));
+    if (!in_galaxy_bounds(coord.q, coord.r)) return false;
+    const Sector& s = state.galaxy.at(coord.q, coord.r);
+    if (s.sector_id == 0) return false;
+    if (s.owner_id != player_id) return false;
+    if (s.player_warp_portal_vp > 0) return false;
+    return true;
 }
 
 bool place_warp_portal(State& state, uint8_t player_id, uint8_t galaxy_cell_idx) {
-    // TODO: Implement Warp Portal placement logic later.
-    return false;
+    if (!can_place_warp_portal(state, player_id, galaxy_cell_idx)) return false;
+    HexCoord coord = index_to_hex(static_cast<int>(galaxy_cell_idx));
+    Sector& s = state.galaxy.at(coord.q, coord.r);
+    s.player_warp_portal_vp = 1;
+    state.players[player_id].warp_portal_eligible = false;
+    return true;
 }

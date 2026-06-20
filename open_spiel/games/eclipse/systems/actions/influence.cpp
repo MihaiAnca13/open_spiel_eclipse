@@ -25,7 +25,7 @@ namespace open_spiel::eclipse
             const SectorDefinition* dest_def = get_sector_definition(dest.sector_id);
             if (!dest_def) return false;
 
-            if ((dest.has_player_warp_portal || dest_def->has_warp_portal) && player_has_warp_portal_anchor(state, player_id))
+            if ((dest.player_warp_portal_vp > 0 || dest_def->has_warp_portal) && player_has_warp_portal_anchor(state, player_id))
             {
                 return true;
             }
@@ -282,6 +282,25 @@ namespace open_spiel::eclipse
 
         // Sector must be an explored tile and completely unowned/vacant
         if (sector.sector_id == 0 || sector.owner_id != 255) return false;
+
+        // Ensure that if the sector contains NPCs, we follow proper rules:
+        // - GCDS/Guardians block influence for everyone.
+        // - Ancients block influence for non-Draco players.
+        bool has_ancients = false;
+        bool has_other_npc = false;
+        for (const Unit& unit : state.unit_registry) {
+            if (unit.sector_id == sector.sector_id && unit.player_id == NPC_PLAYER_ID) {
+                if (unit.type == ShipType::ANCIENT) {
+                    has_ancients = true;
+                } else {
+                    has_other_npc = true;
+                }
+            }
+        }
+        const bool is_draco = (player.species_id == Species::DESCENDANTS_OF_DRACO);
+        if (has_other_npc || (has_ancients && !is_draco)) {
+            return false;
+        }
 
         // Build bitsets for O(1) ship presence checks (matches explore.cpp pattern)
         constexpr int max_sector_id = 512;

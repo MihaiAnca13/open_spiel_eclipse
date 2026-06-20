@@ -36,10 +36,10 @@ namespace open_spiel::eclipse
 {
 
     // Validates whether a player can assign a specific part to a target slot index on a ship blueprint type.
-    bool can_upgrade(const ::State& state, uint8_t player_id, ShipType ship_type, uint8_t slot_idx, ShipPartId part_id);
+    bool can_upgrade(const ::State& state, uint8_t player_id, ShipType ship_type, uint8_t slot_idx, ShipPartId part_id, bool is_free_immediate = false);
 
     // Executes a single component modification activation pass over a ship blueprint.
-    bool execute_upgrade(::State& state, uint8_t player_id, ShipType ship_type, uint8_t slot_idx, ShipPartId part_id);
+    bool execute_upgrade(::State& state, uint8_t player_id, ShipType ship_type, uint8_t slot_idx, ShipPartId part_id, bool is_free_immediate = false);
 
     // Initializes a multi-activation upgrade cycle using species traits and permanent modifiers.
     bool begin_upgrade(::State& state, uint8_t player_id);

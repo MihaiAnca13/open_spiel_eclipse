@@ -31,7 +31,9 @@ struct Sector {
     DiscoveryBit discovery_tile = DiscoveryBit::NONE;
     bool orbital_built;
     bool monolith_built;
-    bool has_player_warp_portal = false; // True if the player places a warp portal
+    // VP value of a player-placed Warp Portal tile on this sector.
+    // 0 = none, 1 = Rare Tech portal, 2 = Ancient Warp Portal discovery tile.
+    uint8_t player_warp_portal_vp = 0;
 };
 
 inline void to_json(nlohmann::json& j, const Sector& s) {
@@ -46,7 +48,7 @@ inline void to_json(nlohmann::json& j, const Sector& s) {
         {"discovery_tile", s.discovery_tile},
         {"orbital_built", s.orbital_built},
         {"monolith_built", s.monolith_built},
-        {"has_player_warp_portal", s.has_player_warp_portal},
+        {"player_warp_portal_vp", s.player_warp_portal_vp},
     };
 }
 
@@ -65,10 +67,14 @@ inline void from_json(const nlohmann::json& j, Sector& s) {
     }
     j.at("orbital_built").get_to(s.orbital_built);
     j.at("monolith_built").get_to(s.monolith_built);
-    if (j.contains("has_player_warp_portal")) {
-        j.at("has_player_warp_portal").get_to(s.has_player_warp_portal);
+    if (j.contains("player_warp_portal_vp")) {
+        j.at("player_warp_portal_vp").get_to(s.player_warp_portal_vp);
+    } else if (j.contains("has_player_warp_portal")) {
+        bool has_player_warp_portal = false;
+        j.at("has_player_warp_portal").get_to(has_player_warp_portal);
+        s.player_warp_portal_vp = has_player_warp_portal ? 2 : 0;
     } else {
-        s.has_player_warp_portal = false;
+        s.player_warp_portal_vp = 0;
     }
 }
 

@@ -54,9 +54,8 @@ PlayerScoreBreakdown compute_player_score(const ::State& state, uint8_t player_i
     }
 
     // 2. AMBASSADOR TILES
-    // TODO: Not implemented yet - no ambassador tile tracking in Player struct.
-    // Ambassador tiles score 1 VP per tile when held.
-    score.ambassador_vp = 0;
+    // Rulebook page 25: 1 VP per Ambassador tile held.
+    score.ambassador_vp = player.ambassador_tiles_held;
 
     // 3. SECTORS & STRUCTURES
     // Iterating over the hex axial coordinates matrix space without vector mutations
@@ -88,10 +87,7 @@ PlayerScoreBreakdown compute_player_score(const ::State& state, uint8_t player_i
                     score.monolith_vp += 3;
                 }
 
-                // Warp Portal tile sector is worth 2 VP if controlled
-                if (sector.has_player_warp_portal) {
-                    score.sector_vp += 2;
-                }
+                score.sector_vp += sector.player_warp_portal_vp;
 
                 // Planta Species Bonus (+1 VP per sector owned)
                 if (player.species_id == Species::PLANTA) {
@@ -111,13 +107,14 @@ PlayerScoreBreakdown compute_player_score(const ::State& state, uint8_t player_i
     score.tech_track_vp += get_tech_track_vp(nano_count);
 
     // 5. DISCOVERY TILES KEPT AS VP
-    // TODO: Not implemented yet - no discovery tile VP tracking in Player struct.
-    // Variable VP discovery tiles (VP_PER_3REP, VP_PER_ARTIFACT) also need tracking.
-    score.discovery_vp = 0;
+    // Rulebook page 21: 2 VP per Discovery Tile kept VP-side up.
+    // Variable VP tiles (VP_PER_3REP, VP_PER_ARTIFACT) are counted here at a flat
+    // 2 VP each until variable scoring is implemented.
+    score.discovery_vp = static_cast<int16_t>(player.discovery_vp_tiles_kept) * 2;
 
     // 6. TRAITOR PENALTY CARD
-    // TODO: Not implemented yet - no traitor tile holder field in Player struct.
     // Rulebook page 25: holder gets -2 VP.
+    score.traitor_vp = player.traitor_held ? -2 : 0;
 
     // 7. DESCENDANTS OF DRACO SPECIFIC BONUS
     if (player.species_id == Species::DESCENDANTS_OF_DRACO) {

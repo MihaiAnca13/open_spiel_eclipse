@@ -9,6 +9,9 @@
 #include "open_spiel/games/eclipse/systems/actions/research.h"
 #include "open_spiel/games/eclipse/systems/actions/build.h"
 #include "open_spiel/games/eclipse/systems/actions/influence.h"
+#include "open_spiel/games/eclipse/systems/actions/bonus.h"
+#include "open_spiel/games/eclipse/systems/scoring.h"
+#include "open_spiel/games/eclipse/galaxy.h"
 #include "open_spiel/json/include/nlohmann/json.hpp"
 #include "open_spiel/spiel.h"
 #include "open_spiel/spiel_utils.h"
@@ -199,6 +202,24 @@ void AppConfigSnapshotTest() {
   player.disks_on_actions = 0;
   s.players.push_back(player);
   return s;
+}
+
+Sector& PrepareExploreDiscovery(::State& s, DiscoveryBit tile) {
+  Sector& cell = s.galaxy.at(1, 0);
+  cell.sector_id = 317;
+  cell.owner_id = 0;
+  cell.coords = {1, 0};
+  cell.points = 0;
+  cell.discovery_tile_present = true;
+  cell.discovery_tile = tile;
+
+  ExploreState& es = s.explore_state;
+  es.phase = ExplorePhase::discovery_reward;
+  es.player_id = 0;
+  es.zone_q = 1;
+  es.zone_r = 0;
+  es.selected_sector_id = 317;
+  return cell;
 }
 
 Action FindActionByName(const State& state, const std::string& name) {
@@ -424,7 +445,7 @@ void ExploreDiscoveryVpTest() {
   SPIEL_CHECK_TRUE(s.explore_state.phase == ExplorePhase::discovery_reward);
 
   resolve_explore_discovery(s, 0, /*take_reward=*/false);  // keep 2 VP
-  SPIEL_CHECK_EQ(s.players[0].score, 2);
+  SPIEL_CHECK_EQ(s.players[0].discovery_vp_tiles_kept, 1);
   SPIEL_CHECK_FALSE(s.galaxy.at(1, 0).discovery_tile_present);
   SPIEL_CHECK_TRUE(s.explore_state.phase == ExplorePhase::inactive);
 }
@@ -1061,6 +1082,43 @@ void UpgradeFullActionTest() {
   SPIEL_CHECK_EQ(state->CurrentPlayer(), 1);
 }
 
+void UpgradeDiscoveryPartsTest() {
+  ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+  ::Player& p = s.players[0];
+
+  // Manually set up a basic Interceptor starting blueprint
+  p.blueprints[0].capacity = 4;
+  p.blueprints[0].slots[0] = ShipPartId::ION_CANNON;
+  p.blueprints[0].slots[1] = ShipPartId::NUCLEAR_DRIVE;
+  p.blueprints[0].slots[2] = ShipPartId::NUCLEAR_SOURCE;
+  p.blueprints[0].slots[3] = ShipPartId::NONE;
+  p.blueprints[0].recompute();
+
+  // Give the player a discovery part
+  p.parts_inventory.push_back(ShipPartId::ANTIMATTER_MISSILE);
+
+  // Upgrade interceptor slot 3 (which is empty NONE) with Antimatter Missile. This should be legal because it is in their inventory.
+  SPIEL_CHECK_TRUE(can_upgrade(s, 0, ShipType::INTERCEPTOR, 3, ShipPartId::ANTIMATTER_MISSILE));
+
+  // Upgrade interceptor slot 3 with Axion Computer (another discovery part). This should be illegal because it is not in their inventory.
+  SPIEL_CHECK_FALSE(can_upgrade(s, 0, ShipType::INTERCEPTOR, 3, ShipPartId::AXION_COMPUTER));
+
+  // Perform the upgrade
+  SPIEL_CHECK_TRUE(execute_upgrade(s, 0, ShipType::INTERCEPTOR, 3, ShipPartId::ANTIMATTER_MISSILE));
+
+  // Now, the slot should have the part, and the player's inventory should be empty.
+  SPIEL_CHECK_EQ(p.blueprints[0].slots[3], ShipPartId::ANTIMATTER_MISSILE);
+  SPIEL_CHECK_EQ(p.parts_inventory.size(), 0);
+
+  // Now, upgrade/replace that slot with NONE (removal). The discovery part should go back to their inventory.
+  SPIEL_CHECK_TRUE(can_upgrade(s, 0, ShipType::INTERCEPTOR, 3, ShipPartId::NONE));
+  SPIEL_CHECK_TRUE(execute_upgrade(s, 0, ShipType::INTERCEPTOR, 3, ShipPartId::NONE));
+
+  SPIEL_CHECK_EQ(p.blueprints[0].slots[3], ShipPartId::NONE);
+  SPIEL_CHECK_EQ(p.parts_inventory.size(), 1);
+  SPIEL_CHECK_EQ(p.parts_inventory[0], ShipPartId::ANTIMATTER_MISSILE);
+}
+
 void MoveFullActionTest() {
   std::shared_ptr<const Game> game = LoadEclipseGame(2, 7);
   std::unique_ptr<State> state = game->NewInitialState();
@@ -1451,6 +1509,299 @@ void CombatDiceChanceFlowTest() {
   SPIEL_CHECK_GT(combat_rolls, 0);    // dice resolved as chance nodes
 }
 
+// ── Scoring integration ───────────────────────────────────────────────────────
+
+void ScoringAmbassadorTest() {
+  ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+  s.players[0].ambassador_tiles_held = 2;
+  PlayerScoreBreakdown b = compute_player_score(s, 0);
+  SPIEL_CHECK_EQ(b.ambassador_vp, 2);
+  SPIEL_CHECK_EQ(b.total_vp, 2);
+}
+
+void ScoringTraitorTest() {
+  ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+  s.players[0].traitor_held = true;
+  PlayerScoreBreakdown b = compute_player_score(s, 0);
+  SPIEL_CHECK_EQ(b.traitor_vp, -2);
+  SPIEL_CHECK_EQ(b.total_vp, -2);
+}
+
+void ScoringDiscoveryVpTest() {
+  ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+  s.players[0].discovery_vp_tiles_kept = 3;
+  PlayerScoreBreakdown b = compute_player_score(s, 0);
+  SPIEL_CHECK_EQ(b.discovery_vp, 6);
+  SPIEL_CHECK_EQ(b.total_vp, 6);
+}
+
+void ScoringAllCategoriesTest() {
+  // Verify the total rolls up every category.
+  ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+  s.players[0].reputation_tiles.push_back(ReputationTiles::TWO);
+  s.players[0].reputation_tiles.push_back(ReputationTiles::FOUR);
+  s.players[0].ambassador_tiles_held = 1;
+  s.players[0].discovery_vp_tiles_kept = 2;
+  s.players[0].traitor_held = true;
+  PlayerScoreBreakdown b = compute_player_score(s, 0);
+  SPIEL_CHECK_EQ(b.reputation_vp, 6);
+  SPIEL_CHECK_EQ(b.ambassador_vp, 1);
+  SPIEL_CHECK_EQ(b.discovery_vp, 4);
+  SPIEL_CHECK_EQ(b.traitor_vp, -2);
+  SPIEL_CHECK_EQ(b.total_vp, 9);
+}
+
+// ── Warp Portal placement ────────────────────────────────────────────────────
+
+void WarpPortalNotEligibleTest() {
+  ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+  Sector& cell = s.galaxy.at(0, 0);
+  cell.sector_id = 221;
+  cell.owner_id = 0;
+  cell.coords = {0, 0};
+  int cell_idx = hex_to_index(0, 0);
+  SPIEL_CHECK_FALSE(can_place_warp_portal(s, 0, cell_idx));
+  SPIEL_CHECK_FALSE(place_warp_portal(s, 0, cell_idx));
+}
+
+void WarpPortalForeignSectorTest() {
+  // Player is eligible, but the target sector is not owned by them.
+  ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+  s.players[0].warp_portal_eligible = true;
+  Sector& cell = s.galaxy.at(0, 0);
+  cell.sector_id = 221;
+  cell.owner_id = 1;  // not us
+  cell.coords = {0, 0};
+  int cell_idx = hex_to_index(0, 0);
+  SPIEL_CHECK_FALSE(can_place_warp_portal(s, 0, cell_idx));
+  SPIEL_CHECK_FALSE(place_warp_portal(s, 0, cell_idx));
+}
+
+void WarpPortalPlacementTest() {
+  ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+  s.players[0].warp_portal_eligible = true;
+  Sector& cell = s.galaxy.at(0, 0);
+  cell.sector_id = 221;
+  cell.owner_id = 0;
+  cell.coords = {0, 0};
+  cell.points = 0;
+  int cell_idx = hex_to_index(0, 0);
+  SPIEL_CHECK_TRUE(can_place_warp_portal(s, 0, cell_idx));
+  SPIEL_CHECK_TRUE(place_warp_portal(s, 0, cell_idx));
+  SPIEL_CHECK_EQ(cell.player_warp_portal_vp, 1);
+  SPIEL_CHECK_FALSE(s.players[0].warp_portal_eligible);
+  SPIEL_CHECK_EQ(compute_player_score(s, 0).sector_vp, 1);
+  // Idempotency: cannot place again.
+  SPIEL_CHECK_FALSE(place_warp_portal(s, 0, cell_idx));
+}
+
+void WarpPortalResearchTest() {
+  // Researching the WARP_PORTAL Rare Tech must set the eligibility flag.
+  ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+  TechDefinition wp{};
+  wp.bit = TechBit::WARP_PORTAL;
+  wp.category = TechCategory::RARE;
+  wp.base_cost = 9;
+  wp.min_cost = 7;
+  wp.copies = 1;
+  // Add a copy to the tray so research can succeed.
+  s.add_to_tech_tray(TechBit::WARP_PORTAL, 1);
+  // Bump science to clear the cost.
+  s.players[0].resources.science = 50;
+  SPIEL_CHECK_TRUE(research_tech(s, 0, wp, TechCategory::GRID));
+  SPIEL_CHECK_TRUE(s.players[0].warp_portal_eligible);
+  SPIEL_CHECK_TRUE(s.players[0].has_tech(TechBit::WARP_PORTAL));
+}
+
+// ── Discovery tile resolution ────────────────────────────────────────────────
+
+void DiscoveryShipPartTest() {
+  // Resolving a PART_ discovery tile places the part in the player's inventory.
+  ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+  PrepareExploreDiscovery(s, DiscoveryBit::PART_ANTIMATTER_MISSILE);
+
+  resolve_explore_discovery(s, 0, /*take_reward=*/true);
+  SPIEL_CHECK_TRUE(s.explore_state.phase == ExplorePhase::discovery_upgrade);
+  SPIEL_CHECK_EQ(s.explore_state.discovered_part, static_cast<uint8_t>(ShipPartId::ANTIMATTER_MISSILE));
+
+  // Player chooses to store it
+  s.players[0].parts_inventory.push_back(static_cast<ShipPartId>(s.explore_state.discovered_part));
+  end_explore_activation(s);
+
+  SPIEL_CHECK_EQ(s.players[0].parts_inventory.size(), 1);
+  SPIEL_CHECK_EQ(s.players[0].parts_inventory[0], ShipPartId::ANTIMATTER_MISSILE);
+  SPIEL_CHECK_EQ(s.players[0].discovery_vp_tiles_kept, 0);
+  SPIEL_CHECK_TRUE(s.explore_state.phase == ExplorePhase::inactive);
+}
+
+void DiscoveryImmediateUpgradeIntegrationTest() {
+  std::shared_ptr<const Game> game = LoadEclipseGame(2, 7);
+  std::unique_ptr<State> state = game->NewInitialState();
+  state->ApplyAction(0);  // resolve setup
+
+  EclipseState* eclipse_state = static_cast<EclipseState*>(state.get());
+  ::State& raw = const_cast<::State&>(eclipse_state->RawState());
+  raw.current_player = 0;
+  raw.players[0].has_passed = false;
+
+  // Initialize their Interceptor starting blueprint
+  ::Player& p = raw.players[0];
+  p.blueprints[0].capacity = 4;
+  p.blueprints[0].slots[0] = ShipPartId::ION_CANNON;
+  p.blueprints[0].slots[1] = ShipPartId::NUCLEAR_DRIVE;
+  p.blueprints[0].slots[2] = ShipPartId::NUCLEAR_SOURCE;
+  p.blueprints[0].slots[3] = ShipPartId::NONE;
+  p.blueprints[0].recompute();
+
+  // Prepare a discovery tile containing Antimatter Missile on their explored sector
+  PrepareExploreDiscovery(raw, DiscoveryBit::PART_ANTIMATTER_MISSILE);
+
+  // Take the reward (EXPLORE_DISCOVERY_REWARD)
+  std::vector<Action> legal = state->LegalActions();
+  Action reward_act = -1;
+  for (Action a : legal) {
+    if (state->ActionToString(state->CurrentPlayer(), a) == "EXPLORE_DISCOVERY_REWARD") {
+      reward_act = a;
+      break;
+    }
+  }
+  SPIEL_CHECK_NE(reward_act, -1);
+  state->ApplyAction(reward_act);
+
+  // Now, the phase should be ExplorePhase::discovery_upgrade!
+  SPIEL_CHECK_TRUE(raw.explore_state.phase == ExplorePhase::discovery_upgrade);
+  SPIEL_CHECK_EQ(raw.explore_state.discovered_part, static_cast<uint8_t>(ShipPartId::ANTIMATTER_MISSILE));
+
+  // Let's check legal actions in this phase.
+  // It should contain an action to upgrade slot 3 with Antimatter Missile, and "EXPLORE_DISCOVERY_UPGRADE_STORE".
+  legal = state->LegalActions();
+  Action upgrade_act = -1;
+  Action store_act = -1;
+  for (Action a : legal) {
+    std::string name = state->ActionToString(state->CurrentPlayer(), a);
+    if (name == "EXPLORE_DISCOVERY_UPGRADE_STORE") {
+      store_act = a;
+    } else if (name.find("UPGRADE_INTERCEPTOR_SLOT3_Antimatter Missile") != std::string::npos) {
+      upgrade_act = a;
+    }
+  }
+  SPIEL_CHECK_NE(store_act, -1);
+  SPIEL_CHECK_NE(upgrade_act, -1);
+
+  // Apply the free immediate upgrade!
+  state->ApplyAction(upgrade_act);
+
+  // Verify that the part was placed on slot 3, and the explore phase is now inactive!
+  SPIEL_CHECK_EQ(p.blueprints[0].slots[3], ShipPartId::ANTIMATTER_MISSILE);
+  SPIEL_CHECK_EQ(p.parts_inventory.size(), 0);
+  SPIEL_CHECK_TRUE(raw.explore_state.phase == ExplorePhase::inactive);
+}
+
+void DiscoveryWarpPortalTest() {
+  // WARP_PORTAL discovery tile places a 2 VP portal where found.
+  ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+  Sector& cell = PrepareExploreDiscovery(s, DiscoveryBit::WARP_PORTAL);
+
+  resolve_explore_discovery(s, 0, /*take_reward=*/true);
+  SPIEL_CHECK_FALSE(s.players[0].warp_portal_eligible);
+  SPIEL_CHECK_EQ(cell.player_warp_portal_vp, 2);
+  SPIEL_CHECK_EQ(s.players[0].discovery_vp_tiles_kept, 0);
+  SPIEL_CHECK_EQ(compute_player_score(s, 0).sector_vp, 2);
+}
+
+void DiscoveryWarpPortalCannotRelocateTest() {
+  ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+  PrepareExploreDiscovery(s, DiscoveryBit::WARP_PORTAL);
+
+  Sector& other = s.galaxy.at(0, 0);
+  other.sector_id = 221;
+  other.owner_id = 0;
+  other.coords = {0, 0};
+
+  resolve_explore_discovery(s, 0, /*take_reward=*/true);
+  SPIEL_CHECK_FALSE(can_place_warp_portal(s, 0, hex_to_index(0, 0)));
+  SPIEL_CHECK_FALSE(place_warp_portal(s, 0, hex_to_index(0, 0)));
+}
+
+void DiscoveryMuonSourceTest() {
+  // MUON_SOURCE gives +2 gold AND a ship part.
+  ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+  PrepareExploreDiscovery(s, DiscoveryBit::MUON_SOURCE);
+
+  resolve_explore_discovery(s, 0, /*take_reward=*/true);
+  SPIEL_CHECK_EQ(s.players[0].resources.gold, 2);
+  SPIEL_CHECK_TRUE(s.explore_state.phase == ExplorePhase::discovery_upgrade);
+  SPIEL_CHECK_EQ(s.explore_state.discovered_part, static_cast<uint8_t>(ShipPartId::MUON_SOURCE));
+
+  // Player chooses to store it
+  s.players[0].parts_inventory.push_back(static_cast<ShipPartId>(s.explore_state.discovered_part));
+  end_explore_activation(s);
+
+  SPIEL_CHECK_EQ(s.players[0].parts_inventory.size(), 1);
+  SPIEL_CHECK_EQ(s.players[0].parts_inventory[0], ShipPartId::MUON_SOURCE);
+}
+
+void DiscoveryAncientMonolithTest() {
+  ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+  Sector& cell = PrepareExploreDiscovery(s, DiscoveryBit::ANCIENT_MONOLITH);
+
+  resolve_explore_discovery(s, 0, /*take_reward=*/true);
+  SPIEL_CHECK_TRUE(cell.monolith_built);
+  SPIEL_CHECK_EQ(s.players[0].discovery_vp_tiles_kept, 0);
+}
+
+void DiscoveryAncientOrbitalTest() {
+  ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+  Sector& cell = PrepareExploreDiscovery(s, DiscoveryBit::ANCIENT_ORBITAL);
+
+  resolve_explore_discovery(s, 0, /*take_reward=*/true);
+  SPIEL_CHECK_TRUE(cell.orbital_built);
+  SPIEL_CHECK_EQ(s.players[0].resources.materials, 2);
+  SPIEL_CHECK_EQ(s.players[0].discovery_vp_tiles_kept, 0);
+}
+
+void DiscoveryAncientCruiserTest() {
+  ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+  PrepareExploreDiscovery(s, DiscoveryBit::ANCIENT_CRUISER);
+
+  resolve_explore_discovery(s, 0, /*take_reward=*/true);
+  SPIEL_CHECK_EQ(s.unit_registry.size(), 1);
+  SPIEL_CHECK_EQ(s.unit_registry[0].player_id, 0);
+  SPIEL_CHECK_EQ(static_cast<int>(s.unit_registry[0].type),
+                 static_cast<int>(ShipType::CRUISER));
+  SPIEL_CHECK_EQ(s.unit_registry[0].sector_id, 317);
+  SPIEL_CHECK_EQ(s.players[0].discovery_vp_tiles_kept, 0);
+}
+
+void DiscoveryAncientTechTest() {
+  ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+  PrepareExploreDiscovery(s, DiscoveryBit::ANCIENT_TECH);
+  s.add_to_tech_tray(TechBit::NEUTRON_BOMBS, 1);
+
+  resolve_explore_discovery(s, 0, /*take_reward=*/true);
+  SPIEL_CHECK_TRUE(s.players[0].has_tech(TechBit::NEUTRON_BOMBS));
+  SPIEL_CHECK_EQ(s.get_tech_tray_count(TechBit::NEUTRON_BOMBS), 0);
+  SPIEL_CHECK_EQ(s.players[0].discovery_vp_tiles_kept, 0);
+}
+
+void DiscoveryAncientFallbackTest() {
+  ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+  Sector& cell = PrepareExploreDiscovery(s, DiscoveryBit::ANCIENT_MONOLITH);
+  cell.monolith_built = true;
+
+  resolve_explore_discovery(s, 0, /*take_reward=*/true);
+  SPIEL_CHECK_EQ(s.players[0].discovery_vp_tiles_kept, 1);
+}
+
+void DiscoveryVariableVpTest() {
+  // VP_PER_3REP and VP_PER_ARTIFACT count as a kept 2 VP tile for now.
+  ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+  PrepareExploreDiscovery(s, DiscoveryBit::VP_PER_3REP);
+
+  resolve_explore_discovery(s, 0, /*take_reward=*/true);
+  SPIEL_CHECK_EQ(s.players[0].discovery_vp_tiles_kept, 1);
+}
+
 }  // namespace
 }  // namespace eclipse
 }  // namespace open_spiel
@@ -1485,6 +1836,7 @@ int main(int argc, char** argv) {
   RUN_TEST(InfluenceFullActionTest);
   RUN_TEST(BuildFullActionTest);
   RUN_TEST(UpgradeFullActionTest);
+  RUN_TEST(UpgradeDiscoveryPartsTest);
   RUN_TEST(MoveFullActionTest);
   RUN_TEST(StrictMainActionFilteringTest);
   RUN_TEST(UpkeepRoundFlowTest);
@@ -1494,7 +1846,26 @@ int main(int argc, char** argv) {
   RUN_TEST(RoundEightCleanupEndsGameTest);
   RUN_TEST(UpkeepObservationTensorTest);
   RUN_TEST(CombatDiceChanceFlowTest);
+  RUN_TEST(ScoringAmbassadorTest);
+  RUN_TEST(ScoringTraitorTest);
+  RUN_TEST(ScoringDiscoveryVpTest);
+  RUN_TEST(ScoringAllCategoriesTest);
+  RUN_TEST(WarpPortalNotEligibleTest);
+  RUN_TEST(WarpPortalForeignSectorTest);
+  RUN_TEST(WarpPortalPlacementTest);
+  RUN_TEST(WarpPortalResearchTest);
+  RUN_TEST(DiscoveryShipPartTest);
+  RUN_TEST(DiscoveryImmediateUpgradeIntegrationTest);
+  RUN_TEST(DiscoveryWarpPortalTest);
+  RUN_TEST(DiscoveryWarpPortalCannotRelocateTest);
+  RUN_TEST(DiscoveryMuonSourceTest);
+  RUN_TEST(DiscoveryAncientMonolithTest);
+  RUN_TEST(DiscoveryAncientOrbitalTest);
+  RUN_TEST(DiscoveryAncientCruiserTest);
+  RUN_TEST(DiscoveryAncientTechTest);
+  RUN_TEST(DiscoveryAncientFallbackTest);
+  RUN_TEST(DiscoveryVariableVpTest);
 
 #undef RUN_TEST
-  std::cout << "[==========] 32 tests passed." << std::endl;
+  std::cout << "[==========] 54 tests passed." << std::endl;
 }

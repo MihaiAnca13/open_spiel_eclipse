@@ -113,6 +113,20 @@ struct Player {
     uint64_t researched_techs_grid = 0;      // standard GRID bits + rare bits
     uint64_t researched_techs_nano = 0;      // standard NANO bits + rare bits
 
+    // End-of-game scoring state
+    uint8_t ambassador_tiles_held = 0;     // 1 VP per tile at game end
+    bool traitor_held = false;             // -2 VP at game end
+    uint8_t discovery_vp_tiles_kept = 0;   // 2 VP per tile at game end
+
+    // Ancient / discovery ship parts collected from exploration. Available for
+    // placement onto blueprints via the Upgrade action.
+    FixedVector<ShipPartId, 24> parts_inventory;
+
+    // True when the player may immediately place a Warp Portal tile on a sector
+    // they Control. Triggered by the WARP_PORTAL discovery tile or by researching
+    // the WARP_PORTAL Rare Tech. Cleared once the tile is placed.
+    bool warp_portal_eligible = false;
+
     // Helper to check if a tech is owned (checks all 3 track masks).
     [[nodiscard]] bool has_tech(TechBit tech) const {
         uint64_t b = static_cast<uint64_t>(tech);
@@ -133,7 +147,7 @@ struct Player {
 
 static_assert(static_cast<size_t>(ShipType::STARBASE) + 1 == 4, "The first 4 ShipType values must map to blueprints index 0-3");
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Player, id, score, species_id, is_ai, has_passed, disks_on_sectors, disks_on_actions, resources, colony_ships_total, colony_ships_available, orbitals, monoliths, blueprints, reputation_tiles, trade_rate, extra_influence_discs, graveyard_counts, eliminated, researched_techs_military, researched_techs_grid, researched_techs_nano);
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Player, id, score, species_id, is_ai, has_passed, disks_on_sectors, disks_on_actions, resources, colony_ships_total, colony_ships_available, orbitals, monoliths, blueprints, reputation_tiles, trade_rate, extra_influence_discs, graveyard_counts, eliminated, researched_techs_military, researched_techs_grid, researched_techs_nano, ambassador_tiles_held, traitor_held, discovery_vp_tiles_kept, parts_inventory, warp_portal_eligible);
 
 struct UpkeepState {
     enum class Step : uint8_t {
@@ -428,7 +442,7 @@ inline bool player_has_warp_portal_anchor(const State& state, uint8_t player_id)
             const Sector& sector = state.galaxy.at(q, r);
             if (sector.sector_id == 0) continue;
             
-            bool has_portal = sector.has_player_warp_portal;
+            bool has_portal = sector.player_warp_portal_vp > 0;
             if (!has_portal) {
                 const SectorDefinition* def = get_sector_definition(sector.sector_id);
                 if (def && def->has_warp_portal) {

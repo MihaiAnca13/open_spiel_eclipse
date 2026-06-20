@@ -26,6 +26,7 @@ enum class ExplorePhase : uint8_t {
     choose_rotation,     // player picks a rotation that forms a wormhole connection
     claim_control,       // player decides whether to drop an influence disc
     discovery_reward,    // player picks discovery reward vs 2 VP
+    discovery_upgrade,   // player decides whether to immediately upgrade the found part, and where
 };
 
 NLOHMANN_JSON_SERIALIZE_ENUM(ExplorePhase, {
@@ -38,6 +39,7 @@ NLOHMANN_JSON_SERIALIZE_ENUM(ExplorePhase, {
     {ExplorePhase::choose_rotation, "choose_rotation"},
     {ExplorePhase::claim_control, "claim_control"},
     {ExplorePhase::discovery_reward, "discovery_reward"},
+    {ExplorePhase::discovery_upgrade, "discovery_upgrade"},
 });
 
 struct ExploreState {
@@ -50,9 +52,10 @@ struct ExploreState {
     uint8_t drawn_count = 0;
     uint16_t selected_sector_id = 0;                    // tile being placed
     uint8_t chosen_rotation = 0;
+    uint8_t discovered_part = 0;                        // cast to ShipPartId, used during discovery_upgrade
 };
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(ExploreState, phase, player_id, activations_remaining, zone_q, zone_r, ring, drawn_sector_ids, drawn_count, selected_sector_id, chosen_rotation);
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(ExploreState, phase, player_id, activations_remaining, zone_q, zone_r, ring, drawn_sector_ids, drawn_count, selected_sector_id, chosen_rotation, discovered_part);
 
 // The raw game state and player structs live in the global namespace (state.h);
 // forward-declare them so this header does not depend on state.h (which depends
@@ -132,6 +135,16 @@ bool claim_explore_control(::State& state, uint8_t player_id, bool take_control)
 
 // Resolve the discovery tile: 2 VP, or the variable reward (TODO: stub).
 bool resolve_explore_discovery(::State& state, uint8_t player_id, bool take_reward);
+
+// Finish the current activation: reset per-activation context, decrement the
+// counter, and either start the next activation (if a legal zone exists) or end
+// the Explore action.
+void end_explore_activation(::State& state);
+
+// Apply the reward side of a Discovery Tile to the sector where it was found.
+// Returns false when the reward cannot be applied, so callers can keep the tile
+// VP-side up instead.
+bool apply_discovery_reward(::State& state, uint8_t player_id, ::Sector& sector, DiscoveryBit drawn);
 
 } // namespace open_spiel::eclipse
 

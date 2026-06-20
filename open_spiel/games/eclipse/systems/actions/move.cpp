@@ -81,7 +81,7 @@ namespace open_spiel::eclipse
                             rotated_wormholes[cell] = rotate_edge_mask(def->wormholes_mask, sector.rotation);
                         }
 
-                        if (sector.has_player_warp_portal || (def != nullptr && def->has_warp_portal))
+                        if (sector.player_warp_portal_vp > 0 || (def != nullptr && def->has_warp_portal))
                         {
                             has_warp_portal[cell] = 1;
                             ++warp_portal_count;
@@ -113,6 +113,8 @@ namespace open_spiel::eclipse
                 can_leave.fill(0);
                 has_gcds.fill(0);
 
+                const bool is_draco = (player.species_id == Species::DESCENDANTS_OF_DRACO);
+
                 for (const Unit& unit : state.unit_registry)
                 {
                     if (!valid_sector_id(unit.sector_id)) continue;
@@ -135,6 +137,11 @@ namespace open_spiel::eclipse
                     }
                     else
                     {
+                        // Draco is not pinned by Ancients, and Ancients do not pin Draco.
+                        if (is_draco && unit.player_id == NPC_PLAYER_ID && unit.type == ShipType::ANCIENT)
+                        {
+                            continue;
+                        }
                         ++opponents[sector_idx];
                     }
                 }
@@ -390,6 +397,8 @@ namespace open_spiel::eclipse
     {
         if (player_id >= state.players.size()) return false;
 
+        const bool is_draco = (state.players[player_id].species_id == Species::DESCENDANTS_OF_DRACO);
+
         int friendly = 0;
         int opponents = 0;
         for (const Unit& unit : state.unit_registry)
@@ -398,7 +407,15 @@ namespace open_spiel::eclipse
             if (unit.type == ShipType::GCDS) return false;  // GCDS pins all ships.
             if (unit.type == ShipType::STARBASE) continue;  // Starbases do not count for pinning.
             if (unit.player_id == player_id) ++friendly;
-            else ++opponents;
+            else
+            {
+                // Draco is not pinned by Ancients, and Ancients do not pin Draco.
+                if (is_draco && unit.player_id == NPC_PLAYER_ID && unit.type == ShipType::ANCIENT)
+                {
+                    continue;
+                }
+                ++opponents;
+            }
         }
 
         int pinned = opponents;

@@ -33,7 +33,7 @@ namespace open_spiel::eclipse
         }
     } // namespace
 
-    bool can_upgrade(const ::State& state, const uint8_t player_id, const ShipType ship_type, const uint8_t slot_idx, const ShipPartId part_id)
+    bool can_upgrade(const ::State& state, const uint8_t player_id, const ShipType ship_type, const uint8_t slot_idx, const ShipPartId part_id, bool is_free_immediate)
     {
         if (player_id >= state.players.size()) return false;
         const Player& player = state.players[player_id];
@@ -97,11 +97,22 @@ namespace open_spiel::eclipse
                 return false; // Blocked due to unlock prerequisites lack
             }
         }
-        else
+        else if (!is_free_immediate)
         {
-            // Discovery tiles tracking checks are handled contextually or stored independently via separate state layers.
-            // Ensure proper default allowance constraints behavior unless explicit mapping tracks individual token counts.
-            return false;
+            // Verify that the player actually possesses this discovery part in their inventory
+            bool possesses_part = false;
+            for (size_t i = 0; i < player.parts_inventory.size(); ++i)
+            {
+                if (player.parts_inventory[i] == part_id)
+                {
+                    possesses_part = true;
+                    break;
+                }
+            }
+            if (!possesses_part)
+            {
+                return false;
+            }
         }
 
         // Financial & Energy Simulation Balance check via localized mutation footprinting
@@ -122,20 +133,56 @@ namespace open_spiel::eclipse
         return true;
     }
 
-    bool execute_upgrade(::State& state, const uint8_t player_id, const ShipType ship_type, const uint8_t slot_idx, const ShipPartId part_id)
+    bool execute_upgrade(::State& state, const uint8_t player_id, const ShipType ship_type, const uint8_t slot_idx, const ShipPartId part_id, bool is_free_immediate)
     {
-        if (!can_upgrade(state, player_id, ship_type, slot_idx, part_id)) return false;
+        if (!can_upgrade(state, player_id, ship_type, slot_idx, part_id, is_free_immediate)) return false;
 
         Player& player = state.players[player_id];
         const size_t bp_idx = static_cast<size_t>(ship_type);
         Blueprint& target_bp = player.blueprints[bp_idx];
 
+        // If the overwritten slot had a discovery part, return it back to the player's personal inventory.
+        ShipPartId old_part_id = target_bp.slots[slot_idx];
+        if (old_part_id != ShipPartId::NONE)
+        {
+            const size_t old_part_table_idx = static_cast<size_t>(old_part_id) - 1;
+            const ShipPart& old_part = SHIP_PART_TABLE[old_part_table_idx];
+            if (old_part.is_discovery)
+            {
+                player.parts_inventory.push_back(old_part_id);
+            }
+        }
+
         // Apply grid change mutation cleanly
         target_bp.slots[slot_idx] = part_id;
         target_bp.recompute();
 
+        // If the newly placed part is a discovery part, we must remove it from the player's personal inventory.
+        if (part_id != ShipPartId::NONE && !is_free_immediate)
+        {
+            const size_t part_table_idx = static_cast<size_t>(part_id) - 1;
+            const ShipPart& targeted_part = SHIP_PART_TABLE[part_table_idx];
+            if (targeted_part.is_discovery)
+            {
+                // Remove one copy of part_id from parts_inventory
+                for (size_t i = 0; i < player.parts_inventory.size(); ++i)
+                {
+                    if (player.parts_inventory[i] == part_id)
+                    {
+                        // Shift subsequent elements left
+                        for (size_t j = i; j + 1 < player.parts_inventory.size(); ++j)
+                        {
+                            player.parts_inventory[j] = player.parts_inventory[j + 1];
+                        }
+                        player.parts_inventory.pop_back();
+                        break;
+                    }
+                }
+            }
+        }
+
         // Returning Ship Parts costs nothing; only placements consume an activation.
-        if (part_id != ShipPartId::NONE)
+        if (part_id != ShipPartId::NONE && !is_free_immediate)
         {
             end_upgrade_activation(state);
         }

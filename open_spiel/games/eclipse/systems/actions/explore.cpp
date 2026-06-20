@@ -13,6 +13,7 @@
 #include "../../state.h"
 #include "../../tech.h"
 #include "move.h"  // can_leave_sector (pinning) for is_explore_anchor
+#include "research.h"
 
 namespace open_spiel::eclipse {
 
@@ -107,6 +108,68 @@ bool zone_has_wormhole_access(const State& state, uint8_t player_id, int q, int 
     return false;
 }
 
+// Map a DiscoveryBit to the ShipPartId it represents. MUON_SOURCE is treated
+// as a ship part here as well (it grants +2 energy AND is placeable). All 18
+// ship-part discovery bits are listed so the compiler can warn on a missed case.
+ShipPartId part_for_discovery_bit(DiscoveryBit b) {
+    switch (b) {
+        case DiscoveryBit::MUON_SOURCE:                return ShipPartId::MUON_SOURCE;
+        case DiscoveryBit::PART_ANTIMATTER_MISSILE:    return ShipPartId::ANTIMATTER_MISSILE;
+        case DiscoveryBit::PART_AXION_COMPUTER:        return ShipPartId::AXION_COMPUTER;
+        case DiscoveryBit::PART_CONFORMAL_DRIVE:       return ShipPartId::CONFORMAL_DRIVE;
+        case DiscoveryBit::PART_FLUX_SHIELD:           return ShipPartId::FLUX_SHIELD;
+        case DiscoveryBit::PART_HYPERGRID_SOURCE:      return ShipPartId::HYPERGRID_SOURCE;
+        case DiscoveryBit::PART_INVERSION_SHIELD:      return ShipPartId::INVERSION_SHIELD;
+        case DiscoveryBit::PART_ION_DISRUPTOR:         return ShipPartId::ION_DISRUPTOR;
+        case DiscoveryBit::PART_ION_MISSILE:           return ShipPartId::ION_MISSILE;
+        case DiscoveryBit::PART_ION_TURRET:            return ShipPartId::ION_TURRET;
+        case DiscoveryBit::PART_JUMP_DRIVE:            return ShipPartId::JUMP_DRIVE;
+        case DiscoveryBit::PART_MORPH_SHIELD:          return ShipPartId::MORPH_SHIELD;
+        case DiscoveryBit::PART_NONLINEAR_DRIVE:       return ShipPartId::NONLINEAR_DRIVE;
+        case DiscoveryBit::PART_PLASMA_TURRET:         return ShipPartId::PLASMA_TURRET;
+        case DiscoveryBit::PART_SHARD_HULL:            return ShipPartId::SHARD_HULL;
+        case DiscoveryBit::PART_SOLITON_CHARGER:       return ShipPartId::SOLITON_CHARGER;
+        case DiscoveryBit::PART_SOLITON_MISSILE:       return ShipPartId::SOLITON_MISSILE;
+        case DiscoveryBit::PART_RIFT_CONDUCTOR:        return ShipPartId::RIFT_CONDUCTOR;
+        default:                                       return ShipPartId::NONE;
+    }
+}
+
+bool player_has_available_ship(const State& state, uint8_t player_id, ShipType ship_type, uint8_t max_supply) {
+    uint8_t active_count = 0;
+    for (const Unit& unit : state.unit_registry) {
+        if (unit.player_id == player_id && unit.type == ship_type) {
+            ++active_count;
+            if (active_count >= max_supply) return false;
+        }
+    }
+    return true;
+}
+
+bool grant_ancient_tech(State& state, Player& player) {
+    const TechDefinition* best = nullptr;
+    for (size_t i = 0; i < TECH_TABLE_SIZE; ++i) {
+        const TechDefinition& def = TECH_TABLE[i];
+        if (player.has_tech(def.bit)) continue;
+        if (state.get_tech_tray_count(def.bit) == 0) continue;
+        if (get_track_tile_count(player, def.category) >= 8) continue;
+        if (best == nullptr || def.base_cost < best->base_cost) {
+            best = &def;
+        }
+    }
+    if (best == nullptr) return false;
+
+    uint64_t bit = static_cast<uint64_t>(best->bit);
+    switch (best->category) {
+        case TechCategory::MILITARY: player.researched_techs_military |= bit; break;
+        case TechCategory::GRID:     player.researched_techs_grid |= bit; break;
+        case TechCategory::NANO:     player.researched_techs_nano |= bit; break;
+        case TechCategory::RARE:     return false;
+    }
+    state.remove_from_tech_tray(best->bit);
+    return true;
+}
+
 // Enumerate empty hexes adjacent to one of the player's anchor sectors (a sector
 // they Control or have a ship in). The galaxy is a dense coordinate grid with no
 // owned-sector index and ships are keyed by sector_id (not coords), so we make a
@@ -170,6 +233,8 @@ void collect_explore_zones(const State& state, uint8_t player_id, bool first_onl
     }
 }
 
+}  // namespace
+
 // Finish the current activation: reset per-activation context, decrement the
 // counter, and either start the next activation (if a legal zone exists) or end
 // the Explore action.
@@ -189,8 +254,6 @@ void end_explore_activation(State& state) {
         es.player_id = 255;
     }
 }
-
-}  // namespace
 
 
 // Explore anchors require Control or at least one *Unpinned* Ship (rulebook p.13),
@@ -466,96 +529,134 @@ bool resolve_explore_discovery(State& state, uint8_t player_id, bool take_reward
             drawn = state.discovery_bag.back();
             state.discovery_bag.pop_back();
         }
-        if (drawn == DiscoveryBit::NONE) {
-            // No tiles left, give 2 VP as fallback
-            state.players[player_id].score += 2;
+
+        ShipPartId part = ShipPartId::NONE;
+        if (drawn == DiscoveryBit::MUON_SOURCE) {
+            part = ShipPartId::MUON_SOURCE;
         } else {
-            Player& player = state.players[player_id];
+            part = part_for_discovery_bit(drawn);
+        }
 
-            // Apply the discovery tile's reward
-            switch (drawn) {
-                // Ancient structures - TODO: requires special placement/scoring logic
-                case DiscoveryBit::ANCIENT_MONOLITH:
-                case DiscoveryBit::ANCIENT_ORBITAL:
-                case DiscoveryBit::ANCIENT_TECH:
-                case DiscoveryBit::ANCIENT_CRUISER:
-                    // TODO: Implement ancient structure placement and scoring
-                    state.players[player_id].score += 2; // Fallback to 2 VP for now
-                    break;
-
-                // Ship parts - add to player's available parts
-                case DiscoveryBit::PART_ANTIMATTER_MISSILE:
-                case DiscoveryBit::PART_AXION_COMPUTER:
-                case DiscoveryBit::PART_CONFORMAL_DRIVE:
-                case DiscoveryBit::PART_FLUX_SHIELD:
-                case DiscoveryBit::PART_HYPERGRID_SOURCE:
-                case DiscoveryBit::PART_INVERSION_SHIELD:
-                case DiscoveryBit::PART_ION_DISRUPTOR:
-                case DiscoveryBit::PART_ION_MISSILE:
-                case DiscoveryBit::PART_ION_TURRET:
-                case DiscoveryBit::PART_JUMP_DRIVE:
-                case DiscoveryBit::PART_MORPH_SHIELD:
-                case DiscoveryBit::PART_NONLINEAR_DRIVE:
-                case DiscoveryBit::PART_PLASMA_TURRET:
-                case DiscoveryBit::PART_SHARD_HULL:
-                case DiscoveryBit::PART_SOLITON_CHARGER:
-                case DiscoveryBit::PART_SOLITON_MISSILE:
-                case DiscoveryBit::PART_RIFT_CONDUCTOR:
-                    // TODO: Add ship part to player's inventory
-                    state.players[player_id].score += 2; // Fallback to 2 VP for now
-                    break;
-
-                // Muon source - energy source AND ship part
-                case DiscoveryBit::MUON_SOURCE:
-                    player.resources.gold += 2; // +2 energy
-                    // TODO: Add Muon Source ship part to player's inventory
-                    break;
-
-                // Resource tiles
-                case DiscoveryBit::RESOURCE_SCIENCE_3_MONEY_3:
-                    player.resources.science += 3;
-                    player.resources.gold += 3;
-                    break;
-                case DiscoveryBit::RESOURCES_2MAT_2S_3MONEY:
-                    player.resources.materials += 2;
-                    player.resources.science += 2;
-                    player.resources.gold += 3;
-                    break;
-                case DiscoveryBit::RESOURCES_6_MATERIALS:
-                    player.resources.materials += 6;
-                    break;
-                case DiscoveryBit::RESOURCES_5_SCIENCE:
-                    player.resources.science += 5;
-                    break;
-                case DiscoveryBit::RESOURCES_8_MONEY:
-                    player.resources.gold += 8;
-                    break;
-
-                // Variable VP tiles - TODO: requires scoring system
-                case DiscoveryBit::VP_PER_3REP:
-                case DiscoveryBit::VP_PER_ARTIFACT:
-                    // TODO: Implement scoring system logic for variable VP tiles
-                    state.players[player_id].score += 2; // Fallback to 2 VP for now
-                    break;
-
-                // Warp portal - TODO: requires placement logic
-                case DiscoveryBit::WARP_PORTAL:
-                    // TODO: Implement warp portal placement logic
-                    state.players[player_id].score += 2; // Fallback to 2 VP for now
-                    break;
-
-                default:
-                    state.players[player_id].score += 2; // Default fallback
-                    break;
+        if (part != ShipPartId::NONE) {
+            // Apply immediate resource side-effects if any (e.g. Muon Source gold)
+            if (drawn == DiscoveryBit::MUON_SOURCE) {
+                state.players[player_id].resources.gold += 2;
             }
+
+            // Transition to immediate upgrade choice phase!
+            es.discovered_part = static_cast<uint8_t>(part);
+            es.phase = ExplorePhase::discovery_upgrade;
+
+            cell.discovery_tile_present = false;
+            cell.discovery_tile = DiscoveryBit::NONE;
+            return true;
+        }
+
+        if (drawn == DiscoveryBit::NONE ||
+            !apply_discovery_reward(state, player_id, cell, drawn)) {
+            state.players[player_id].discovery_vp_tiles_kept++;
         }
     } else {
-        state.players[player_id].score += 2;
+        state.players[player_id].discovery_vp_tiles_kept++;
     }
     cell.discovery_tile_present = false;
     cell.discovery_tile = DiscoveryBit::NONE;
     end_explore_activation(state);
     return true;
+}
+
+bool apply_discovery_reward(State& state, uint8_t player_id, Sector& sector, DiscoveryBit drawn) {
+    if (player_id >= state.players.size()) return false;
+    Player& player = state.players[player_id];
+
+    switch (drawn) {
+        case DiscoveryBit::ANCIENT_MONOLITH:
+            if (sector.monolith_built) return false;
+            sector.monolith_built = true;
+            return true;
+
+        case DiscoveryBit::ANCIENT_ORBITAL:
+            if (sector.orbital_built) return false;
+            sector.orbital_built = true;
+            player.resources.materials += 2;
+            return true;
+
+        case DiscoveryBit::ANCIENT_TECH:
+            return grant_ancient_tech(state, player);
+
+        case DiscoveryBit::ANCIENT_CRUISER:
+            if (!player_has_available_ship(state, player_id, ShipType::CRUISER, 4)) return false;
+            state.unit_registry.push_back(Unit{
+                .player_id = player_id,
+                .type = ShipType::CRUISER,
+                .sector_id = sector.sector_id,
+                .damage = 0,
+                .arrival_order = state.AllocateArrivalOrder(),
+            });
+            return true;
+
+        case DiscoveryBit::PART_ANTIMATTER_MISSILE:
+        case DiscoveryBit::PART_AXION_COMPUTER:
+        case DiscoveryBit::PART_CONFORMAL_DRIVE:
+        case DiscoveryBit::PART_FLUX_SHIELD:
+        case DiscoveryBit::PART_HYPERGRID_SOURCE:
+        case DiscoveryBit::PART_INVERSION_SHIELD:
+        case DiscoveryBit::PART_ION_DISRUPTOR:
+        case DiscoveryBit::PART_ION_MISSILE:
+        case DiscoveryBit::PART_ION_TURRET:
+        case DiscoveryBit::PART_JUMP_DRIVE:
+        case DiscoveryBit::PART_MORPH_SHIELD:
+        case DiscoveryBit::PART_NONLINEAR_DRIVE:
+        case DiscoveryBit::PART_PLASMA_TURRET:
+        case DiscoveryBit::PART_SHARD_HULL:
+        case DiscoveryBit::PART_SOLITON_CHARGER:
+        case DiscoveryBit::PART_SOLITON_MISSILE:
+        case DiscoveryBit::PART_RIFT_CONDUCTOR: {
+            ShipPartId part = part_for_discovery_bit(drawn);
+            if (part == ShipPartId::NONE) return false;
+            player.parts_inventory.push_back(part);
+            return true;
+        }
+
+        case DiscoveryBit::MUON_SOURCE:
+            player.resources.gold += 2;
+            player.parts_inventory.push_back(ShipPartId::MUON_SOURCE);
+            return true;
+
+        case DiscoveryBit::RESOURCE_SCIENCE_3_MONEY_3:
+            player.resources.science += 3;
+            player.resources.gold += 3;
+            return true;
+
+        case DiscoveryBit::RESOURCES_2MAT_2S_3MONEY:
+            player.resources.materials += 2;
+            player.resources.science += 2;
+            player.resources.gold += 3;
+            return true;
+
+        case DiscoveryBit::RESOURCES_6_MATERIALS:
+            player.resources.materials += 6;
+            return true;
+
+        case DiscoveryBit::RESOURCES_5_SCIENCE:
+            player.resources.science += 5;
+            return true;
+
+        case DiscoveryBit::RESOURCES_8_MONEY:
+            player.resources.gold += 8;
+            return true;
+
+        case DiscoveryBit::WARP_PORTAL:
+            if (sector.player_warp_portal_vp > 0) return false;
+            sector.player_warp_portal_vp = 2;
+            return true;
+
+        case DiscoveryBit::VP_PER_3REP:
+        case DiscoveryBit::VP_PER_ARTIFACT:
+        case DiscoveryBit::NONE:
+        default:
+            return false;
+    }
 }
 
 } // namespace open_spiel::eclipse

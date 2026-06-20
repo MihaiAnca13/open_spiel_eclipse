@@ -91,7 +91,7 @@ constexpr Action action_upgrade_stop = action_upgrade + 1; // 7540
 constexpr Action action_upgrade_choice_start = action_upgrade_stop + 1; // 7541
 constexpr int UPGRADE_SHIP_COUNT = 4; // INTERCEPTOR, CRUISER, DREADNOUGHT, STARBASE
 constexpr int UPGRADE_SLOTS_PER_SHIP = 8;
-constexpr int UPGRADE_PART_COUNT = 30; // Approximate number of non-discovery ship parts
+constexpr int UPGRADE_PART_COUNT = 50; // Increased to support all discovery ship parts as well
 constexpr Action action_upgrade_end = action_upgrade_choice_start + UPGRADE_SHIP_COUNT * UPGRADE_SLOTS_PER_SHIP * UPGRADE_PART_COUNT; // 7541 + 960 = 8501
 constexpr int num_distinct_actions_upgrade = action_upgrade_end + 1; // 8501 + 1 = 8502
 
@@ -672,6 +672,24 @@ std::vector<Action> EclipseState::ExploreLegalActions() const {
       actions.push_back(explore_discovery_vp);
       break;
     }
+    case ExplorePhase::discovery_upgrade: {
+      const uint8_t player_id = es.player_id;
+      const ShipPartId part_id = static_cast<ShipPartId>(es.discovered_part);
+
+      for (int ship = 0; ship < UPGRADE_SHIP_COUNT; ++ship) {
+        const ShipType ship_type = static_cast<ShipType>(ship);
+        const ::Player& player = s.players[player_id];
+        const Blueprint& bp = player.blueprints[ship];
+        for (int slot = 0; slot < bp.capacity; ++slot) {
+          if (can_upgrade(s, player_id, ship_type, static_cast<uint8_t>(slot), part_id, /*is_free_immediate=*/true)) {
+            Action action = action_upgrade_choice_start + ship * UPGRADE_SLOTS_PER_SHIP * UPGRADE_PART_COUNT + slot * UPGRADE_PART_COUNT + static_cast<int>(part_id);
+            actions.push_back(action);
+          }
+        }
+      }
+      actions.push_back(action_upgrade_stop);
+      break;
+    }
     default:
       break;
   }
@@ -1049,6 +1067,9 @@ std::string EclipseState::ActionToString(Player player, Action action_id) const 
     return "UPGRADE";
   }
   if (action_id == action_upgrade_stop) {
+    if (RawState().explore_state.phase == ExplorePhase::discovery_upgrade) {
+      return "EXPLORE_DISCOVERY_UPGRADE_STORE";
+    }
     return "UPGRADE_STOP";
   }
   if (action_id >= action_upgrade_choice_start && action_id < action_upgrade_choice_start + UPGRADE_SHIP_COUNT * UPGRADE_SLOTS_PER_SHIP * UPGRADE_PART_COUNT) {
@@ -1061,8 +1082,8 @@ std::string EclipseState::ActionToString(Player player, Action action_id) const 
     if (part_idx == 0) {
       return "UPGRADE_" + std::string(kShipNames[ship]) + "_SLOT" + std::to_string(slot) + "_REMOVE";
     }
-    if (part_idx < sizeof(SHIP_PART_TABLE) / sizeof(SHIP_PART_TABLE[0])) {
-      const ShipPart& part = SHIP_PART_TABLE[part_idx];
+    if (part_idx > 0 && part_idx - 1 < sizeof(SHIP_PART_TABLE) / sizeof(SHIP_PART_TABLE[0])) {
+      const ShipPart& part = SHIP_PART_TABLE[part_idx - 1];
       return "UPGRADE_" + std::string(kShipNames[ship]) + "_SLOT" + std::to_string(slot) + "_" + std::string(part.name);
     }
     return "UPGRADE_" + std::string(kShipNames[ship]) + "_SLOT" + std::to_string(slot) + "_PART" + std::to_string(part_idx);
@@ -1495,6 +1516,25 @@ void EclipseState::ApplyExploreSubAction(Action action_id) {
       resolve_explore_discovery(s, player,
                                 action_id == explore_discovery_reward);
       break;
+    case ExplorePhase::discovery_upgrade: {
+      ExploreState& es = s.explore_state;
+      if (action_id == action_upgrade_stop) {
+        // Store for later
+        s.players[es.player_id].parts_inventory.push_back(static_cast<ShipPartId>(es.discovered_part));
+        end_explore_activation(s);
+      } else if (action_id >= action_upgrade_choice_start && action_id < action_upgrade_choice_start + UPGRADE_SHIP_COUNT * UPGRADE_SLOTS_PER_SHIP * UPGRADE_PART_COUNT) {
+        int encoded = action_id - action_upgrade_choice_start;
+        int ship = encoded / (UPGRADE_SLOTS_PER_SHIP * UPGRADE_PART_COUNT);
+        int rem = encoded % (UPGRADE_SLOTS_PER_SHIP * UPGRADE_PART_COUNT);
+        int slot = rem / UPGRADE_PART_COUNT;
+        int part_idx = rem % UPGRADE_PART_COUNT;
+
+        ShipPartId part_id = static_cast<ShipPartId>(part_idx);
+        execute_upgrade(s, es.player_id, static_cast<ShipType>(ship), static_cast<uint8_t>(slot), part_id, /*is_free_immediate=*/true);
+        end_explore_activation(s);
+      }
+      break;
+    }
     default:
       break;
   }
@@ -2190,42 +2230,12 @@ void EclipseState::ApplyCombatSubAction(Action action_id) {
           drawn = s.discovery_bag.back();
           s.discovery_bag.pop_back();
         }
-        ::Player& player = s.players[p];
-        switch (drawn) {
-          case DiscoveryBit::RESOURCE_SCIENCE_3_MONEY_3:
-            player.resources.science += 3;
-            player.resources.gold += 3;
-            break;
-          case DiscoveryBit::RESOURCES_2MAT_2S_3MONEY:
-            player.resources.materials += 2;
-            player.resources.science += 2;
-            player.resources.gold += 3;
-            break;
-          case DiscoveryBit::RESOURCES_6_MATERIALS:
-            player.resources.materials += 6;
-            break;
-          case DiscoveryBit::RESOURCES_5_SCIENCE:
-            player.resources.science += 5;
-            break;
-          case DiscoveryBit::RESOURCES_8_MONEY:
-            player.resources.gold += 8;
-            break;
-          case DiscoveryBit::MUON_SOURCE:
-            player.resources.gold += 2;
-            break;
-          case DiscoveryBit::WARP_PORTAL:
-            discovery_sector->has_player_warp_portal = true;
-            break;
-          case DiscoveryBit::NONE:
-            player.score = static_cast<uint8_t>(player.score + 2);
-            break;
-          default:
-            player.score = static_cast<uint8_t>(player.score + 2);
-            break;
+        if (drawn == DiscoveryBit::NONE ||
+            !apply_discovery_reward(s, p, *discovery_sector, drawn)) {
+          s.players[p].discovery_vp_tiles_kept++;
         }
       } else if (action_id == action_combat_discovery_vp) {
-        s.players[cs.discovery_decision_player].score =
-            static_cast<uint8_t>(s.players[cs.discovery_decision_player].score + 2);
+        s.players[cs.discovery_decision_player].discovery_vp_tiles_kept++;
       }
       discovery_sector->discovery_tile_present = false;
       discovery_sector->discovery_tile = DiscoveryBit::NONE;

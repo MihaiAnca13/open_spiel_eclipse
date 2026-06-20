@@ -82,6 +82,12 @@ bool research_tech(::State& state, uint8_t player_id, const TechDefinition& tech
     // Remove from market tray
     state.remove_from_tech_tray(tech_def.bit);
 
+    // Rulebook page 7: researching the Warp Portal Rare Tech grants the player
+    // a Warp Portal Tile that may be placed on any Controlled Sector.
+    if (tech_def.bit == TechBit::WARP_PORTAL) {
+        player.warp_portal_eligible = true;
+    }
+
     return true;
 }
 

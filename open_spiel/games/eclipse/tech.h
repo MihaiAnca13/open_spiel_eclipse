@@ -5,6 +5,7 @@
 #ifndef ECLIPSE_TECH_H
 #define ECLIPSE_TECH_H
 #include <cstdint>
+#include <ostream>
 #include <nlohmann/json.hpp>
 #include "dice.h"
 #include "discovery_tiles.h"
@@ -274,6 +275,60 @@ static const ShipPart SHIP_PART_TABLE[] = {
     { ShipPartId::SOLITON_CHARGER,   "Soliton Charger", true,  false, false, { .discovery = DiscoveryBit::PART_SOLITON_CHARGER }, DieColor::BLUE, 1, 0, 0, 0, -1,  0, 0 },
     { ShipPartId::SOLITON_MISSILE,   "Soliton Missile", true,  true,  false, { .discovery = DiscoveryBit::PART_SOLITON_MISSILE }, DieColor::BLUE, 1, 0, 0, 0, 0,  0, 0 }
 };
+
+NLOHMANN_JSON_SERIALIZE_ENUM(ShipPartId, {
+    {ShipPartId::NONE, "None"},
+    {ShipPartId::ION_CANNON, "Ion Cannon"},
+    {ShipPartId::NUCLEAR_SOURCE, "Nuclear Source"},
+    {ShipPartId::NUCLEAR_DRIVE, "Nuclear Drive"},
+    {ShipPartId::HULL, "Hull"},
+    {ShipPartId::ELECTRON_COMPUTER, "Electron Computer"},
+    {ShipPartId::PLASMA_CANNON, "Plasma Cannon"},
+    {ShipPartId::PHASE_SHIELD, "Phase Shield"},
+    {ShipPartId::TACHYON_SOURCE, "Tachyon Source"},
+    {ShipPartId::GLUON_COMPUTER, "Gluon Computer"},
+    {ShipPartId::PLASMA_MISSILE, "Plasma Missile"},
+    {ShipPartId::FUSION_SOURCE, "Fusion Source"},
+    {ShipPartId::IMPROVED_HULL, "Improved Hull"},
+    {ShipPartId::POSITRON_COMPUTER, "Positron Computer"},
+    {ShipPartId::GAUSS_SHIELD, "Gauss Shield"},
+    {ShipPartId::TACHYON_DRIVE, "Tachyon Drive"},
+    {ShipPartId::ANTIMATTER_CANNON, "Antimatter Cannon"},
+    {ShipPartId::FUSION_DRIVE, "Fusion Drive"},
+    {ShipPartId::ABSORPTION_SHIELD, "Absorption Shield"},
+    {ShipPartId::CONIFOLD_FIELD, "Conifold Field"},
+    {ShipPartId::FLUX_MISSILE, "Flux Missile"},
+    {ShipPartId::SENTIENT_HULL, "Sentient Hull"},
+    {ShipPartId::SOLITON_CANNON, "Soliton Cannon"},
+    {ShipPartId::TRANSITION_DRIVE, "Transition Drive"},
+    {ShipPartId::ZERO_POINT_SOURCE, "Zero Point Source"},
+    {ShipPartId::RIFT_CANNON, "Rift Cannon"},
+    {ShipPartId::MUON_SOURCE, "Muon Source"},
+    {ShipPartId::RIFT_CONDUCTOR, "Rift Conductor"},
+    {ShipPartId::ANTIMATTER_MISSILE, "Antimatter Missile"},
+    {ShipPartId::AXION_COMPUTER, "Axion Computer"},
+    {ShipPartId::CONFORMAL_DRIVE, "Conformal Drive"},
+    {ShipPartId::FLUX_SHIELD, "Flux Shield"},
+    {ShipPartId::HYPERGRID_SOURCE, "Hypergrid Source"},
+    {ShipPartId::INVERSION_SHIELD, "Inversion Shield"},
+    {ShipPartId::ION_DISRUPTOR, "Ion Disruptor"},
+    {ShipPartId::ION_MISSILE, "Ion Missile"},
+    {ShipPartId::ION_TURRET, "Ion Turret"},
+    {ShipPartId::JUMP_DRIVE, "Jump Drive"},
+    {ShipPartId::MORPH_SHIELD, "Morph Shield"},
+    {ShipPartId::NONLINEAR_DRIVE, "Nonlinear Drive"},
+    {ShipPartId::PLASMA_TURRET, "Plasma Turret"},
+    {ShipPartId::SHARD_HULL, "Shard Hull"},
+    {ShipPartId::SOLITON_CHARGER, "Soliton Charger"},
+    {ShipPartId::SOLITON_MISSILE, "Soliton Missile"},
+});
+
+inline std::ostream& operator<<(std::ostream& os, ShipPartId p) {
+    for (const auto& def : SHIP_PART_TABLE) {
+        if (def.id == p) return os << def.name;
+    }
+    return os << "ShipPartId(" << static_cast<int>(p) << ")";
+}
 
 struct ShipStats {
     int8_t initiative = 0;

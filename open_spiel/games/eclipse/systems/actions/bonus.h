@@ -13,7 +13,13 @@
 
 #include "open_spiel/games/eclipse/state.h"
 
-// ── Trade ─────────────────────────────────────────────────────────────────────
+// ── Minor Species Diplomatic Relations ────────────────────────────────────────
+// TODO: Forming Diplomatic Relations with a Minor Species is a free action
+// usable at any time during a player's turn (similar to Trade / Colony Ships).
+// Look up the tile's data in open_spiel/games/eclipse/minor_species.h
+// (MINOR_SPECIES_TABLE) for the Money cost, end-game VP, and triggered
+// ability. Effects trigger immediately on formation and the tile cannot be
+// discarded afterwards.
 // Pay trade_rate of one resource, gain 1 of another.
 
 enum class TradeConversion : uint8_t {
@@ -71,7 +77,7 @@ std::vector<ColonyPlacement> legal_colony_ship_placements(
 // 1. Verify player is eligible (either by claiming the Warp Portal Discovery Tile
 //    or having researched the Warp Portal Rare Tech).
 // 2. Consume the eligibility flag/tile.
-// 3. Mark the target sector as containing a player warp portal (set has_player_warp_portal = true).
+// 3. Mark the target sector with a 1 VP Rare Tech Warp Portal tile.
 bool can_place_warp_portal(const State& state, uint8_t player_id, uint8_t galaxy_cell_idx);
 bool place_warp_portal(State& state, uint8_t player_id, uint8_t galaxy_cell_idx);
 
