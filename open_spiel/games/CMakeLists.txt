@@ -92,6 +92,8 @@ set(GAME_SOURCES
   eclipse/systems/upkeep.h
   eclipse/systems/actions/bonus.cpp
   eclipse/systems/actions/bonus.h
+  eclipse/systems/actions/diplomacy.cpp
+  eclipse/systems/actions/diplomacy.h
   eclipse/systems/actions/explore.cpp
   eclipse/systems/actions/explore.h
   eclipse/systems/actions/research.cpp

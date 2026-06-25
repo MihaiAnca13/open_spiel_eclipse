@@ -22,6 +22,7 @@
 #include "systems/actions/explore.h"
 #include "systems/actions/research.h"
 #include "systems/actions/build.h"
+#include "systems/actions/diplomacy.h"
 #include "systems/actions/influence.h"
 #include "systems/actions/upgrade.h"
 #include "systems/actions/move.h"
@@ -32,6 +33,7 @@
 using open_spiel::eclipse::FixedVector;
 using open_spiel::eclipse::ShipType;
 using open_spiel::eclipse::ReputationTiles;
+using open_spiel::eclipse::ReputationSlotKind;
 using open_spiel::eclipse::CombatState;
 
 #define MAX_PLAYERS 6
@@ -92,6 +94,8 @@ NLOHMANN_JSON_SERIALIZE_ENUM(RoundPhase, {
     {RoundPhase::CLEANUP, "cleanup"}
 });
 
+using open_spiel::eclipse::ReputationSlot;
+
 struct Player {
     uint8_t id;
     uint8_t score;
@@ -104,7 +108,7 @@ struct Player {
     uint8_t colony_ships_available = 0;
     uint8_t orbitals, monoliths;
     std::array<Blueprint, 4> blueprints;
-    FixedVector<ReputationTiles, 5> reputation_tiles;
+    FixedVector<ReputationSlot, 5> reputation_track;
     uint8_t trade_rate;
     uint8_t extra_influence_discs = 0;
     std::array<uint8_t, 3> graveyard_counts = {0, 0, 0};
@@ -115,6 +119,7 @@ struct Player {
 
     // End-of-game scoring state
     uint8_t ambassador_tiles_held = 0;     // 1 VP per tile at game end
+    uint8_t ambassador_tiles_pending_return = 0;  // tiles freed by a break awaiting track choice
     bool traitor_held = false;             // -2 VP at game end
     uint8_t discovery_vp_tiles_kept = 0;   // 2 VP per tile at game end
 
@@ -147,7 +152,7 @@ struct Player {
 
 static_assert(static_cast<size_t>(ShipType::STARBASE) + 1 == 4, "The first 4 ShipType values must map to blueprints index 0-3");
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Player, id, score, species_id, is_ai, has_passed, disks_on_sectors, disks_on_actions, resources, colony_ships_total, colony_ships_available, orbitals, monoliths, blueprints, reputation_tiles, trade_rate, extra_influence_discs, graveyard_counts, eliminated, researched_techs_military, researched_techs_grid, researched_techs_nano, ambassador_tiles_held, traitor_held, discovery_vp_tiles_kept, parts_inventory, warp_portal_eligible);
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Player, id, score, species_id, is_ai, has_passed, disks_on_sectors, disks_on_actions, resources, colony_ships_total, colony_ships_available, orbitals, monoliths, blueprints, reputation_track, trade_rate, extra_influence_discs, graveyard_counts, eliminated, researched_techs_military, researched_techs_grid, researched_techs_nano, ambassador_tiles_held, ambassador_tiles_pending_return, traitor_held, discovery_vp_tiles_kept, parts_inventory, warp_portal_eligible);
 
 struct UpkeepState {
     enum class Step : uint8_t {
@@ -225,6 +230,11 @@ struct State {
 
     // In-flight Combat phase state.
     CombatState combat_state;
+
+    // In-flight Diplomacy (Diplomatic Relations formation / rearrange / deferred
+    // return-track choice after a break). Sub-state machine, free bonus action:
+    // does not advance the turn until it returns to inactive.
+    DiplomacyState diplomacy_state;
 
     // Monotonic counter for Unit::arrival_order. Bumped whenever a unit is
     // added to unit_registry (setup, build, explore, move, warp). 0 is the
@@ -317,6 +327,7 @@ inline void to_json(nlohmann::json& j, const State& s) {
         {"move_state", s.move_state},
         {"upkeep_state", s.upkeep_state},
         {"combat_state", s.combat_state},
+        {"diplomacy_state", s.diplomacy_state},
         {"next_arrival_order", s.next_arrival_order}
     };
 }
@@ -412,6 +423,12 @@ inline void from_json(const nlohmann::json& j, State& s) {
         j.at("combat_state").get_to(s.combat_state);
     } else {
         s.combat_state = CombatState{};
+    }
+
+    if (j.contains("diplomacy_state")) {
+        j.at("diplomacy_state").get_to(s.diplomacy_state);
+    } else {
+        s.diplomacy_state = DiplomacyState{};
     }
 
     if (j.contains("next_arrival_order")) {

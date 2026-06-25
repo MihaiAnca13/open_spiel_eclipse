@@ -94,6 +94,7 @@ class EclipseState : public State {
   std::vector<Action> BuildLegalActions() const;
   std::vector<Action> UpgradeLegalActions() const;
   std::vector<Action> MoveLegalActions() const;
+  std::vector<Action> DiplomacyLegalActions() const;
   std::vector<Action> UpkeepLegalActions() const;
   std::vector<Action> CombatLegalActions() const;
   void ApplyExploreSubAction(Action action_id);
@@ -102,6 +103,7 @@ class EclipseState : public State {
   void ApplyBuildSubAction(Action action_id);
   void ApplyUpgradeSubAction(Action action_id);
   void ApplyMoveSubAction(Action action_id);
+  void ApplyDiplomacySubAction(Action action_id);
   void ApplyUpkeepAction(Action action_id);
   void ApplyCombatSubAction(Action action_id);
   void AdvanceTurn();

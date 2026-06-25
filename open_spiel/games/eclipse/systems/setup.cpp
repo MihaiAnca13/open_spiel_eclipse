@@ -302,7 +302,18 @@ void FinalizeGameSetup(State& state,
         player.resources.gold_prod      = 12;
         player.resources.science_prod   = 12;
         player.resources.materials_prod = 12;
-        player.reputation_tiles.clear();
+        player.reputation_track.clear();
+        // Initialize species-specific Reputation Track slots.
+        // Empty slots default to holds_ambassador=false with rep_value=NONE.
+        for (uint8_t slot_idx = 0; slot_idx < species_data.reputation_track.count; ++slot_idx) {
+            player.reputation_track.push_back({
+                species_data.reputation_track.slots[slot_idx],
+                /*holds_ambassador=*/false,
+                ReputationTiles::NONE,
+                /*ambassador_from=*/255,
+                /*pending_track_choice=*/false
+            });
+        }
 
         for (size_t ship_idx = 0; ship_idx < 4; ++ship_idx) {
             Blueprint& blueprint = player.blueprints[ship_idx];

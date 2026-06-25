@@ -8,6 +8,8 @@
 #include "../types.h"
 #include "../species.h"
 
+using open_spiel::eclipse::ReputationSlot;
+
 namespace open_spiel {
 namespace eclipse {
 
@@ -44,12 +46,15 @@ PlayerScoreBreakdown compute_player_score(const ::State& state, uint8_t player_i
 
     // 1. REPUTATION TILES
     // Using explicit loop over fixed-capacity storage structure
-    for (size_t i = 0; i < player.reputation_tiles.size(); ++i) {
-        switch (player.reputation_tiles[i]) {
+    for (size_t i = 0; i < player.reputation_track.size(); ++i) {
+        const ReputationSlot& slot = player.reputation_track[i];
+        if (slot.holds_ambassador) continue;  // Ambassador tile, not a Rep tile.
+        switch (slot.rep_value) {
             case ReputationTiles::ONE:   score.reputation_vp += 1; break;
             case ReputationTiles::TWO:   score.reputation_vp += 2; break;
             case ReputationTiles::THREE: score.reputation_vp += 3; break;
             case ReputationTiles::FOUR:  score.reputation_vp += 4; break;
+            case ReputationTiles::NONE:  break;  // empty slot, no tile
         }
     }
 

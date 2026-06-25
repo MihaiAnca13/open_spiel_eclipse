@@ -11,6 +11,7 @@
 
 #include "open_spiel/games/eclipse/species.h"
 #include "open_spiel/games/eclipse/systems/actions/bonus.h"
+#include "open_spiel/games/eclipse/systems/actions/diplomacy.h"
 #include "open_spiel/games/eclipse/systems/actions/explore.h"
 #include "open_spiel/games/eclipse/systems/actions/research.h"
 #include "open_spiel/games/eclipse/systems/actions/build.h"
@@ -124,8 +125,39 @@ constexpr Action action_combat_discovery_reward = action_combat_influence_no + 1
 constexpr Action action_combat_discovery_vp = action_combat_discovery_reward + 1; // 10135
 constexpr Action action_combat_influence_to_cell_start =
     action_combat_discovery_vp + 1; // 10136 (+ 225 cells)
-constexpr int num_distinct_actions =
+
+// ── Diplomacy action IDs (rulebook p.14-15) ──────────────────────────────────
+// Propose: one per (proposer, partner) pair, 6*6 = 36 ids.
+constexpr Action action_diplomacy_propose_start =
     action_combat_influence_to_cell_start + GALAXY_CELL_COUNT; // 10361
+constexpr Action action_diplomacy_propose_end =
+    action_diplomacy_propose_start + MAX_PLAYERS * MAX_PLAYERS; // 10397
+
+// Each side's Pop Track pick at formation: 3 tracks x 2 sides = 6 ids.
+// Encoding: action_diplomacy_pick_track_start + side*3 + track
+//   side=0: proposer, side=1: partner
+constexpr Action action_diplomacy_pick_track_start = action_diplomacy_propose_end; // 10397
+constexpr Action action_diplomacy_pick_track_end =
+    action_diplomacy_pick_track_start + 6; // 10403
+
+// Rearrange: return tile to bag. 5 slots per side x 2 sides = 10 ids.
+// Encoding: action_diplomacy_return_start + side*5 + slot
+constexpr Action action_diplomacy_return_start = action_diplomacy_pick_track_end; // 10403
+constexpr Action action_diplomacy_return_end =
+    action_diplomacy_return_start + 10; // 10413
+
+// Swap: AMBASSADOR_OR_REP slot <-> free REP_ONLY slot. 5 source slots * 5 dest
+// slots - 5 self = 20 swaps per side x 2 sides = 40 ids.
+// Encoding: action_diplomacy_swap_start + side*20 + (src*5 + dst) where src != dst
+constexpr Action action_diplomacy_swap_start = action_diplomacy_return_end; // 10413
+constexpr Action action_diplomacy_swap_end =
+    action_diplomacy_swap_start + 40; // 10453
+
+// Accept/decline a diplomacy proposal (Fix #1: partner-accept step).
+constexpr Action action_diplomacy_accept = action_diplomacy_swap_end; // 10453
+constexpr Action action_diplomacy_decline = action_diplomacy_accept + 1; // 10454
+
+constexpr int num_distinct_actions = action_diplomacy_decline + 1; // 10455
 
 const GameType game_type{
     /*short_name=*/"eclipse",
@@ -556,6 +588,16 @@ std::vector<Action> EclipseState::LegalActions() const {
     return MoveLegalActions();
   }
 
+  // Mid-Diplomacy: only diplomacy sub-actions are legal.
+  if (s.diplomacy_state.phase != DiplomacyState::Phase::inactive) {
+    return DiplomacyLegalActions();
+  }
+
+  // Deferred return-track choice after a Diplomatic Relations break.
+  if (s.diplomacy_state.phase == DiplomacyState::Phase::choose_return_track) {
+    return DiplomacyLegalActions();
+  }
+
   if (s.upkeep_state.step != UpkeepState::Step::inactive) {
     return UpkeepLegalActions();
   }
@@ -608,6 +650,18 @@ std::vector<Action> EclipseState::LegalActions() const {
                         p.cell * COLONY_SHIP_CODES_PER_CELL +
                         p.slot * COLONY_SHIP_TRACKS +
                         static_cast<int>(p.track));
+    }
+
+    // Diplomacy propose (free bonus action; available any time during the
+    // actioner's Action). Only offered in 4+ player games.
+    if (eclipse_state_.players.size() >= 4) {
+      for (uint8_t p = 0; p < eclipse_state_.players.size(); ++p) {
+        if (p == current_player) continue;
+        if (can_propose_diplomacy(s, current_player, p)) {
+          actions.push_back(action_diplomacy_propose_start +
+                            current_player * MAX_PLAYERS + p);
+        }
+      }
     }
   }
 
@@ -886,6 +940,74 @@ std::vector<Action> EclipseState::MoveLegalActions() const {
   return actions;
 }
 
+std::vector<Action> EclipseState::DiplomacyLegalActions() const {
+  const ::State& s = eclipse_state_;
+  const DiplomacyState& ds = s.diplomacy_state;
+  std::vector<Action> actions;
+
+  if (ds.phase == DiplomacyState::Phase::choose_accept) {
+    // Fix #1: partner may accept or decline (rulebook p.14).
+    const uint8_t expected = ds.partner_id;
+    if (expected < s.players.size() && !s.players[expected].eliminated) {
+      actions.push_back(action_diplomacy_accept);
+      actions.push_back(action_diplomacy_decline);
+    }
+  } else if (ds.phase == DiplomacyState::Phase::choose_pop_track) {
+    // Proposer (side=0) or partner (side=1) picks a Pop Track for the cube
+    // they're giving. The three legal tracks are gated by cube availability.
+    const uint8_t side = ds.pop_track_side;
+    const uint8_t expected = (side == 0) ? ds.player_id : ds.partner_id;
+    if (expected < s.players.size()) {
+      const ::Player& p = s.players[expected];
+      if (p.resources.gold_prod > 0) {
+        actions.push_back(action_diplomacy_pick_track_start + side * 3 + 0);
+      }
+      if (p.resources.science_prod > 0) {
+        actions.push_back(action_diplomacy_pick_track_start + side * 3 + 1);
+      }
+      if (p.resources.materials_prod > 0) {
+        actions.push_back(action_diplomacy_pick_track_start + side * 3 + 2);
+      }
+    }
+  } else if (ds.phase == DiplomacyState::Phase::choose_rearrange) {
+    // Either side may return a Rep tile to the bag to free an Ambassador slot.
+    const uint8_t side = ds.rearrange_side;
+    const uint8_t expected = (side == 0) ? ds.player_id : ds.partner_id;
+    if (expected < s.players.size()) {
+      const ::Player& p = s.players[expected];
+      for (size_t slot = 0; slot < p.reputation_track.size(); ++slot) {
+        if (slot_is_returnable(p.reputation_track[slot])) {
+          actions.push_back(action_diplomacy_return_start + side * 5 +
+                            static_cast<uint8_t>(slot));
+        }
+      }
+      // Swaps: AMBASSADOR_OR_REP <-> free REP_ONLY.
+      for (size_t src = 0; src < p.reputation_track.size(); ++src) {
+        if (p.reputation_track[src].kind != ReputationSlotKind::AMBASSADOR_OR_REP) continue;
+        if (p.reputation_track[src].holds_ambassador) continue;
+        for (size_t dst = 0; dst < p.reputation_track.size(); ++dst) {
+          if (src == dst) continue;
+          if (p.reputation_track[dst].kind != ReputationSlotKind::REP_ONLY) continue;
+          if (p.reputation_track[dst].holds_ambassador) continue;
+          actions.push_back(action_diplomacy_swap_start + side * 20 +
+                            static_cast<uint8_t>(src) * 5 +
+                            static_cast<uint8_t>(dst));
+        }
+      }
+    }
+  } else if (ds.phase == DiplomacyState::Phase::choose_return_track) {
+    // The player whose return-track choice is pending picks a track with room.
+    const uint8_t expected = pending_return_track_player(s);
+    if (expected < s.players.size()) {
+      const ::Player& p = s.players[expected];
+      if (p.resources.gold_prod < 12) actions.push_back(action_choose_return_track_start + 0);
+      if (p.resources.science_prod < 12) actions.push_back(action_choose_return_track_start + 1);
+      if (p.resources.materials_prod < 12) actions.push_back(action_choose_return_track_start + 2);
+    }
+  }
+  return actions;
+}
+
 std::vector<Action> EclipseState::UpkeepLegalActions() const {
   const ::State& s = eclipse_state_;
   const UpkeepState& us = s.upkeep_state;
@@ -1158,11 +1280,47 @@ std::string EclipseState::ActionToString(Player player, Action action_id) const 
     return "COMBAT_DISCOVERY_VP";
   }
   if (action_id >= action_combat_influence_to_cell_start &&
-      action_id < num_distinct_actions) {
+      action_id < action_diplomacy_propose_start) {
     HexCoord c = index_to_hex(action_id - action_combat_influence_to_cell_start);
     return "COMBAT_INFLUENCE_TO_" + std::to_string(c.q) + "_" +
            std::to_string(c.r);
   }
+  if (action_id >= action_diplomacy_propose_start &&
+      action_id < action_diplomacy_propose_end) {
+    int encoded = action_id - action_diplomacy_propose_start;
+    int p = encoded / MAX_PLAYERS;
+    int q = encoded % MAX_PLAYERS;
+    return "DIPLOMACY_PROPOSE_" + std::to_string(p) + "_" + std::to_string(q);
+  }
+  if (action_id >= action_diplomacy_pick_track_start &&
+      action_id < action_diplomacy_pick_track_end) {
+    int encoded = action_id - action_diplomacy_pick_track_start;
+    int side = encoded / 3;
+    int track = encoded % 3;
+    static const char* kTrackNames[3] = {"MONEY", "SCIENCE", "MATERIALS"};
+    return std::string("DIPLOMACY_PICK_TRACK_") + (side == 0 ? "PROPOSER" : "PARTNER") +
+           "_" + kTrackNames[track];
+  }
+  if (action_id >= action_diplomacy_return_start &&
+      action_id < action_diplomacy_return_end) {
+    int encoded = action_id - action_diplomacy_return_start;
+    int side = encoded / 5;
+    int slot = encoded % 5;
+    return std::string("DIPLOMACY_RETURN_REP_") + (side == 0 ? "PROPOSER" : "PARTNER") +
+           "_SLOT" + std::to_string(slot);
+  }
+  if (action_id >= action_diplomacy_swap_start &&
+      action_id < action_diplomacy_swap_end) {
+    int encoded = action_id - action_diplomacy_swap_start;
+    int side = encoded / 20;
+    int rem = encoded % 20;
+    int src = rem / 5;
+    int dst = rem % 5;
+    return std::string("DIPLOMACY_SWAP_REP_") + (side == 0 ? "PROPOSER" : "PARTNER") +
+           "_" + std::to_string(src) + "_TO_" + std::to_string(dst);
+  }
+  if (action_id == action_diplomacy_accept) return "DIPLOMACY_ACCEPT";
+  if (action_id == action_diplomacy_decline) return "DIPLOMACY_DECLINE";
   return "UNKNOWN_ACTION(" + std::to_string(action_id) + ")";
 }
 
@@ -1694,6 +1852,69 @@ void EclipseState::ApplyMoveSubAction(Action action_id) {
   }
 }
 
+void EclipseState::ApplyDiplomacySubAction(Action action_id) {
+  ::State& s = eclipse_state_;
+  DiplomacyState& ds = s.diplomacy_state;
+
+  if (ds.phase == DiplomacyState::Phase::inactive) return;
+
+  if (ds.phase == DiplomacyState::Phase::choose_accept) {
+    // Fix #1: partner accept/decline (rulebook p.14).
+    if (action_id == action_diplomacy_accept) {
+      execute_diplomacy_accept(s);
+    } else if (action_id == action_diplomacy_decline) {
+      execute_diplomacy_decline(s);
+    }
+    return;
+  }
+
+  if (ds.phase == DiplomacyState::Phase::choose_pop_track) {
+    if (action_id >= action_diplomacy_pick_track_start &&
+        action_id < action_diplomacy_pick_track_end) {
+      int encoded = action_id - action_diplomacy_pick_track_start;
+      int side = encoded / 3;
+      int track = encoded % 3;
+      const uint8_t expected = (side == 0) ? ds.player_id : ds.partner_id;
+      execute_diplomacy_pick_track(s, expected, static_cast<PopTrack>(track));
+    }
+    return;
+  }
+
+  if (ds.phase == DiplomacyState::Phase::choose_rearrange) {
+    if (action_id >= action_diplomacy_return_start &&
+        action_id < action_diplomacy_return_end) {
+      int encoded = action_id - action_diplomacy_return_start;
+      int side = encoded / 5;
+      int slot = encoded % 5;
+      const uint8_t expected = (side == 0) ? ds.player_id : ds.partner_id;
+      execute_return_rep_to_bag(s, expected, static_cast<uint8_t>(slot));
+    } else if (action_id >= action_diplomacy_swap_start &&
+               action_id < action_diplomacy_swap_end) {
+      int encoded = action_id - action_diplomacy_swap_start;
+      int side = encoded / 20;
+      int rem = encoded % 20;
+      int src = rem / 5;
+      int dst = rem % 5;
+      const uint8_t expected = (side == 0) ? ds.player_id : ds.partner_id;
+      execute_swap_rep_slots(s, expected, static_cast<uint8_t>(src),
+                             static_cast<uint8_t>(dst));
+    }
+    return;
+  }
+
+  if (ds.phase == DiplomacyState::Phase::choose_return_track) {
+    if (action_id >= action_choose_return_track_start &&
+        action_id < action_choose_return_track_start + 3) {
+      int track = action_id - action_choose_return_track_start;
+      const uint8_t expected = pending_return_track_player(s);
+      if (expected < s.players.size()) {
+        execute_choose_return_track(s, expected, static_cast<PopTrack>(track));
+      }
+    }
+    return;
+  }
+}
+
 void EclipseState::BeginUpkeep() {
   eclipse_state_.current_phase = RoundPhase::UPKEEP;
   eclipse_state_.upkeep_state = UpkeepState{};
@@ -2164,11 +2385,31 @@ void EclipseState::ApplyCombatSubAction(Action action_id) {
         return;
       }
       if (keep_tile) {
-        // Cap at 5: force replace the last tile.
-        if (s.players[player].reputation_tiles.size() >= 5) {
-          s.players[player].reputation_tiles.pop_back();
+        // Place the tile in a Reputation-capable slot (AMBASSADOR_OR_REP or
+        // REP_ONLY). Cap at 5 by evicting the highest-index rep tile first.
+        ::Player& p = s.players[player];
+        int last_rep_slot = -1;
+        for (size_t i = 0; i < p.reputation_track.size(); ++i) {
+          if (!p.reputation_track[i].holds_ambassador &&
+              p.reputation_track[i].kind != ReputationSlotKind::AMBASSADOR_ONLY) {
+            last_rep_slot = static_cast<int>(i);
+          }
         }
-        s.players[player].reputation_tiles.push_back(cs.drawn_tiles[idx]);
+        if (last_rep_slot >= 0) {
+          p.reputation_track[last_rep_slot].rep_value = cs.drawn_tiles[idx];
+        } else {
+          // All rep-capable slots occupied; force-evict the highest-index
+          // rep tile to make room. Return the evicted tile to the bag.
+          for (size_t i = p.reputation_track.size(); i > 0; --i) {
+            const size_t slot_idx = i - 1;
+            if (!p.reputation_track[slot_idx].holds_ambassador &&
+                p.reputation_track[slot_idx].kind != ReputationSlotKind::AMBASSADOR_ONLY) {
+              s.reputation_tiles.push_back(p.reputation_track[slot_idx].rep_value);
+              p.reputation_track[slot_idx].rep_value = cs.drawn_tiles[idx];
+              break;
+            }
+          }
+        }
       }
       // Return the unselected tiles to the bag. Order is irrelevant because
       // future draws sample from the bag via reputation_draw chance nodes, so
@@ -2429,6 +2670,14 @@ void EclipseState::DoApplyAction(Action action_id) {
     return;
   }
 
+  // Resolve a step of an in-flight Diplomacy sub-state (formation or deferred
+  // return-track choice). Free bonus action: does NOT advance the turn.
+  if (eclipse_state_.diplomacy_state.phase != DiplomacyState::Phase::inactive) {
+    ApplyDiplomacySubAction(action_id);
+    // Stay in the diplomacy sub-state until it returns to inactive.
+    return;
+  }
+
   if (eclipse_state_.upkeep_state.step != UpkeepState::Step::inactive) {
     ApplyUpkeepAction(action_id);
     return;
@@ -2553,6 +2802,19 @@ void EclipseState::DoApplyAction(Action action_id) {
         static_cast<uint8_t>(rem / COLONY_SHIP_TRACKS),
         static_cast<PopTrack>(rem % COLONY_SHIP_TRACKS)));
     return;
+  } else if (action_id >= action_diplomacy_propose_start &&
+             action_id < action_diplomacy_propose_end) {
+    // Bonus action: diplomacy propose — no disc, no turn advance.
+    int encoded = static_cast<int>(action_id - action_diplomacy_propose_start);
+    int proposer = encoded / MAX_PLAYERS;
+    int partner = encoded % MAX_PLAYERS;
+    if (current_player < eclipse_state_.players.size() &&
+        proposer == current_player) {
+      begin_diplomacy(eclipse_state_, current_player,
+                      static_cast<uint8_t>(partner));
+      // Stay in the diplomacy sub-state until it returns to inactive.
+      return;
+    }
   }
 
   AdvanceTurn();
@@ -2560,6 +2822,17 @@ void EclipseState::DoApplyAction(Action action_id) {
 
 void EclipseState::AdvanceTurn() {
   const uint8_t current_player = eclipse_state_.current_player;
+
+  // Detect an Act of Aggression: any sector the current player moved into or
+  // attacked into this Action where a Diplomatic partner has a Ship or
+  // Control. If detected, break those Diplomatic Relations and enqueue the
+  // deferred return-track choice. The aggressor becomes the Traitor Tile
+  // holder (rulebook p.14-15).
+  if (eclipse_state_.current_phase == RoundPhase::ACTION) {
+    if (eclipse_state_.diplomacy_state.phase == DiplomacyState::Phase::inactive) {
+      break_all_diplomacy_for(eclipse_state_, current_player);
+    }
+  }
 
   bool all_passed = true;
   for (const auto& player : eclipse_state_.players) {
