@@ -2185,15 +2185,10 @@ std::vector<Action> EclipseState::CombatLegalActions() const {
 
   if (cs.phase == CombatState::Phase::attack_population &&
       cs.pop_attack_damage_remaining > 0) {
-    for (int q = -GALAXY_RADIUS; q <= GALAXY_RADIUS; ++q) {
-      for (int r = -GALAXY_RADIUS; r <= GALAXY_RADIUS; ++r) {
-        if (!in_galaxy_bounds(q, r)) continue;
-        const Sector& sec = s.galaxy.at(q, r);
-        if (sec.sector_id != cs.pop_attack_sector_id) continue;
-        for (int slot = 0; slot < 16; ++slot) {
-          if ((sec.occupied_slots_mask & static_cast<uint16_t>(1u << slot)) != 0) {
-            actions.push_back(action_combat_pop_target_start + slot);
-          }
+    if (const Sector* sec = s.galaxy.FindSectorById(cs.pop_attack_sector_id)) {
+      for (int slot = 0; slot < 16; ++slot) {
+        if ((sec->occupied_slots_mask & static_cast<uint16_t>(1u << slot)) != 0) {
+          actions.push_back(action_combat_pop_target_start + slot);
         }
       }
     }
@@ -2207,13 +2202,9 @@ std::vector<Action> EclipseState::CombatLegalActions() const {
         actions.push_back(action_combat_attack);
         for (uint8_t i = 0; i < cs.retreat_destinations_size; ++i) {
           const uint16_t sid = cs.retreat_destinations[i];
-          for (int cell = 0; cell < GALAXY_CELL_COUNT; ++cell) {
-            const HexCoord h = index_to_hex(cell);
-            const Sector& sec = s.galaxy.at(h.q, h.r);
-            if (sec.sector_id == sid) {
-              actions.push_back(action_combat_retreat_to_cell_start + cell);
-              break;
-            }
+          const HexCoord h = s.galaxy.FindSectorCoord(sid);
+          if (h.q != -128) {
+            actions.push_back(action_combat_retreat_to_cell_start + hex_to_index(h.q, h.r));
           }
         }
       } else {
@@ -2296,47 +2287,40 @@ void EclipseState::ApplyCombatSubAction(Action action_id) {
     }
     const int slot = action_id - action_combat_pop_target_start;
     if (slot < 0 || slot >= 16) return;
-    for (int q = -GALAXY_RADIUS; q <= GALAXY_RADIUS; ++q) {
-      for (int r = -GALAXY_RADIUS; r <= GALAXY_RADIUS; ++r) {
-        if (!in_galaxy_bounds(q, r)) continue;
-        Sector& sec = s.galaxy.at(q, r);
-        if (sec.sector_id != cs.pop_attack_sector_id) continue;
-        const uint16_t bit = static_cast<uint16_t>(1u << slot);
-        if ((sec.occupied_slots_mask & bit) == 0) return;
-        sec.occupied_slots_mask &= static_cast<uint16_t>(~bit);
-        int graveyard = 0;
-        const SectorDefinition* def = get_sector_definition(sec.sector_id);
-        if (def && slot < static_cast<int>(def->slots.size())) {
-          switch (def->slots[slot].type) {
-            case PlanetType::MONEY:
-            case PlanetType::ADV_MONEY:
-            case PlanetType::ANY:
-            case PlanetType::ADV_ANY:
-              graveyard = 0;
-              break;
-            case PlanetType::SCIENCE:
-            case PlanetType::ADV_SCIENCE:
-              graveyard = 1;
-              break;
-            case PlanetType::MATERIALS:
-            case PlanetType::ADV_MATERIALS:
-              graveyard = 2;
-              break;
-          }
-        }
-        if (cs.pop_attack_owner < s.players.size()) {
-          s.players[cs.pop_attack_owner].graveyard_counts[graveyard]++;
-        }
-        --cs.pop_attack_damage_remaining;
-        if (cs.pop_attack_damage_remaining == 0) {
-          cs.pop_attack_sector_id = 0;
-          cs.pop_attack_player = kNoPlayer;
-          cs.pop_attack_owner = kNoPlayer;
-        }
-        return;
+    Sector* sec = s.galaxy.FindSectorById(cs.pop_attack_sector_id);
+    if (sec == nullptr) return;
+    const uint16_t bit = static_cast<uint16_t>(1u << slot);
+    if ((sec->occupied_slots_mask & bit) == 0) return;
+    sec->occupied_slots_mask &= static_cast<uint16_t>(~bit);
+    int graveyard = 0;
+    const SectorDefinition* def = get_sector_definition(sec->sector_id);
+    if (def && slot < static_cast<int>(def->slots.size())) {
+      switch (def->slots[slot].type) {
+        case PlanetType::MONEY:
+        case PlanetType::ADV_MONEY:
+        case PlanetType::ANY:
+        case PlanetType::ADV_ANY:
+          graveyard = 0;
+          break;
+        case PlanetType::SCIENCE:
+        case PlanetType::ADV_SCIENCE:
+          graveyard = 1;
+          break;
+        case PlanetType::MATERIALS:
+        case PlanetType::ADV_MATERIALS:
+          graveyard = 2;
+          break;
       }
     }
-    return;
+    if (cs.pop_attack_owner < s.players.size()) {
+      s.players[cs.pop_attack_owner].graveyard_counts[graveyard]++;
+    }
+    --cs.pop_attack_damage_remaining;
+    if (cs.pop_attack_damage_remaining == 0) {
+      cs.pop_attack_sector_id = 0;
+      cs.pop_attack_player = kNoPlayer;
+      cs.pop_attack_owner = kNoPlayer;
+    }
   }
 
   switch (cs.phase) {
@@ -2429,15 +2413,8 @@ void EclipseState::ApplyCombatSubAction(Action action_id) {
         ::Player& p = s.players[cs.influence_decision_player];
         if (p.available_influence_discs() > 0) {
           p.disks_on_sectors++;
-          for (int q = -GALAXY_RADIUS; q <= GALAXY_RADIUS; ++q) {
-            for (int r = -GALAXY_RADIUS; r <= GALAXY_RADIUS; ++r) {
-              if (!in_galaxy_bounds(q, r)) continue;
-              Sector& sec = s.galaxy.at(q, r);
-              if (sec.sector_id == cs.influence_decision_sector) {
-                sec.owner_id = cs.influence_decision_player;
-                break;
-              }
-            }
+          if (Sector* sec = s.galaxy.FindSectorById(cs.influence_decision_sector)) {
+            sec->owner_id = cs.influence_decision_player;
           }
         }
         ++cs.influence_scan_index;
@@ -2451,18 +2428,7 @@ void EclipseState::ApplyCombatSubAction(Action action_id) {
     }
     case CombatState::Phase::discovery_award: {
       if (cs.discovery_decision_player == kNoPlayer) return;
-      Sector* discovery_sector = nullptr;
-      for (int q = -GALAXY_RADIUS; q <= GALAXY_RADIUS; ++q) {
-        for (int r = -GALAXY_RADIUS; r <= GALAXY_RADIUS; ++r) {
-          if (!in_galaxy_bounds(q, r)) continue;
-          Sector& sec = s.galaxy.at(q, r);
-          if (sec.sector_id == cs.discovery_decision_sector) {
-            discovery_sector = &sec;
-            break;
-          }
-        }
-        if (discovery_sector != nullptr) break;
-      }
+      Sector* discovery_sector = s.galaxy.FindSectorById(cs.discovery_decision_sector);
       if (discovery_sector == nullptr) return;
       if (action_id == action_combat_discovery_reward) {
         const uint8_t p = cs.discovery_decision_player;

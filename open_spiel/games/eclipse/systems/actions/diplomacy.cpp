@@ -45,17 +45,8 @@ namespace open_spiel::eclipse
         }
 
         bool sector_controlled_by(const ::State& state, uint8_t player_id, uint16_t sector_id) {
-            if (sector_id == 0) return false;
-            for (int q = -GALAXY_RADIUS; q <= GALAXY_RADIUS; ++q) {
-                for (int r = -GALAXY_RADIUS; r <= GALAXY_RADIUS; ++r) {
-                    if (!in_galaxy_bounds(q, r)) continue;
-                    const Sector& s = state.galaxy.at(q, r);
-                    if (s.sector_id == sector_id) {
-                        return s.owner_id == player_id;
-                    }
-                }
-            }
-            return false;
+            const Sector* s = state.galaxy.FindSectorById(sector_id);
+            return s != nullptr && s->owner_id == player_id;
         }
 
         bool sector_has_opponent_ship(const ::State& state, uint8_t opponent_id, uint16_t sector_id) {

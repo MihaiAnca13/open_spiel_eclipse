@@ -533,25 +533,6 @@ bool CompleteRetreatIfReady(::State& state, uint8_t player_id, ShipType type) {
     return true;
 }
 
-// Point lookup of a sector's hex coordinate. Returns {-128,-128} when absent.
-HexCoord FindSectorCoord(const ::State& state, uint16_t sector_id) {
-    for (int q = -GALAXY_RADIUS; q <= GALAXY_RADIUS; ++q) {
-        for (int r = -GALAXY_RADIUS; r <= GALAXY_RADIUS; ++r) {
-            if (!in_galaxy_bounds(q, r)) continue;
-            if (state.galaxy.at(q, r).sector_id == sector_id) {
-                return HexCoord{static_cast<int8_t>(q), static_cast<int8_t>(r)};
-            }
-        }
-    }
-    return HexCoord{-128, -128};
-}
-
-Sector* FindSectorById(::State& state, uint16_t sector_id) {
-    const HexCoord c = FindSectorCoord(state, sector_id);
-    if (c.q == -128) return nullptr;
-    return &state.galaxy.at(c.q, c.r);
-}
-
 // Transient sector_id -> coordinate index. Built on demand (a single galaxy
 // scan) and lives only on the stack, so it never bloats State / Clone. Sector
 // ids are < 395 (see sectors.h).
@@ -688,7 +669,7 @@ void ComputeLegalRetreatDestinations(const ::State& state,
                                      uint8_t& out_size) {
     out_size = 0;
     const uint16_t sector = state.combat_state.active_sector_id;
-    const HexCoord src = FindSectorCoord(state, sector);
+    const HexCoord src = state.galaxy.FindSectorCoord(sector);
     if (src.q == -128) return;
     const Sector& src_sec = state.galaxy.at(src.q, src.r);
     const SectorDefinition* src_def = get_sector_definition(src_sec.sector_id);
@@ -948,7 +929,7 @@ void ResolveCombatDie(::State& state, uint8_t face) {
 
     if (cs.pending_dice_pop_attack) {
         if (DieHitsShield(state, attacker, type, face, color, /*shield=*/0)) {
-            Sector* sec = FindSectorById(state, cs.pop_attack_sector_id);
+            Sector* sec = state.galaxy.FindSectorById(cs.pop_attack_sector_id);
             const int cap = sec ? CountOccupiedSlots(sec->occupied_slots_mask) : 0;
             const int total = std::min<int>(
                 cap, cs.pop_attack_damage_remaining + DamageForDie(face, color));
@@ -1153,7 +1134,7 @@ bool StepCombat(::State& state) {
                 ++cs.pop_attack_unit_index;
                 if (attacker.sector_id == kGraveyardSectorId) continue;
                 if (attacker.player_id == NPC_PLAYER_ID) continue;
-                Sector* sector = FindSectorById(state, attacker.sector_id);
+                Sector* sector = state.galaxy.FindSectorById(attacker.sector_id);
                 if (sector == nullptr || sector->owner_id == 255) continue;
                 if (sector->owner_id == attacker.player_id) continue;
                 if (sector->occupied_slots_mask == 0) continue;
@@ -1217,7 +1198,7 @@ bool StepCombat(::State& state) {
             while (cs.influence_scan_index < cs.influence_uncontrolled_size) {
                 const uint16_t sid =
                     cs.influence_uncontrolled_sectors[cs.influence_scan_index];
-                Sector* sector = FindSectorById(state, sid);
+                Sector* sector = state.galaxy.FindSectorById(sid);
                 if (sector == nullptr || sector->owner_id != 255) {
                     ++cs.influence_scan_index;
                     continue;

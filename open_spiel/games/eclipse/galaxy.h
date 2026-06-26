@@ -30,6 +30,12 @@ constexpr int GALAXY_RADIUS = 7;
 constexpr int MAP_SIZE = (GALAXY_RADIUS * 2) + 1; // 15
 constexpr int OFFSET = GALAXY_RADIUS; // 7
 
+// Check if coordinates are within the galaxy bounds
+inline bool in_galaxy_bounds(int q, int r) {
+    return q >= -GALAXY_RADIUS && q <= GALAXY_RADIUS &&
+           r >= -GALAXY_RADIUS && r <= GALAXY_RADIUS;
+}
+
 struct Galaxy {
     Sector grid[MAP_SIZE][MAP_SIZE] = {};
 
@@ -40,6 +46,56 @@ struct Galaxy {
 
     const Sector& at(int q, int r) const {
         return grid[q + OFFSET][r + OFFSET];
+    }
+
+    // Cached sector coordinate map for O(1) lookups
+    std::array<HexCoord, 396> sector_coord_map = {};
+
+    void RebuildSectorCoordMap() {
+        sector_coord_map.fill(HexCoord{-128, -128});
+        for (int q = -GALAXY_RADIUS; q <= GALAXY_RADIUS; ++q) {
+            for (int r = -GALAXY_RADIUS; r <= GALAXY_RADIUS; ++r) {
+                if (!in_galaxy_bounds(q, r)) continue;
+                const Sector& sec = at(q, r);
+                if (sec.sector_id > 0 && sec.sector_id < 396) {
+                    sector_coord_map[sec.sector_id] = HexCoord{static_cast<int8_t>(q), static_cast<int8_t>(r)};
+                }
+            }
+        }
+    }
+
+    HexCoord FindSectorCoord(uint16_t sector_id) const {
+        if (sector_id == 0 || sector_id >= 396) {
+            return HexCoord{-128, -128};
+        }
+        HexCoord cached = sector_coord_map[sector_id];
+        if (cached.q != -128) {
+            if (at(cached.q, cached.r).sector_id == sector_id) {
+                return cached;
+            }
+        }
+        for (int q = -GALAXY_RADIUS; q <= GALAXY_RADIUS; ++q) {
+            for (int r = -GALAXY_RADIUS; r <= GALAXY_RADIUS; ++r) {
+                if (!in_galaxy_bounds(q, r)) continue;
+                if (at(q, r).sector_id == sector_id) {
+                    const_cast<Galaxy*>(this)->sector_coord_map[sector_id] = HexCoord{static_cast<int8_t>(q), static_cast<int8_t>(r)};
+                    return HexCoord{static_cast<int8_t>(q), static_cast<int8_t>(r)};
+                }
+            }
+        }
+        return HexCoord{-128, -128};
+    }
+
+    Sector* FindSectorById(uint16_t sector_id) {
+        HexCoord c = FindSectorCoord(sector_id);
+        if (c.q == -128) return nullptr;
+        return &at(c.q, c.r);
+    }
+
+    const Sector* FindSectorById(uint16_t sector_id) const {
+        HexCoord c = FindSectorCoord(sector_id);
+        if (c.q == -128) return nullptr;
+        return &at(c.q, c.r);
     }
 };
 
@@ -110,12 +166,6 @@ inline int hex_distance(uint32_t key1, uint32_t key2) {
     return hex_distance(unpack_q(key1), unpack_r(key1), unpack_q(key2), unpack_r(key2));
 }
 
-// Check if coordinates are within the galaxy bounds
-inline bool in_galaxy_bounds(int q, int r) {
-    return q >= -GALAXY_RADIUS && q <= GALAXY_RADIUS &&
-           r >= -GALAXY_RADIUS && r <= GALAXY_RADIUS;
-}
-
 // Check if a 6-edge bitmask has an edge in the given direction (0-5)
 inline bool has_edge(uint8_t mask, int d) {
     return (mask >> d) & 1u;
@@ -140,6 +190,7 @@ inline void from_json(const nlohmann::json& j, Galaxy& g) {
             g.grid[i][j_idx] = j.at(i).at(j_idx).get<Sector>();
         }
     }
+    g.RebuildSectorCoordMap();
 }
 
 #endif //ECLIPSE_GALAXY_H

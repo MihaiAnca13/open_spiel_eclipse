@@ -2196,6 +2196,43 @@ void DiplomacyCoLocatedShipsRejectsTest() {
   SPIEL_CHECK_FALSE(can_propose_diplomacy(s, 0, 1));
 }
 
+void SectorCoordMapTest() {
+  std::shared_ptr<const Game> game = LoadEclipseGame(2, 7);
+  std::unique_ptr<State> state = game->NewInitialState();
+  state->ApplyAction(0);  // Resolve initial setup
+  const EclipseState* es = static_cast<const EclipseState*>(state.get());
+  ::State s = es->RawState();
+
+  // Verify GCDS sector 1 is mapped to {0,0} after setup Rebuild
+  HexCoord c = s.galaxy.FindSectorCoord(1);
+  SPIEL_CHECK_EQ(c.q, 0);
+  SPIEL_CHECK_EQ(c.r, 0);
+
+  // Verify missing/invalid sector ids return sentinel
+  HexCoord invalid = s.galaxy.FindSectorCoord(999);
+  SPIEL_CHECK_EQ(invalid.q, -128);
+  SPIEL_CHECK_EQ(invalid.r, -128);
+
+  // Verify direct modification (stale cache) triggers the self-healing fallback
+  Sector& cell = s.galaxy.at(2, -1);
+  cell.sector_id = 101; // Castor
+  
+  // FindSectorCoord should fallback, find the new coordinates, and update cache automatically
+  HexCoord fallback_c = s.galaxy.FindSectorCoord(101);
+  SPIEL_CHECK_EQ(fallback_c.q, 2);
+  SPIEL_CHECK_EQ(fallback_c.r, -1);
+
+  // Deserialization rebuilds the cache
+  nlohmann::json j;
+  to_json(j, s);
+  ::State s2;
+  from_json(j, s2);
+  
+  HexCoord deserialized_c = s2.galaxy.FindSectorCoord(101);
+  SPIEL_CHECK_EQ(deserialized_c.q, 2);
+  SPIEL_CHECK_EQ(deserialized_c.r, -1);
+}
+
 }  // namespace
 }  // namespace eclipse
 }  // namespace open_spiel
@@ -2273,7 +2310,8 @@ int main(int argc, char** argv) {
   RUN_TEST(DiplomacyDeclineTest);
   RUN_TEST(DiplomacyTraitorTileTransferTest);
   RUN_TEST(DiplomacyCoLocatedShipsRejectsTest);
+  RUN_TEST(SectorCoordMapTest);
 
 #undef RUN_TEST
-  std::cout << "[==========] 68 tests passed." << std::endl;
+  std::cout << "[==========] 69 tests passed." << std::endl;
 }

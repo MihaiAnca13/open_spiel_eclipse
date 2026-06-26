@@ -489,6 +489,7 @@ bool apply_explore_rotation(State& state, uint8_t player_id, uint8_t rotation) {
 
     es.chosen_rotation = rotation;
     es.phase = ExplorePhase::claim_control;
+    state.galaxy.RebuildSectorCoordMap();
     return true;
 }
 

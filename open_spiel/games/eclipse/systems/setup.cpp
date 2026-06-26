@@ -464,6 +464,7 @@ void FinalizeGameSetup(State& state,
             .arrival_order = state.AllocateArrivalOrder(),
         });
     }
+    state.galaxy.RebuildSectorCoordMap();
 }
 
 SetupSnapshot CreatePreChoiceSnapshot(const SetupConfig& raw_config) {
