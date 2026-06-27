@@ -28,6 +28,8 @@
 #include "systems/actions/move.h"
 #include "systems/combat.h"
 #include "systems/scoring.h"
+#include "warped_universe/layouts.h"
+#include "warped_universe/warped_universe.h"
 #include "absl/container/fixed_array.h"
 
 using open_spiel::eclipse::FixedVector;
@@ -35,6 +37,9 @@ using open_spiel::eclipse::ShipType;
 using open_spiel::eclipse::ReputationTiles;
 using open_spiel::eclipse::ReputationSlotKind;
 using open_spiel::eclipse::CombatState;
+using open_spiel::eclipse::BASE_LAYOUT_CELLS;
+using open_spiel::eclipse::CANONICAL_WARP_CELLS;
+using open_spiel::eclipse::CANONICAL_PORTAL_PAIRINGS;
 
 #define MAX_PLAYERS 6
 
@@ -266,7 +271,13 @@ struct State {
         }
         return false;
     }
+
+    bool warped_universe = false;
+    std::array<uint8_t, GALAXY_CELL_COUNT> layout_kinds{};
+    std::array<uint8_t, GALAXY_CELL_COUNT * 6> warp_link_dest_cell{};
+    std::array<uint8_t, GALAXY_CELL_COUNT * 6> warp_link_dest_dir{};
 };
+
 
 inline void to_json(nlohmann::json& j, const State& s) {
     nlohmann::json tray_j = nlohmann::json::object();
@@ -328,7 +339,8 @@ inline void to_json(nlohmann::json& j, const State& s) {
         {"upkeep_state", s.upkeep_state},
         {"combat_state", s.combat_state},
         {"diplomacy_state", s.diplomacy_state},
-        {"next_arrival_order", s.next_arrival_order}
+        {"next_arrival_order", s.next_arrival_order},
+        {"warped_universe", s.warped_universe}
     };
 }
 
@@ -436,6 +448,13 @@ inline void from_json(const nlohmann::json& j, State& s) {
     } else {
         s.next_arrival_order = 0;
     }
+
+    if (j.contains("warped_universe")) {
+        j.at("warped_universe").get_to(s.warped_universe);
+    } else {
+        s.warped_universe = false;
+    }
+    open_spiel::eclipse::RebuildWarpLinks(s);
 }
 
 // Helper: Check if a sector anchors an Influence connection for a player: Control

@@ -13,6 +13,7 @@
 #include "../species.h"
 #include "../sectors.h"
 #include "../discovery_tiles.h"
+#include "../warped_universe/warped_universe.h"
 
 namespace {
 
@@ -185,6 +186,8 @@ void ResolveInitialSetupRandomness(std::mt19937_64& rng,
     // 6. Populate the fixed galaxy sectors resolved during setup.
     state.galaxy = Galaxy{};
     state.unit_registry.clear();
+    state.warped_universe = config.warped_universe;
+    open_spiel::eclipse::RebuildWarpLinks(state, config.players);
 
     state.galaxy.at(0, 0) = Sector{
         .sector_id = 1,

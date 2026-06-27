@@ -8,6 +8,7 @@
 #include <bitset>
 
 #include "open_spiel/games/eclipse/state.h"
+#include "open_spiel/games/eclipse/warped_universe/adjacency.h"
 #include "open_spiel/games/eclipse/galaxy.h"
 #include "open_spiel/games/eclipse/sectors.h"
 #include "open_spiel/games/eclipse/species.h"
@@ -76,16 +77,17 @@ namespace open_spiel::eclipse
                     }
 
                     for (uint8_t dir = 0; dir < 6; ++dir) {
-                        const int qb = qa + HEX_DIRECTIONS[dir].first;
-                        const int rb = ra + HEX_DIRECTIONS[dir].second;
-                        if (!in_galaxy_bounds(qb, rb)) continue;
+                        auto [neighbor_coord, opposite_edge] = GetAdjacency(state, HexCoord{static_cast<int8_t>(qa), static_cast<int8_t>(ra)}, dir);
+
+                        const int qb = neighbor_coord.q;
+                        const int rb = neighbor_coord.r;
                         const Sector& sb = state.galaxy.at(qb, rb);
                         if (sb.sector_id == 0 || sb.owner_id != b) continue;
                         const SectorDefinition* db = get_sector_definition(sb.sector_id);
                         if (db == nullptr) continue;
                         const uint8_t b_edges = rotate_edge_mask(db->wormholes_mask, sb.rotation);
 
-                        if (has_edge(a_edges, dir) && has_edge(b_edges, (dir + 3) % 6)) {
+                        if (has_edge(a_edges, dir) && has_edge(b_edges, opposite_edge)) {
                             if (!sector_has_opponent_ship(state, b, sa.sector_id) &&
                                 !sector_has_opponent_ship(state, a, sb.sector_id)) {
                                 return true;

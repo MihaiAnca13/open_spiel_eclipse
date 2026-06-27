@@ -11,6 +11,7 @@
 #include "../../discovery_tiles.h"
 #include "../../species.h"
 #include "../../state.h"
+#include "open_spiel/games/eclipse/warped_universe/adjacency.h"
 #include "../../tech.h"
 #include "move.h"  // can_leave_sector (pinning) for is_explore_anchor
 #include "research.h"
@@ -93,17 +94,16 @@ bool zone_has_wormhole_access(const State& state, uint8_t player_id, int q, int 
     const bool wormhole_generator =
         state.players[player_id].has_tech(TechBit::WORMHOLE_GENERATOR);
     for (uint8_t d = 0; d < 6; ++d) {
-        int nq = q + HEX_DIRECTIONS[d].first;
-        int nr = r + HEX_DIRECTIONS[d].second;
-        if (!in_galaxy_bounds(nq, nr)) continue;
-        const Sector& nb = state.galaxy.at(nq, nr);
+        auto [neighbor_coord, opposite_edge] = GetAdjacency(state, HexCoord{static_cast<int8_t>(q), static_cast<int8_t>(r)}, d);
+
+        const Sector& nb = state.galaxy.at(neighbor_coord.q, neighbor_coord.r);
         if (nb.sector_id == 0 || !is_explore_anchor(state, player_id, nb)) continue;
         if (wormhole_generator) return true;
         const SectorDefinition* ndef = get_sector_definition(nb.sector_id);
         if (ndef == nullptr) continue;
         uint8_t mask = rotate_edge_mask(ndef->wormholes_mask, nb.rotation);
-        // The neighbour's edge facing the zone is the opposite direction.
-        if ((mask >> ((d + 3) % 6)) & 1u) return true;
+        // The neighbour's edge facing the zone is opposite_edge.
+        if ((mask >> opposite_edge) & 1u) return true;
     }
     return false;
 }
@@ -215,10 +215,11 @@ void collect_explore_zones(const State& state, uint8_t player_id, bool first_onl
             const uint8_t anchor_mask =
                 def ? rotate_edge_mask(def->wormholes_mask, sector.rotation) : 0;
             for (uint8_t d = 0; d < 6; ++d) {
-                const int nq = q + HEX_DIRECTIONS[d].first;
-                const int nr = r + HEX_DIRECTIONS[d].second;
-                if (!in_galaxy_bounds(nq, nr)) continue;
-                if (state.galaxy.at(nq, nr).sector_id != 0) continue;  // not empty
+                auto [neighbor_coord, opposite_edge] = GetAdjacency(state, HexCoord{static_cast<int8_t>(q), static_cast<int8_t>(r)}, d);
+
+                const int nq = neighbor_coord.q;
+                const int nr = neighbor_coord.r;
+                if (!IsExplorableSlot(state, nq, nr)) continue;
                 // Gate: the anchor must present a Wormhole toward the zone so a draw
                 // there can connect (Wormhole Generator connects either side).
                 if (!wormhole_generator && !((anchor_mask >> d) & 1u)) continue;
@@ -355,8 +356,7 @@ bool begin_explore(State& state, uint8_t player_id) {
 }
 
 bool is_legal_explore_zone(const State& state, uint8_t player_id, int q, int r) {
-    if (!in_galaxy_bounds(q, r)) return false;
-    if (state.galaxy.at(q, r).sector_id != 0) return false;  // must be unexplored
+    if (!IsExplorableSlot(state, q, r)) return false;
     if (!zone_ring_has_tiles(state, q, r)) return false;     // ring exhausted
     // Must be adjacent to an anchor that presents a Wormhole toward the zone.
     return zone_has_wormhole_access(state, player_id, q, r);

@@ -39,6 +39,9 @@ class EclipseGame : public Game {
   uint64_t GetRngSeedParam() const {
     return static_cast<uint64_t>(ParameterValue<int>("rng_seed"));
   }
+  bool GetWarpedUniverseParam() const {
+    return ParameterValue<bool>("warped_universe");
+  }
   SetupConfig InitialSetupConfig() const;
 
   std::mt19937_64& rng() const { return rng_; }

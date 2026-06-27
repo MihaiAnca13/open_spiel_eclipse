@@ -13,6 +13,7 @@
 #include <cstddef>
 
 #include "open_spiel/games/eclipse/state.h"
+#include "open_spiel/games/eclipse/warped_universe/adjacency.h"
 #include "open_spiel/games/eclipse/galaxy.h"
 #include "open_spiel/games/eclipse/species.h"
 
@@ -184,11 +185,17 @@ namespace open_spiel::eclipse
             return ms.activations_remaining > 0;
         }
 
-        bool has_wormhole_connection(const MoveBoardCache& cache, uint8_t from_cell,
-                                     uint8_t to_cell, uint8_t direction,
-                                     bool wormhole_generator)
+        bool has_wormhole_connection(const ::State& state, const MoveBoardCache& cache,
+                                     uint8_t from_cell, uint8_t direction,
+                                     uint8_t& to_cell, bool wormhole_generator)
         {
-            if (from_cell >= GALAXY_CELL_COUNT || to_cell >= GALAXY_CELL_COUNT) return false;
+            if (from_cell >= GALAXY_CELL_COUNT) return false;
+            const HexCoord from = index_to_hex(from_cell);
+            auto [to, opposite_edge] = GetAdjacency(state, from, direction);
+
+            if (!in_galaxy_bounds(to.q, to.r)) return false;
+            to_cell = static_cast<uint8_t>(hex_to_index(to.q, to.r));
+
             if (cache.cell_to_sector[to_cell] == 0) return false;
             if (cache.has_sector_definition[from_cell] == 0 ||
                 cache.has_sector_definition[to_cell] == 0)
@@ -197,7 +204,7 @@ namespace open_spiel::eclipse
             }
 
             const bool my_edge = has_edge(cache.rotated_wormholes[from_cell], direction);
-            const bool their_edge = has_edge(cache.rotated_wormholes[to_cell], (direction + 3) % 6);
+            const bool their_edge = has_edge(cache.rotated_wormholes[to_cell], opposite_edge);
             return wormhole_generator ? (my_edge || their_edge) : (my_edge && their_edge);
         }
 
@@ -264,18 +271,11 @@ namespace open_spiel::eclipse
             UnitMoveContext ctx;
             if (!validate_unit_for_step(state, player_id, unit_idx, cache, ctx)) return false;
 
-            const HexCoord from = index_to_hex(ctx.source_cell);
-            const int to_q = from.q + HEX_DIRECTIONS[direction].first;
-            const int to_r = from.r + HEX_DIRECTIONS[direction].second;
-            if (!in_galaxy_bounds(to_q, to_r)) return false;
-
-            const uint8_t to_cell = static_cast<uint8_t>(hex_to_index(to_q, to_r));
-            if (cache.cell_to_sector[to_cell] == 0) return false;
-
             const bool wormhole_generator =
                 state.players[player_id].has_tech(TechBit::WORMHOLE_GENERATOR);
-            if (!has_wormhole_connection(cache, ctx.source_cell, to_cell,
-                                         direction, wormhole_generator))
+            uint8_t to_cell = INVALID_CELL;
+            if (!has_wormhole_connection(state, cache, ctx.source_cell,
+                                         direction, to_cell, wormhole_generator))
             {
                 return false;
             }
@@ -331,16 +331,11 @@ namespace open_spiel::eclipse
                     continue;
                 }
 
-                const HexCoord from = index_to_hex(source_cell);
                 for (uint8_t d = 0; d < 6; ++d)
                 {
-                    const int to_q = from.q + HEX_DIRECTIONS[d].first;
-                    const int to_r = from.r + HEX_DIRECTIONS[d].second;
-                    if (!in_galaxy_bounds(to_q, to_r)) continue;
-
-                    const uint8_t to_cell = static_cast<uint8_t>(hex_to_index(to_q, to_r));
-                    if (has_wormhole_connection(cache, source_cell, to_cell,
-                                                d, wormhole_generator))
+                    uint8_t to_cell = INVALID_CELL;
+                    if (has_wormhole_connection(state, cache, source_cell,
+                                                d, to_cell, wormhole_generator))
                     {
                         return true;
                     }
@@ -476,16 +471,11 @@ namespace open_spiel::eclipse
                 continue;
             }
 
-            const HexCoord from = index_to_hex(source_cell);
             for (uint8_t d = 0; d < 6; ++d)
             {
-                const int to_q = from.q + HEX_DIRECTIONS[d].first;
-                const int to_r = from.r + HEX_DIRECTIONS[d].second;
-                if (!in_galaxy_bounds(to_q, to_r)) continue;
-
-                const uint8_t to_cell = static_cast<uint8_t>(hex_to_index(to_q, to_r));
-                if (has_wormhole_connection(cache, source_cell, to_cell,
-                                            d, wormhole_generator))
+                uint8_t to_cell = INVALID_CELL;
+                if (has_wormhole_connection(state, cache, source_cell,
+                                            d, to_cell, wormhole_generator))
                 {
                     options.push_back(MoveStepOption{unit_idx, d});
                 }

@@ -28,9 +28,10 @@ struct SetupConfig {
     uint64_t rng_seed = 0;
     NPCDifficulty npc_difficulty = NPCDifficulty::EASY;
     std::vector<StagedPlayerConfig> staged_players;
+    bool warped_universe = false;
 };
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(SetupConfig, players, rng_seed, npc_difficulty, staged_players);
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(SetupConfig, players, rng_seed, npc_difficulty, staged_players, warped_universe);
 
 struct SetupSnapshot {
     SetupConfig config;

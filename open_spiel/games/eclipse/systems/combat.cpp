@@ -11,6 +11,7 @@
 
 #include "combat.h"
 #include "../state.h"
+#include "open_spiel/games/eclipse/warped_universe/adjacency.h"
 #include "../resources.h"
 #include "../galaxy.h"
 #include "../tech.h"
@@ -681,9 +682,10 @@ void ComputeLegalRetreatDestinations(const ::State& state,
         state.players[retreating_player].has_tech(TechBit::WORMHOLE_GENERATOR);
 
     for (int d = 0; d < 6; ++d) {
-        const int nq = src.q + HEX_DIRECTIONS[d].first;
-        const int nr = src.r + HEX_DIRECTIONS[d].second;
-        if (!in_galaxy_bounds(nq, nr)) continue;
+        auto [neighbor_coord, opposite_edge] = GetAdjacency(state, src, d);
+
+        const int nq = neighbor_coord.q;
+        const int nr = neighbor_coord.r;
         const Sector& ns = state.galaxy.at(nq, nr);
         if (ns.sector_id == 0) continue;
         if (ns.owner_id != retreating_player) continue;  // must Control it
@@ -691,7 +693,7 @@ void ComputeLegalRetreatDestinations(const ::State& state,
         if (ndef == nullptr) continue;
         const uint8_t n_edges = rotate_edge_mask(ndef->wormholes_mask, ns.rotation);
         const bool my_edge = has_edge(src_edges, d);
-        const bool their_edge = has_edge(n_edges, (d + 3) % 6);
+        const bool their_edge = has_edge(n_edges, opposite_edge);
         const bool connected =
             wormhole_generator ? (my_edge || their_edge) : (my_edge && their_edge);
         if (!connected) continue;

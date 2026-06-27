@@ -6,7 +6,7 @@
 - [x] warp portal
 - [x] NPC difficulty
 - [ ] minor species
-- [ ] warped universe module
+- [x] warped universe module
 - [x] Optimize sector coordinate lookups in hot paths (e.g., diplomacy, combat) from O(C) to O(1) by adding a flat `std::array<HexCoord, 396> sector_coord_map` to [State](cci:2://file:///home/mihai/personal/open_spiel_eclipse/open_spiel/games/eclipse/state.h:180:0-268:1). To prevent stale values and keep serialization clean, rebuild the map in a single pass of the galaxy only after setup, explore tile placement, and deserialization ([from_json](cci:1://file:///home/mihai/personal/open_spiel_eclipse/open_spiel/games/eclipse/sectors.h:54:0-78:1)).
 
 
@@ -16,4 +16,8 @@ maybe later:
 - [ ] supernova sector
 
 
-# 
+# UI Integration Backlog (Not Yet Integrated)
+- [ ] **Diplomacy & Ambassador Pacts**: Lacks visual diplomacy grid, pact indicator, or ambassador board space in the UI to manage alliances/pacts.
+- [ ] **Upgrade Action & Discovery Parts**: Lacks any panel or interface in the UI to customize ship blueprints, select parts, or assign parts from the discovery parts inventory.
+- [ ] **Warped Universe Module Selection & Wormhole Visuals**: Layout loaders are operational in C++, but there is no layout template selector/dropdown in the lobby screen. Visuals for drawing galaxy missing as well.
+- [ ] **Minor Species Module**: Ambassador relations and abilities have no UI presence or interactive components.

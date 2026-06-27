@@ -177,6 +177,7 @@ const GameType game_type{
         {"players", GameParameter(4)},
         {"rng_seed", GameParameter(0)},
         {"npc_difficulty", GameParameter(std::string("Easy"))},
+        {"warped_universe", GameParameter(false)},
         {"species_p0", GameParameter(std::string("Terran Factions"))},
         {"species_p1", GameParameter(std::string("Terran Factions"))},
         {"species_p2", GameParameter(std::string("Terran Factions"))},
@@ -488,6 +489,7 @@ SetupConfig EclipseGame::InitialSetupConfig() const {
   config.rng_seed = GetRngSeedParam();
   config.npc_difficulty =
       nlohmann::json(ParameterValue<std::string>("npc_difficulty")).get<NPCDifficulty>();
+  config.warped_universe = GetWarpedUniverseParam();
   config.staged_players.resize(config.players);
   for (int player = 0; player < config.players; ++player) {
     config.staged_players[player].species =

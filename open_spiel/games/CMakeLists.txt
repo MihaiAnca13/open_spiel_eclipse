@@ -106,6 +106,7 @@ set(GAME_SOURCES
   eclipse/systems/actions/upgrade.h
   eclipse/systems/actions/move.cpp
   eclipse/systems/actions/move.h
+  eclipse/warped_universe/warped_universe.cpp
   eclipse/actions.h
   eclipse/dice.h
   eclipse/discovery_tiles.h

@@ -89,7 +89,7 @@ struct PlanetSlot {
     PlanetType type;
 };
 
-enum class SectorType { OUTER, INNER, MIDDLE, STARTING, CENTER, GUARDIAN };
+enum class SectorType { OUTER, INNER, MIDDLE, STARTING, CENTER, GUARDIAN, WARP };
 
 NLOHMANN_JSON_SERIALIZE_ENUM(SectorType, {
     {SectorType::OUTER, "Outer"},
@@ -97,7 +97,8 @@ NLOHMANN_JSON_SERIALIZE_ENUM(SectorType, {
     {SectorType::MIDDLE, "Middle"},
     {SectorType::STARTING, "Starting"},
     {SectorType::CENTER, "Center"},
-    {SectorType::GUARDIAN, "Guardian"}
+    {SectorType::GUARDIAN, "Guardian"},
+    {SectorType::WARP, "Warp"}
 });
 
 struct SectorDefinition {

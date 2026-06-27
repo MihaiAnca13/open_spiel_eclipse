@@ -8,6 +8,7 @@
 #include <bitset>
 
 #include "open_spiel/games/eclipse/state.h"
+#include "open_spiel/games/eclipse/warped_universe/adjacency.h"
 #include "open_spiel/games/eclipse/galaxy.h"
 #include "open_spiel/games/eclipse/sectors.h"
 #include "open_spiel/games/eclipse/species.h"
@@ -40,11 +41,10 @@ namespace open_spiel::eclipse
 
             for (uint8_t d = 0; d < 6; ++d)
             {
-                int nq = q + HEX_DIRECTIONS[d].first;
-                int nr = r + HEX_DIRECTIONS[d].second;
+                auto [neighbor_coord, opposite_edge] = GetAdjacency(state, HexCoord{static_cast<int8_t>(q), static_cast<int8_t>(r)}, d);
 
-                // Ensure neighbor is inside bounds
-                if (!in_galaxy_bounds(nq, nr)) continue;
+                const int nq = neighbor_coord.q;
+                const int nr = neighbor_coord.r;
 
                 const Sector& nb = state.galaxy.at(nq, nr);
                 if (nb.sector_id == 0) continue;
@@ -65,7 +65,7 @@ namespace open_spiel::eclipse
                 // Check if neighbor facing edge contains a valid wormhole gateway
                 uint8_t nb_mask = rotate_edge_mask(ndef->wormholes_mask, nb.rotation);
                 bool my_edge = has_edge(dest_mask, d);
-                bool their_edge = has_edge(nb_mask, (d + 3) % 6);
+                bool their_edge = has_edge(nb_mask, opposite_edge);
                 if (my_edge && their_edge)
                 {
                     return true;

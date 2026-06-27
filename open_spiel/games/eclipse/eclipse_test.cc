@@ -12,6 +12,7 @@
 #include "open_spiel/games/eclipse/systems/actions/bonus.h"
 #include "open_spiel/games/eclipse/systems/scoring.h"
 #include "open_spiel/games/eclipse/galaxy.h"
+#include "open_spiel/games/eclipse/warped_universe/adjacency.h"
 #include "open_spiel/json/include/nlohmann/json.hpp"
 #include "open_spiel/spiel.h"
 #include "open_spiel/spiel_utils.h"
@@ -2196,6 +2197,85 @@ void DiplomacyCoLocatedShipsRejectsTest() {
   SPIEL_CHECK_FALSE(can_propose_diplomacy(s, 0, 1));
 }
 
+void WarpedUniverseTest() {
+  // Check that warped universe is disabled for invalid player counts (e.g. 6 players)
+  {
+    auto game = LoadGame("eclipse(players=6,warped_universe=true,rng_seed=42)");
+    auto state = game->NewInitialState();
+    state->ApplyAction(0);
+    const EclipseState* es = static_cast<const EclipseState*>(state.get());
+    ::State s = es->RawState();
+    SPIEL_CHECK_FALSE(s.warped_universe);
+  }
+
+  // Load a 3-player warped universe game
+  auto game = LoadGame("eclipse(players=3,warped_universe=true,rng_seed=42)");
+  auto state = game->NewInitialState();
+  state->ApplyAction(0);  // Resolve initial setup
+  const EclipseState* es = static_cast<const EclipseState*>(state.get());
+  ::State s = es->RawState();
+
+  SPIEL_CHECK_TRUE(s.warped_universe);
+
+  // Check that layout kinds are populated correctly
+  // In 3p, missing player positions are 1, 3, 5.
+  // The starting position of missing player 5 is {2, 0}.
+  // It should be marked as SectorType::WARP!
+  uint8_t kind_val = s.layout_kinds[hex_to_index(2, 0)];
+  SPIEL_CHECK_TRUE(static_cast<SectorType>(kind_val) == SectorType::WARP);
+
+  // Check that valid explorable slots return true under IsExplorableSlot
+  // GCS at {0, 0} and starting player starting sectors are not explorable
+  SPIEL_CHECK_FALSE(IsExplorableSlot(s, 0, 0));
+  SPIEL_CHECK_FALSE(IsExplorableSlot(s, 2, 0)); // warp cell is not explorable!
+
+  // Check some active sector slots (like Ring II or III slots)
+  // For 3-players, active starting positions are 0, 2, 4 ({2, -2}, {-2, 0}, {0, 2}).
+  // Let's check an inner sector slot at {-1, 0}
+  uint8_t inner_kind = s.layout_kinds[hex_to_index(-1, 0)];
+  SPIEL_CHECK_TRUE(static_cast<SectorType>(inner_kind) == SectorType::INNER);
+  SPIEL_CHECK_TRUE(IsExplorableSlot(s, -1, 0));
+
+  // Test virtual adjacency GetAdjacency for a portal pairing in Slice 5 (missing player 5, steps = 4)
+  // Canonical pairing index 0 is: { 2, -6, 3,  2, -6, 5 } (exit edge 3 <-> exit edge 5 of warp cell 2, -6)
+  // Let's rotate this to missing player position 5 (steps = 4):
+  // Helper to rotate CW (copied from state.h logic for test)
+  auto rotate_cw_test = [](int8_t q, int8_t r, uint8_t steps) -> HexCoord {
+    steps %= 6;
+    int8_t nq = q;
+    int8_t nr = r;
+    for (uint8_t i = 0; i < steps; ++i) {
+      int8_t next_q = nq + nr;
+      int8_t next_r = -nq;
+      nq = next_q;
+      nr = next_r;
+    }
+    return HexCoord{nq, nr};
+  };
+
+  uint8_t steps = (5 + 5) % 6; // pos 5 missing -> steps = 4 CW
+  HexCoord rot_A = rotate_cw_test(2, -6, steps); // rotated warp cell A
+  uint8_t edgeA = (3 + steps) % 6; // rotated exit edge A
+
+  // Sector A coordinate (neighbor of warp cell A in direction edgeA)
+  HexCoord sect_A{static_cast<int8_t>(rot_A.q + HEX_DIRECTIONS[edgeA].first),
+                  static_cast<int8_t>(rot_A.r + HEX_DIRECTIONS[edgeA].second)};
+  uint8_t opposite_edge_A = (edgeA + 3) % 6; // edge of sector A pointing back to warp
+
+  HexCoord rot_warp_B = rotate_cw_test(2, -6, steps);
+  uint8_t edgeB = (5 + steps) % 6;
+  HexCoord sect_B{static_cast<int8_t>(rot_warp_B.q + HEX_DIRECTIONS[edgeB].first),
+                  static_cast<int8_t>(rot_warp_B.r + HEX_DIRECTIONS[edgeB].second)};
+  uint8_t opposite_edge_B = (edgeB + 3) % 6;
+
+  // Let's check if GetAdjacency from sector A in direction opposite_edge_A
+  // takes us directly to sector B and opposite_edge_B!
+  auto [dest_coord, dest_dir] = GetAdjacency(s, sect_A, opposite_edge_A);
+  SPIEL_CHECK_EQ(dest_coord.q, sect_B.q);
+  SPIEL_CHECK_EQ(dest_coord.r, sect_B.r);
+  SPIEL_CHECK_EQ(dest_dir, opposite_edge_B);
+}
+
 void SectorCoordMapTest() {
   std::shared_ptr<const Game> game = LoadEclipseGame(2, 7);
   std::unique_ptr<State> state = game->NewInitialState();
@@ -2310,6 +2390,7 @@ int main(int argc, char** argv) {
   RUN_TEST(DiplomacyDeclineTest);
   RUN_TEST(DiplomacyTraitorTileTransferTest);
   RUN_TEST(DiplomacyCoLocatedShipsRejectsTest);
+  RUN_TEST(WarpedUniverseTest);
   RUN_TEST(SectorCoordMapTest);
 
 #undef RUN_TEST
