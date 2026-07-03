@@ -42,6 +42,35 @@ export interface BuildCosts {
   Monolith: number;
 }
 
+export type DieColorName = 'yellow' | 'orange' | 'blue' | 'red' | 'purple' | 'none';
+
+export interface ShipPartDefinition {
+  id: number;
+  name: string;
+  is_discovery: boolean;
+  is_missile: boolean;
+  external: boolean;
+  die_color: DieColorName;
+  die_amount: number;
+  added_computer: number;
+  added_shield: number;
+  added_hull: number;
+  net_energy: number;
+  net_initiative: number;
+  added_movement: number;
+}
+
+export type ShipPartCatalog = Record<string, ShipPartDefinition>;
+
+export interface DiscoveryTileDefinition {
+  id: number;
+  name: string;
+  copies: number;
+  slug: string;
+}
+
+export type DiscoveryCatalog = Record<string, DiscoveryTileDefinition>;
+
 export interface Player {
   id: number;
   score: number;
@@ -57,6 +86,7 @@ export interface Player {
   monoliths: number;
   blueprints: Blueprint[];
   reputation_tiles: string[];
+  parts_inventory?: string[];
   trade_rate: number;
   researched_techs: number;
   researched_techs_military: number;
@@ -72,6 +102,7 @@ export interface Sector {
   points: number;
   occupied_slots_mask: number;
   discovery_tile_present: boolean;
+  discovery_tile?: number | string;
   orbital_built: boolean;
   monolith_built: boolean;
 }
@@ -111,6 +142,12 @@ export interface InfluenceState {
 
 export interface BuildState {
   phase: 'inactive' | 'choose_build';
+  player_id: number;
+  activations_remaining: number;
+}
+
+export interface UpgradeState {
+  phase: 'inactive' | 'choose_upgrade';
   player_id: number;
   activations_remaining: number;
 }
@@ -234,6 +271,7 @@ export interface GameState {
   research_state?: ResearchState;
   influence_state?: InfluenceState;
   build_state?: BuildState;
+  upgrade_state?: UpgradeState;
   move_state?: MoveState;
   combat_state?: CombatState;
   upkeep_state?: UpkeepState;
@@ -253,6 +291,7 @@ export interface SetupConfig {
   rng_seed: number;
   npc_difficulty: string;
   staged_players: StagedPlayerConfig[];
+  warped_universe?: boolean;
 }
 
 export interface SetupSnapshot {

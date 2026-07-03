@@ -21,6 +21,12 @@ async def _main() -> None:
     assert "state" in payload
     assert len(payload["state"]["players"]) == 4
     assert payload["config"]["rng_seed"] == 42
+    assert payload["config"]["warped_universe"] is False
+
+    warped_config = {**config, "players": 3, "warped_universe": True}
+    warped_config["staged_players"] = config["staged_players"][:3]
+    warped_payload = await setup_pre_choice(config=warped_config)
+    assert warped_payload["config"]["warped_universe"] is True
 
     choices = [
         {"species": "Terran Factions", "is_ai": False},

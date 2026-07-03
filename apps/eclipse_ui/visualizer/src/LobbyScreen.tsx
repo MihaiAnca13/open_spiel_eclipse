@@ -205,6 +205,26 @@ export default function LobbyScreen({ speciesList, techCatalog, difficulties, on
     finally { setBusy(false); }
   }
 
+  async function handleWarpedUniverseChange(enabled: boolean) {
+    setBusy(true); setError(null);
+    try {
+      if (enabled && lobby && lobby.num_players < 3) {
+        const playerRes = await post('/lobby/num_players', { player_id: playerId, num_players: 3 });
+        if (!playerRes.ok) {
+          const body = await playerRes.json().catch(() => ({}));
+          throw new Error(body.detail ?? 'Failed to set player count');
+        }
+      }
+
+      const res = await post('/lobby/warped_universe', { player_id: playerId, warped_universe: enabled });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail ?? 'Failed to change Warped Universe');
+      }
+    } catch (e: any) { setError(e.message); }
+    finally { setBusy(false); }
+  }
+
   async function handleClaimSeat(idx: number) {
     setBusy(true); setError(null);
     try {
@@ -304,6 +324,8 @@ export default function LobbyScreen({ speciesList, techCatalog, difficulties, on
 
   // ── Waiting phase ─────────────────────────────────────────────────────────
   const canInitialize = isHost && lobby.seats.every((s) => s.state !== 'empty');
+  const warpedUniverseSupported = lobby.num_players >= 3 && lobby.num_players <= 5;
+  const canToggleWarpedUniverse = lobby.num_players <= 5;
 
   return (
     <div className="min-h-screen bg-[#0f1015] flex justify-center py-10 px-4">
@@ -353,6 +375,24 @@ export default function LobbyScreen({ speciesList, techCatalog, difficulties, on
                   onChange={(e) => apiCall('/lobby/seed', { rng_seed: Number(e.target.value) })} />
               </div>
             </div>
+            <div className="flex items-center gap-2 text-xs">
+              <input
+                type="checkbox"
+                id="lobby-warped-universe"
+                checked={warpedUniverseSupported && lobby.warped_universe}
+                disabled={!canToggleWarpedUniverse || busy}
+                onChange={(e) => handleWarpedUniverseChange(e.target.checked)}
+              />
+              <label htmlFor="lobby-warped-universe" className="text-[#cbd5e1] cursor-pointer">
+                Warped Universe
+              </label>
+              {lobby.num_players < 3 && (
+                <span className="text-[#64748b]">enabling adds a 3rd seat</span>
+              )}
+              {lobby.num_players > 5 && (
+                <span className="text-[#64748b]">3-5 players only</span>
+              )}
+            </div>
           </div>
         )}
 
@@ -361,6 +401,7 @@ export default function LobbyScreen({ speciesList, techCatalog, difficulties, on
             <span>Players: <span className="text-[#94a3b8] font-medium">{lobby.num_players}</span></span>
             <span>Difficulty: <span className="text-[#94a3b8] font-medium">{lobby.difficulty}</span></span>
             <span>Seed: <span className="text-[#94a3b8] font-medium">{lobby.rng_seed}</span></span>
+            <span>Warped: <span className="text-[#94a3b8] font-medium">{lobby.warped_universe ? 'On' : 'Off'}</span></span>
           </div>
         )}
 

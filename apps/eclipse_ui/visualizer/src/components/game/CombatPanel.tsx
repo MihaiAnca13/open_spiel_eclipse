@@ -3,10 +3,11 @@
 // action that isn't given an explicit button still gets rendered through the
 // action_strings fallback, so a combat phase can never soft-lock the UI.
 
-import { useMemo } from 'react';
+import { useCallback, useMemo } from 'react';
 import { ACTION } from '../../actionTypes';
 import { getPlayerColor } from '../../theme';
-import type { CombatState, GameState } from '../../types/game';
+import type { CombatState, DiscoveryCatalog, GameState } from '../../types/game';
+import DiscoveryChoice from '../ui/DiscoveryChoice';
 
 const NO_PLAYER = 254;
 
@@ -20,6 +21,7 @@ const REP_VP: Record<string, number> = { One: 1, Two: 2, Three: 3, Four: 4 };
 interface Props {
   combat: CombatState;
   gameState: GameState;
+  discoveryCatalog: DiscoveryCatalog;
   legalActions: number[];
   actionStrings?: Record<string, string>;
   busy: boolean;
@@ -36,6 +38,7 @@ interface DecisionButton {
 export default function CombatPanel({
   combat,
   gameState,
+  discoveryCatalog,
   legalActions,
   actionStrings,
   busy,
@@ -45,13 +48,23 @@ export default function CombatPanel({
   const legal = useMemo(() => new Set(legalActions), [legalActions]);
 
   // Resolve a galaxy cell index to its sector id (cell = (q+7)*15 + (r+7)).
-  const cellToSectorId = (cell: number): number => {
+  const cellToSectorId = useCallback((cell: number): number => {
     const qIdx = Math.floor(cell / 15);
     const rIdx = cell % 15;
     return gameState.galaxy?.[qIdx]?.[rIdx]?.sector_id ?? 0;
-  };
+  }, [gameState.galaxy]);
 
   const cs = combat;
+  const discoveryTile = useMemo(() => {
+    if (!cs.discovery_decision_sector) return undefined;
+    for (const row of gameState.galaxy ?? []) {
+      const sector = row.find((candidate) => candidate.sector_id === cs.discovery_decision_sector);
+      if (!sector) continue;
+      if (sector.discovery_tile === undefined || sector.discovery_tile === 0) return undefined;
+      return discoveryCatalog[String(sector.discovery_tile)];
+    }
+    return undefined;
+  }, [cs.discovery_decision_sector, discoveryCatalog, gameState.galaxy]);
   const pendingDie =
     cs.pending_target_group_player !== NO_PLAYER &&
     cs.pending_die_index < cs.pending_die_count &&
@@ -124,7 +137,7 @@ export default function CombatPanel({
         break;
     }
     return out;
-  }, [cs, pendingDie, popAttack, legalActions, legal, gameState, playerLabel]);
+  }, [cellToSectorId, cs, pendingDie, popAttack, legalActions, legal, gameState, playerLabel]);
 
   // Any legal action not covered by an explicit decision button — the safety net.
   const handledIds = useMemo(() => new Set(decision.map((d) => d.id)), [decision]);
@@ -155,6 +168,9 @@ export default function CombatPanel({
       : null;
 
   const recentDestroyed = (cs.destroyed_ships ?? []).slice(0, Math.max(0, cs.destroyed_ships_size)).slice(-4);
+  const isDiscoveryDecision =
+    cs.phase === 'discovery_award' &&
+    (legal.has(ACTION.COMBAT_DISCOVERY_REWARD) || legal.has(ACTION.COMBAT_DISCOVERY_VP));
 
   return (
     <div className="panel action-panel">
@@ -234,7 +250,16 @@ export default function CombatPanel({
       )}
 
       {/* Decision buttons */}
-      {decision.length > 0 && (
+      {isDiscoveryDecision ? (
+        <DiscoveryChoice
+          tile={discoveryTile}
+          legalActions={legalActions}
+          busy={busy}
+          rewardActionId={ACTION.COMBAT_DISCOVERY_REWARD}
+          vpActionId={ACTION.COMBAT_DISCOVERY_VP}
+          onAction={onAction}
+        />
+      ) : decision.length > 0 && (
         <div className="action-row" style={{ flexDirection: 'column', gap: 4, marginTop: 6 }}>
           {decision.map((b) => (
             <button

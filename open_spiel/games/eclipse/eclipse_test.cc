@@ -1116,8 +1116,7 @@ void UpgradeDiscoveryPartsTest() {
   SPIEL_CHECK_TRUE(execute_upgrade(s, 0, ShipType::INTERCEPTOR, 3, ShipPartId::NONE));
 
   SPIEL_CHECK_EQ(p.blueprints[0].slots[3], ShipPartId::NONE);
-  SPIEL_CHECK_EQ(p.parts_inventory.size(), 1);
-  SPIEL_CHECK_EQ(p.parts_inventory[0], ShipPartId::ANTIMATTER_MISSILE);
+  SPIEL_CHECK_EQ(p.parts_inventory.size(), 0);
 }
 
 void MoveFullActionTest() {

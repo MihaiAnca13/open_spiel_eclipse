@@ -3,6 +3,7 @@ export const WS_BASE = 'ws://127.0.0.1:8000';
 export const SECTOR_ASSETS_BASE = `${API_BASE}/assets/sectors`;
 export const TECH_ASSETS_BASE = `${API_BASE}/assets/tech`;
 export const SHIP_ASSETS_BASE = `${API_BASE}/assets/ships`;
+export const DISCOVERY_ASSETS_BASE = `${API_BASE}/assets/discovery`;
 
 export function techImageUrl(name: string, category: string): string {
   const slug = name
@@ -15,6 +16,10 @@ export function techImageUrl(name: string, category: string): string {
 
 export function shipImageUrl(type: string): string {
   return `${SHIP_ASSETS_BASE}/${type.toLowerCase()}.png`;
+}
+
+export function discoveryRewardImageUrl(slug: string): string {
+  return `${DISCOVERY_ASSETS_BASE}/${slug}.png`;
 }
 
 export interface TechMarketEntry {
@@ -95,6 +100,7 @@ export interface LobbyData {
   seats: LobbySeat[];
   difficulty: string;
   rng_seed: number;
+  warped_universe: boolean;
   phase: LobbyPhase;
   picker_order: number[];
   current_picker_idx: number;

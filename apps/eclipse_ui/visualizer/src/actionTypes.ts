@@ -38,17 +38,21 @@ export const ACTION = {
   BUILD_END: 7538,                    // BUILD_CHOICE_START + 6 * 225
   GALAXY_CELL_COUNT: 225,
 
-  // Upgrade action IDs — mirror open_spiel/games/eclipse/eclipse.cc:86-91.
+  // Upgrade action IDs — mirror open_spiel/games/eclipse/eclipse.cc:89-97.
   UPGRADE: 7539,
   UPGRADE_STOP: 7540,
   UPGRADE_CHOICE_START: 7541,
+  UPGRADE_SHIP_COUNT: 4,
+  UPGRADE_SLOTS_PER_SHIP: 8,
+  UPGRADE_PART_COUNT: 50,
+  UPGRADE_END: 9141,
 
   // Move action IDs — mirror open_spiel/games/eclipse/eclipse.cc:96-102.
-  MOVE: 8502,
-  MOVE_STOP: 8503,
-  MOVE_CHOICE_START: 8504,               // + unit_idx * 7 + direction (0-5=hex, 6=warp)
-  MOVE_WARP_START: 9400,                 // MOVE_CHOICE_START + 128 * 7
-  MOVE_WARP_DESTINATION_START: 9528,     // MOVE_WARP_START + 128
+  MOVE: 9142,
+  MOVE_STOP: 9143,
+  MOVE_CHOICE_START: 9144,               // + unit_idx * 7 + direction (0-5=hex, 6=warp)
+  MOVE_WARP_START: 10040,                // MOVE_CHOICE_START + 128 * 7
+  MOVE_WARP_DESTINATION_START: 10168,    // MOVE_WARP_START + 128
   MOVE_CODES_PER_UNIT: 7,
 
   // Upkeep action IDs — mirror open_spiel/games/eclipse/eclipse.cc:105-106.
@@ -56,22 +60,22 @@ export const ACTION = {
   // COLONY_SHIP_START, RECLAIM_FROM_CELL_START, TRADE_START and
   // CHOOSE_RETURN_TRACK_START ranges (see AppendLegalUpkeepColonyShipActions /
   // AppendReclaimActions in eclipse.cc).
-  UPKEEP_COLONY_DONE: 9753,
-  UPKEEP_PAY_DONE: 9754,
+  UPKEEP_COLONY_DONE: 10393,
+  UPKEEP_PAY_DONE: 10394,
 
   // Combat action IDs — mirror open_spiel/games/eclipse/eclipse.cc:109-126.
-  COMBAT_CONTINUE: 9755,
-  COMBAT_ATTACK: 9756,
-  COMBAT_RETREAT_TO_CELL_START: 9757,    // + galaxy cell index (0..224)
-  COMBAT_DICE_TARGET_START: 9982,        // + unit_registry index (0..127)
-  COMBAT_REP_SELECT_START: 10110,        // + drawn-tile index (0..4)
-  COMBAT_REP_SKIP: 10115,
-  COMBAT_POP_TARGET_START: 10116,        // + population slot (0..15)
-  COMBAT_INFLUENCE_YES: 10132,
-  COMBAT_INFLUENCE_NO: 10133,
-  COMBAT_DISCOVERY_REWARD: 10134,
-  COMBAT_DISCOVERY_VP: 10135,
-  COMBAT_INFLUENCE_TO_CELL_START: 10136, // + galaxy cell index (0..224)
+  COMBAT_CONTINUE: 10395,
+  COMBAT_ATTACK: 10396,
+  COMBAT_RETREAT_TO_CELL_START: 10397,   // + galaxy cell index (0..224)
+  COMBAT_DICE_TARGET_START: 10622,       // + unit_registry index (0..127)
+  COMBAT_REP_SELECT_START: 10750,        // + drawn-tile index (0..4)
+  COMBAT_REP_SKIP: 10755,
+  COMBAT_POP_TARGET_START: 10756,        // + population slot (0..15)
+  COMBAT_INFLUENCE_YES: 10772,
+  COMBAT_INFLUENCE_NO: 10773,
+  COMBAT_DISCOVERY_REWARD: 10774,
+  COMBAT_DISCOVERY_VP: 10775,
+  COMBAT_INFLUENCE_TO_CELL_START: 10776, // + galaxy cell index (0..224)
 } as const;
 
 // Population track names, indexed by track id (mirrors PopTrack in bonus.h).

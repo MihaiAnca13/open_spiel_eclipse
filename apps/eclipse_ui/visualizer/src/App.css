@@ -1436,6 +1436,109 @@
   pointer-events: none;
 }
 
+/* ── Discovery Tile Choices ──────────────────────────────────────── */
+.discovery-choice-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.discovery-choice-card {
+  min-width: 0;
+  min-height: 138px;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  background: #0f172a;
+  color: #e2e8f0;
+  cursor: pointer;
+  padding: 7px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: stretch;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+.discovery-choice-card.reward {
+  border-color: rgba(251, 191, 36, 0.45);
+}
+
+.discovery-choice-card.vp {
+  border-color: rgba(148, 163, 184, 0.55);
+}
+
+.discovery-choice-card:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: #fbbf24;
+  box-shadow: 0 0 16px rgba(251, 191, 36, 0.22);
+}
+
+.discovery-choice-card:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.discovery-choice-frame {
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: 6px;
+  background: #111827;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.discovery-choice-frame.vp-frame {
+  background:
+    radial-gradient(circle at 50% 38%, rgba(251, 191, 36, 0.28), transparent 34%),
+    linear-gradient(145deg, #111827 0%, #1f2937 52%, #0f172a 100%);
+  border: 1px solid rgba(251, 191, 36, 0.35);
+}
+
+.discovery-choice-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.discovery-choice-vp-mark {
+  width: 74%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  border: 2px solid rgba(251, 191, 36, 0.78);
+  background: rgba(15, 23, 42, 0.84);
+  color: #fde68a;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  box-shadow: inset 0 0 22px rgba(251, 191, 36, 0.18);
+}
+
+.discovery-choice-vp-number {
+  font-size: 34px;
+  line-height: 0.9;
+  font-weight: 900;
+}
+
+.discovery-choice-vp-text {
+  font-size: 12px;
+  line-height: 1;
+  font-weight: 900;
+}
+
+.discovery-choice-label {
+  color: #f8fafc;
+  font-size: 10px;
+  line-height: 1.12;
+  font-weight: 800;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
 /* Species specific styles */
 .color-eridani { color: #f87171; border-color: #f87171; }
 .color-hydran { color: #c084fc; border-color: #c084fc; }
@@ -1794,6 +1897,357 @@
 
 .build-target-coords {
   font-family: monospace;
+}
+
+/* ── Upgrade Panel ───────────────────────────────────────────────── */
+.action-float:has(.upgrade-action-panel) {
+  width: min(760px, calc(100vw - 20px));
+  max-width: min(760px, calc(100vw - 20px));
+}
+
+.upgrade-action-panel {
+  max-height: min(82vh, 720px);
+  overflow-y: auto;
+}
+
+.upgrade-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.upgrade-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.upgrade-kicker {
+  font-size: 9px;
+  line-height: 1;
+  color: #7dd3fc;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 800;
+}
+
+.upgrade-title {
+  color: #f8fafc;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.25;
+}
+
+.upgrade-stop {
+  flex: none;
+  padding: 5px 10px;
+  font-size: 11px;
+}
+
+.discovery-part-focus {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  border: 1px solid rgba(251, 191, 36, 0.45);
+  background: radial-gradient(circle at 50% 0%, rgba(251, 191, 36, 0.18), rgba(15, 23, 42, 0.96) 60%);
+  border-radius: 8px;
+}
+
+.discovery-part-focus .ship-part-tile {
+  width: 148px;
+  min-height: 78px;
+  box-shadow: 0 0 18px rgba(251, 191, 36, 0.25);
+}
+
+.blueprint-board {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.blueprint-card {
+  min-width: 0;
+  background:
+    linear-gradient(135deg, rgba(14, 116, 144, 0.2), rgba(15, 23, 42, 0.98) 42%),
+    repeating-linear-gradient(90deg, rgba(125, 211, 252, 0.05) 0 1px, transparent 1px 24px),
+    #0f172a;
+  border: 1px solid #243447;
+  border-radius: 8px;
+  padding: 8px;
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+}
+
+.blueprint-card.legal {
+  border-color: rgba(45, 212, 191, 0.45);
+}
+
+.blueprint-card.selected {
+  border-color: #fbbf24;
+  box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.65), 0 0 18px rgba(20, 184, 166, 0.18);
+}
+
+.blueprint-card:hover {
+  transform: translateY(-1px);
+}
+
+.blueprint-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+}
+
+.blueprint-ship-img {
+  width: 42px;
+  height: 32px;
+  object-fit: contain;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.6));
+}
+
+.blueprint-name {
+  color: #f8fafc;
+  font-size: 12px;
+  line-height: 1.1;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.blueprint-subtitle {
+  color: #94a3b8;
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.blueprint-stats {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 3px;
+  margin: 7px 0;
+}
+
+.blueprint-stats span {
+  min-width: 0;
+  height: 19px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(125, 211, 252, 0.22);
+  border-radius: 4px;
+  background: rgba(2, 6, 23, 0.55);
+  color: #cbd5e1;
+  font-size: 10px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.blueprint-stats span.bad {
+  color: #fca5a5;
+  border-color: rgba(248, 113, 113, 0.35);
+}
+
+.blueprint-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.blueprint-slot {
+  min-width: 0;
+  aspect-ratio: 1.14;
+  border: 1px solid rgba(71, 85, 105, 0.7);
+  border-radius: 6px;
+  background: rgba(2, 6, 23, 0.42);
+  padding: 2px;
+}
+
+.blueprint-slot.legal {
+  border-color: #2dd4bf;
+  box-shadow: inset 0 0 0 1px rgba(45, 212, 191, 0.4), 0 0 10px rgba(45, 212, 191, 0.16);
+  cursor: pointer;
+}
+
+.blueprint-slot.selected {
+  border-color: #fbbf24;
+  box-shadow: inset 0 0 0 1px #fbbf24, 0 0 12px rgba(251, 191, 36, 0.28);
+}
+
+.ship-part-tile {
+  width: 100%;
+  min-height: 54px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 4px;
+  border: 1px solid #155e75;
+  border-radius: 5px;
+  padding: 5px;
+  background:
+    linear-gradient(145deg, rgba(8, 145, 178, 0.92), rgba(12, 74, 110, 0.96)),
+    #0e7490;
+  color: #ecfeff;
+  cursor: pointer;
+  text-align: left;
+  overflow: hidden;
+}
+
+.ship-part-tile:disabled {
+  cursor: default;
+  pointer-events: none;
+}
+
+.ship-part-tile.discovery {
+  border-color: #f59e0b;
+  background:
+    linear-gradient(145deg, rgba(217, 119, 6, 0.88), rgba(14, 116, 144, 0.96)),
+    #0e7490;
+}
+
+.ship-part-tile.empty {
+  border-style: dashed;
+  border-color: #334155;
+  background: rgba(15, 23, 42, 0.76);
+  color: #64748b;
+}
+
+.ship-part-tile.remove {
+  border-color: #f97316;
+  background: linear-gradient(145deg, rgba(124, 45, 18, 0.95), rgba(67, 20, 7, 0.96));
+}
+
+.part-name {
+  min-width: 0;
+  color: inherit;
+  font-size: 9px;
+  line-height: 1.05;
+  font-weight: 900;
+  text-transform: uppercase;
+  overflow-wrap: anywhere;
+}
+
+.part-symbols {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  min-height: 15px;
+}
+
+.part-dice,
+.part-stat,
+.part-energy,
+.part-init,
+.part-external {
+  min-width: 15px;
+  height: 15px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  padding: 0 3px;
+  color: #0f172a;
+  background: #e2e8f0;
+  font-size: 9px;
+  line-height: 1;
+  font-weight: 900;
+}
+
+.part-dice.die-yellow { background: #fde047; }
+.part-dice.die-orange { background: #fb923c; }
+.part-dice.die-blue { background: #60a5fa; }
+.part-dice.die-red { background: #f87171; }
+.part-dice.die-purple { background: #c084fc; }
+.ship-part-tile.die-yellow { border-color: #fde047; }
+.ship-part-tile.die-orange { border-color: #fb923c; }
+.ship-part-tile.die-blue { border-color: #60a5fa; }
+.ship-part-tile.die-red { border-color: #f87171; }
+.ship-part-tile.die-purple { border-color: #c084fc; }
+
+.part-stat.shield {
+  background: #111827;
+  color: #f8fafc;
+}
+
+.part-stat.hull {
+  background: #e0f2fe;
+}
+
+.part-stat.move {
+  background: #bfdbfe;
+}
+
+.part-energy.positive {
+  background: #bef264;
+}
+
+.part-energy.negative {
+  background: #fecaca;
+}
+
+.part-init,
+.part-external {
+  background: #cbd5e1;
+}
+
+.upgrade-tray,
+.discovery-inventory {
+  border: 1px solid #243447;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.88);
+  padding: 8px;
+}
+
+.tray-title {
+  color: #cbd5e1;
+  font-size: 11px;
+  font-weight: 800;
+  margin-bottom: 6px;
+}
+
+.part-tray-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 6px;
+}
+
+.part-tray-grid .ship-part-tile {
+  min-height: 66px;
+}
+
+.upgrade-empty {
+  color: #fca5a5;
+  font-size: 11px;
+}
+
+.inventory-parts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.inventory-chip {
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  border-radius: 4px;
+  background: rgba(120, 53, 15, 0.35);
+  color: #fde68a;
+  padding: 3px 5px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+@media (max-width: 720px) {
+  .action-float:has(.upgrade-action-panel) {
+    left: 6px;
+    right: 6px;
+    width: auto;
+    max-width: none;
+  }
+
+  .blueprint-board {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* ── Move Panel ──────────────────────────────────────────────────── */

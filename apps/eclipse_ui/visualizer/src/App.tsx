@@ -5,7 +5,7 @@ import { SPECIES_THEME, getPlayerColor } from './theme';
 import ActionPanel from './ActionPanel';
 import { ACTION } from './actionTypes';
 import { API_BASE, buildTechMarketRows, TECH_CATEGORIES, techImageUrl } from './types/lobby';
-import type { SetupSnapshot, Player, BuildCosts } from './types/game';
+import type { SetupSnapshot, Player, BuildCosts, ShipPartCatalog, DiscoveryCatalog } from './types/game';
 
 // Custom Hooks
 import { useGameSocket } from './hooks/useGameSocket';
@@ -50,6 +50,7 @@ function App({
   const [numPlayers, setNumPlayers] = useState<number>(initialSnapshot?.config.players ?? 4);
   const [gameMetadata] = useState<any>(initialMetadata);
   const [difficulty, setDifficulty] = useState<string>(initialMetadata.npc_difficulties?.[0] ?? 'Easy');
+  const [warpedUniverse, setWarpedUniverse] = useState<boolean>(initialSnapshot?.config.warped_universe ?? false);
   const [snapshot, setSnapshot] = useState<SetupSnapshot | null>(initialSnapshot ?? null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -95,11 +96,20 @@ function App({
   });
 
   const getAiDefault = (playerId: number) => aiChoices[playerId] ?? (playerId !== 0);
+  const warpedUniverseSupported = numPlayers >= 3 && numPlayers <= 5;
+
+  useEffect(() => {
+    if (!warpedUniverseSupported && warpedUniverse) {
+      setWarpedUniverse(false);
+    }
+  }, [warpedUniverseSupported, warpedUniverse]);
 
   const gameState = snapshot?.state ?? null;
   const techRows = gameState
     ? buildTechMarketRows(gameMetadata.tech_catalog ?? {}, gameState.tech_tray)
     : {};
+  const shipPartCatalog: ShipPartCatalog = gameMetadata.ship_part_catalog ?? {};
+  const discoveryCatalog: DiscoveryCatalog = gameMetadata.discovery_catalog ?? {};
 
   const getSpeciesOptions = (playerId: number) => {
     const selectedSpecies = Array.from({ length: numPlayers }, (_, i) => i)
@@ -135,7 +145,8 @@ function App({
         players: numPlayers,
         rng_seed: rngSeed,
         npc_difficulty: difficulty,
-        staged_players: stagedPlayers
+        staged_players: stagedPlayers,
+        warped_universe: warpedUniverseSupported && warpedUniverse
       };
       const response = await fetch(`${API_BASE}/setup/pre-choice`, {
         method: 'POST',
@@ -317,6 +328,7 @@ function App({
   const researchState = gameState?.research_state;
   const influenceState = gameState?.influence_state;
   const buildState = gameState?.build_state;
+  const upgradeState = gameState?.upgrade_state;
   const moveState = gameState?.move_state;
   const influencePhase = influenceState?.phase ?? 'inactive';
   const combatState = gameState?.combat_state;
@@ -335,6 +347,9 @@ function App({
   const currentBuildCosts: BuildCosts | null =
     gameState?.build_costs_by_player?.[String(mySeatIdx)] ??
     (snapshot?.current_player !== undefined ? gameState?.build_costs_by_player?.[String(snapshot.current_player)] ?? null : null);
+  const activePlayer = snapshot?.current_player !== undefined
+    ? gameState?.players[snapshot.current_player]
+    : undefined;
   const previewResearchActions = useMemo(() => {
     if (!gameState || mySeatIdx < 0 || !gameMetadata.tech_catalog) return [];
     const player = gameState.players[mySeatIdx];
@@ -381,6 +396,19 @@ function App({
     return actions;
   }, [gameState, mySeatIdx, gameMetadata.tech_catalog]);
   const selectedSectorId = exploreState?.selected_sector_id ?? 0;
+  const findDiscoveryTileForSector = (sectorId: number) => {
+    if (!gameState || sectorId <= 0) return undefined;
+    for (const row of gameState.galaxy) {
+      const sector = row.find((candidate) => candidate.sector_id === sectorId);
+      if (!sector) continue;
+      if (sector.discovery_tile === undefined || sector.discovery_tile === 0 || sector.discovery_tile === 'None') {
+        return undefined;
+      }
+      return discoveryCatalog[String(sector.discovery_tile)];
+    }
+    return undefined;
+  };
+  const selectedDiscoveryTile = findDiscoveryTileForSector(selectedSectorId);
   const legalRotations = useMemo(
     () =>
       legalActions
@@ -550,12 +578,13 @@ function App({
       researchState?.phase === 'choose_tech' ||
       influencePhase !== 'inactive' ||
       buildState?.phase === 'choose_build' ||
+      upgradeState?.phase === 'choose_upgrade' ||
       moveState?.phase === 'choose_move' ||
       moveState?.phase === 'choose_warp_destination'
     ) {
       setPreviewAction(null);
     }
-  }, [explorePhase, researchState?.phase, influencePhase, buildState?.phase, moveState?.phase]);
+  }, [explorePhase, researchState?.phase, influencePhase, buildState?.phase, upgradeState?.phase, moveState?.phase]);
 
   // Reset build selection when build phase ends
   useEffect(() => {
@@ -698,6 +727,9 @@ function App({
           setNumPlayers={setNumPlayers}
           difficulty={difficulty}
           setDifficulty={setDifficulty}
+          warpedUniverse={warpedUniverse}
+          setWarpedUniverse={setWarpedUniverse}
+          warpedUniverseSupported={warpedUniverseSupported}
           gameMetadata={gameMetadata}
           speciesChoices={speciesChoices}
           handleSpeciesChange={handleSpeciesChange}
@@ -802,6 +834,7 @@ function App({
                 <CombatPanel
                   combat={combatState}
                   gameState={gameState}
+                  discoveryCatalog={discoveryCatalog}
                   legalActions={legalActions}
                   actionStrings={actionStrings}
                   busy={actionInProgress}
@@ -834,7 +867,11 @@ function App({
                   research={researchState}
                   influence={influenceState}
                   build={buildState}
+                  upgrade={upgradeState}
                   move={moveState}
+                  player={activePlayer}
+                  shipPartCatalog={shipPartCatalog}
+                  discoveryTile={selectedDiscoveryTile}
                   unitRegistry={gameState?.unit_registry}
                   selectedRareTech={selectedRareTech}
                   onClearSelectedRareTech={() => setSelectedRareTech(null)}

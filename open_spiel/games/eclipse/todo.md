@@ -18,6 +18,7 @@ maybe later:
 
 # UI Integration Backlog (Not Yet Integrated)
 - [ ] **Diplomacy & Ambassador Pacts**: Lacks visual diplomacy grid, pact indicator, or ambassador board space in the UI to manage alliances/pacts.
-- [ ] **Upgrade Action & Discovery Parts**: Lacks any panel or interface in the UI to customize ship blueprints, select parts, or assign parts from the discovery parts inventory.
-- [ ] **Warped Universe Module Selection & Wormhole Visuals**: Layout loaders are operational in C++, but there is no layout template selector/dropdown in the lobby screen. Visuals for drawing galaxy missing as well.
+- [x] **Upgrade Action & Discovery Parts**: UI includes blueprint customization, discovery reward choice, and stored discovery part inventory.
+- [x] **Warped Universe Module Selection**: Lobby/setup config can enable the module for supported player counts.
+- [ ] **Warped Universe Wormhole Visuals**: Layout loaders and selection are operational, but galaxy rendering still needs a focused visual review for warp-region/wormhole clarity.
 - [ ] **Minor Species Module**: Ambassador relations and abilities have no UI presence or interactive components.

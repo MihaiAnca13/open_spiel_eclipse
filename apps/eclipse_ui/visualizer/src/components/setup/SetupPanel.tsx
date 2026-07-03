@@ -7,6 +7,9 @@ interface SetupPanelProps {
   setNumPlayers: (num: number) => void;
   difficulty: string;
   setDifficulty: (diff: string) => void;
+  warpedUniverse: boolean;
+  setWarpedUniverse: (enabled: boolean) => void;
+  warpedUniverseSupported: boolean;
   gameMetadata: any;
   speciesChoices: Record<number, string>;
   handleSpeciesChange: (playerId: number, species: string) => void;
@@ -31,6 +34,9 @@ export default function SetupPanel({
   setNumPlayers,
   difficulty,
   setDifficulty,
+  warpedUniverse,
+  setWarpedUniverse,
+  warpedUniverseSupported,
   gameMetadata,
   speciesChoices,
   handleSpeciesChange,
@@ -73,6 +79,22 @@ export default function SetupPanel({
             <option key={d} value={d}>{d}</option>
           ))}
         </select>
+      </div>
+
+      <div className="flex items-center gap-2 text-xs">
+        <input
+          type="checkbox"
+          id="warped-universe"
+          checked={warpedUniverseSupported && warpedUniverse}
+          disabled={!warpedUniverseSupported}
+          onChange={(e) => setWarpedUniverse(e.target.checked)}
+        />
+        <label htmlFor="warped-universe" className="text-[#cbd5e1] cursor-pointer">
+          Warped Universe
+        </label>
+        {!warpedUniverseSupported && (
+          <span className="text-[#64748b]">3-5 players only</span>
+        )}
       </div>
 
       <div className="flex flex-col gap-4 border-t border-[#2d313f] pt-4 mt-2">

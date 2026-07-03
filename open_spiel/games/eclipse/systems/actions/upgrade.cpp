@@ -141,18 +141,6 @@ namespace open_spiel::eclipse
         const size_t bp_idx = static_cast<size_t>(ship_type);
         Blueprint& target_bp = player.blueprints[bp_idx];
 
-        // If the overwritten slot had a discovery part, return it back to the player's personal inventory.
-        ShipPartId old_part_id = target_bp.slots[slot_idx];
-        if (old_part_id != ShipPartId::NONE)
-        {
-            const size_t old_part_table_idx = static_cast<size_t>(old_part_id) - 1;
-            const ShipPart& old_part = SHIP_PART_TABLE[old_part_table_idx];
-            if (old_part.is_discovery)
-            {
-                player.parts_inventory.push_back(old_part_id);
-            }
-        }
-
         // Apply grid change mutation cleanly
         target_bp.slots[slot_idx] = part_id;
         target_bp.recompute();

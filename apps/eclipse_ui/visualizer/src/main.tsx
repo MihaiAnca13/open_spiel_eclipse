@@ -8,6 +8,8 @@ import { SPECIES_THEME } from './theme'
 const DEFAULT_METADATA = {
   species: Object.keys(SPECIES_THEME),
   tech_catalog: {},
+  ship_part_catalog: {},
+  discovery_catalog: {},
   npc_difficulties: ['Easy', 'Medium', 'Hard'],
 }
 

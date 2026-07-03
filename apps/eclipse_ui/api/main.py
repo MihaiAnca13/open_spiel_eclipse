@@ -29,6 +29,7 @@ app.add_middleware(
 SECTORS_DIR = Path(__file__).resolve().parent.parent / "data" / "sectors"
 TECH_DIR = Path(__file__).resolve().parent.parent / "data" / "tech"
 SHIPS_DIR = Path(__file__).resolve().parent.parent / "data" / "ships"
+DISCOVERY_DIR = Path(__file__).resolve().parent.parent / "data" / "discovery"
 
 
 def _build_sector_manifest() -> dict[str, str]:
@@ -65,6 +66,7 @@ SECTOR_LAYOUTS = _load_sector_layouts()
 app.mount("/assets/sectors", StaticFiles(directory=str(SECTORS_DIR)), name="sectors")
 app.mount("/assets/tech", StaticFiles(directory=str(TECH_DIR)), name="tech")
 app.mount("/assets/ships", StaticFiles(directory=str(SHIPS_DIR)), name="ships")
+app.mount("/assets/discovery", StaticFiles(directory=str(DISCOVERY_DIR)), name="discovery")
 
 
 @app.get("/sectors/manifest")
@@ -83,6 +85,7 @@ async def sectors_layouts() -> dict:
 async def setup_pre_choice(
     config: dict = Body(..., description="UI-driven setup configuration."),
 ):
+    config = _normalize_setup_config(config)
     snapshot_json_str = eclipse_ui_native.initialize_pre_choice(json.dumps(config))
     return json.loads(snapshot_json_str)
 
@@ -116,6 +119,20 @@ def _random_seed() -> int:
     return random.randint(0, 2**31 - 1)
 
 
+def _warped_universe_supported(num_players: int) -> bool:
+    return 3 <= num_players <= 5
+
+
+def _normalize_setup_config(config: dict) -> dict:
+    normalized = dict(config)
+    warped_universe = bool(normalized.get("warped_universe", False))
+    players = normalized.get("players")
+    if isinstance(players, int) and not _warped_universe_supported(players):
+        warped_universe = False
+    normalized["warped_universe"] = warped_universe
+    return normalized
+
+
 @dataclass
 class Seat:
     state: Literal["empty", "human", "ai"] = "empty"
@@ -134,6 +151,7 @@ class Lobby:
     seats: List[Seat] = field(default_factory=lambda: [Seat(), Seat()])
     difficulty: str = "Easy"
     rng_seed: int = field(default_factory=_random_seed)
+    warped_universe: bool = False
     phase: str = "waiting"  # "waiting" | "setup" | "started"
     stage1_snapshot: Optional[dict] = None
     snapshot: Optional[dict] = None
@@ -187,6 +205,8 @@ def _validate_debug_game_blob(blob: dict, expected_players: int | None = None) -
     setup_config = blob["setup_config"]
     if not isinstance(setup_config, dict):
         raise HTTPException(status_code=400, detail="game_blob.setup_config must be an object")
+    blob["setup_config"] = _normalize_setup_config(setup_config)
+    setup_config = blob["setup_config"]
 
     players = setup_config.get("players")
     if not isinstance(players, int):
@@ -295,6 +315,7 @@ def serialize_lobby(lby: Lobby) -> dict:
         ],
         "difficulty": lby.difficulty,
         "rng_seed": lby.rng_seed,
+        "warped_universe": lby.warped_universe,
         "phase": lby.phase,
         "picker_order": lby.picker_order,
         "current_picker_idx": lby.current_picker_idx,
@@ -503,6 +524,8 @@ async def lobby_num_players(body: dict = Body(...)):
         lobby.seats = lobby.seats[:num]
 
     lobby.num_players = num
+    if not _warped_universe_supported(num):
+        lobby.warped_universe = False
     await broadcast_lobby()
     return serialize_lobby(lobby)
 
@@ -516,6 +539,25 @@ async def lobby_difficulty(body: dict = Body(...)):
         raise HTTPException(status_code=403, detail="Only host can change difficulty")
 
     lobby.difficulty = difficulty
+    await broadcast_lobby()
+    return serialize_lobby(lobby)
+
+
+@app.post("/lobby/warped_universe")
+async def lobby_warped_universe(body: dict = Body(...)):
+    player_id: str = body.get("player_id", "")
+    warped_universe = body.get("warped_universe", False)
+
+    if player_id != lobby.host_player_id:
+        raise HTTPException(status_code=403, detail="Only host can change Warped Universe")
+
+    if not isinstance(warped_universe, bool):
+        raise HTTPException(status_code=400, detail="warped_universe must be a boolean")
+
+    if warped_universe and not _warped_universe_supported(lobby.num_players):
+        raise HTTPException(status_code=400, detail="Warped Universe is supported for 3-5 players")
+
+    lobby.warped_universe = warped_universe
     await broadcast_lobby()
     return serialize_lobby(lobby)
 
@@ -556,7 +598,9 @@ async def lobby_initialize(body: dict = Body(...)):
         "rng_seed": lobby.rng_seed,
         "npc_difficulty": lobby.difficulty,
         "staged_players": staged_players,
+        "warped_universe": lobby.warped_universe,
     }
+    setup_config = _normalize_setup_config(setup_config)
 
     stage1_str = eclipse_ui_native.initialize_pre_choice(json.dumps(setup_config))
     stage1 = json.loads(stage1_str)
@@ -567,6 +611,7 @@ async def lobby_initialize(body: dict = Body(...)):
     picker_order = [i for i in reversed(raw_turn_order) if i in human_seat_set]
 
     lobby.stage1_snapshot = stage1
+    lobby.warped_universe = bool(stage1["config"].get("warped_universe", False))
     lobby.picker_order = picker_order
     lobby.current_picker_idx = 0
     lobby.phase = "setup"
@@ -660,6 +705,7 @@ async def debug_state_load(body: dict = Body(...)):
 
     lobby.game_blob = game_blob
     lobby.snapshot = _snapshot_from_game_blob(game_blob)
+    lobby.warped_universe = bool(game_blob["setup_config"].get("warped_universe", False))
     for idx, seat in enumerate(lobby.seats):
         seat.species = _seat_species(game_blob, idx)
     _autoplay_ai()
@@ -704,6 +750,7 @@ async def debug_state_start(body: dict = Body(...)):
     lobby.seats = seats
     lobby.difficulty = game_blob["state"].get("gcds_difficulty", lobby.difficulty)
     lobby.rng_seed = int(game_blob["setup_config"].get("rng_seed", lobby.rng_seed))
+    lobby.warped_universe = bool(game_blob["setup_config"].get("warped_universe", False))
     lobby.phase = "started"
     lobby.stage1_snapshot = None
     lobby.snapshot = _snapshot_from_game_blob(game_blob)
@@ -734,6 +781,7 @@ async def lobby_reset(body: dict = Body(...)):
     lobby.seats = [Seat(), Seat()]
     lobby.difficulty = "Easy"
     lobby.rng_seed = _random_seed()
+    lobby.warped_universe = False
     lobby.phase = "waiting"
     lobby.stage1_snapshot = None
     lobby.snapshot = None

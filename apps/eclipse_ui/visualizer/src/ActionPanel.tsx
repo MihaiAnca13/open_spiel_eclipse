@@ -3,9 +3,11 @@
 // `gameState.explore_state`, so the UI never needs to reimplement game rules.
 
 import { ACTION } from './actionTypes';
-import type { InfluenceState, BuildState, MoveState, Unit, BuildCosts } from './types/game';
+import type { InfluenceState, BuildState, UpgradeState, MoveState, Unit, BuildCosts, Player, ShipPartCatalog, DiscoveryTileDefinition } from './types/game';
 import BuildPanel from './components/ui/BuildPanel';
 import MovePanel from './components/ui/MovePanel';
+import UpgradePanel from './components/ui/UpgradePanel';
+import DiscoveryChoice from './components/ui/DiscoveryChoice';
 
 const RING_NAME: Record<number, string> = { 0: 'Inner (I)', 1: 'Middle (II)', 2: 'Outer (III)' };
 type MainActionPreview = 'research' | 'build' | 'influence' | 'upgrade' | 'move' | 'explore';
@@ -21,6 +23,7 @@ export interface ExploreState {
   drawn_count: number;
   selected_sector_id: number;
   chosen_rotation: number;
+  discovered_part?: number;
 }
 
 export interface ResearchState {
@@ -34,7 +37,11 @@ interface Props {
   research: ResearchState | undefined;
   influence: InfluenceState | undefined;
   build: BuildState | undefined;
+  upgrade: UpgradeState | undefined;
   move: MoveState | undefined;
+  player: Player | undefined;
+  shipPartCatalog: ShipPartCatalog;
+  discoveryTile?: DiscoveryTileDefinition;
   unitRegistry?: Unit[];
   selectedRareTech: { name: string; order: number } | null;
   onClearSelectedRareTech: () => void;
@@ -70,7 +77,11 @@ export default function ActionPanel({
   research,
   influence,
   build,
+  upgrade,
   move,
+  player,
+  shipPartCatalog,
+  discoveryTile,
   unitRegistry,
   selectedRareTech,
   onClearSelectedRareTech,
@@ -103,16 +114,19 @@ export default function ActionPanel({
   const legal = new Set(legalActions);
   const influencePhase = influence?.phase ?? 'inactive';
   const buildPhase = build?.phase ?? 'inactive';
+  const upgradePhase = upgrade?.phase ?? 'inactive';
   const movePhase = move?.phase ?? 'inactive';
   const phase = influencePhase !== 'inactive'
     ? influencePhase
     : buildPhase !== 'inactive'
       ? 'choose_build'
-      : movePhase !== 'inactive'
-        ? movePhase
-        : research?.phase === 'choose_tech'
-          ? 'choose_tech'
-          : (explore?.phase ?? 'inactive');
+      : upgradePhase !== 'inactive'
+        ? 'choose_upgrade'
+        : movePhase !== 'inactive'
+          ? movePhase
+          : research?.phase === 'choose_tech'
+            ? 'choose_tech'
+            : (explore?.phase ?? 'inactive');
 
   const renderActionButton = (id: number, label: string, kind: 'primary' | 'secondary' | 'danger' = 'primary', forceDisabled = false) =>
     legal.has(id) ? (
@@ -167,7 +181,7 @@ export default function ActionPanel({
       : explore?.drawn_sector_ids?.find((s) => s > 0) ?? 0;
 
   return (
-    <div className="panel action-panel">
+    <div className={`panel action-panel ${(phase === 'choose_upgrade' || phase === 'discovery_upgrade') ? 'upgrade-action-panel' : ''}`}>
       <h3 className="panel-title">Your Action</h3>
 
       {phase === 'inactive' && (
@@ -270,6 +284,19 @@ export default function ActionPanel({
         />
       )}
 
+      {(phase === 'choose_upgrade' || phase === 'discovery_upgrade') && player && (
+        <UpgradePanel
+          legalActions={legalActions}
+          busy={busy}
+          onAction={onAction}
+          player={player}
+          upgrade={upgrade}
+          partCatalog={shipPartCatalog}
+          mode={phase === 'discovery_upgrade' ? 'discovery' : 'normal'}
+          discoveredPartId={explore?.discovered_part}
+        />
+      )}
+
       {(phase === 'choose_move' || phase === 'choose_warp_destination') && move && (
         <MovePanel
           legalActions={legalActions}
@@ -358,10 +385,14 @@ export default function ActionPanel({
       {phase === 'discovery_reward' && (
         <>
           <span className="text-xs text-[#94a3b8]">Resolve the Discovery tile in this sector.</span>
-          <div className="action-row">
-            {renderActionButton(ACTION.EXPLORE_DISCOVERY_REWARD, 'Take reward')}
-            {renderActionButton(ACTION.EXPLORE_DISCOVERY_VP, 'Take 2 VP', 'secondary')}
-          </div>
+          <DiscoveryChoice
+            tile={discoveryTile}
+            legalActions={legalActions}
+            busy={busy}
+            rewardActionId={ACTION.EXPLORE_DISCOVERY_REWARD}
+            vpActionId={ACTION.EXPLORE_DISCOVERY_VP}
+            onAction={onAction}
+          />
         </>
       )}
 
