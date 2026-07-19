@@ -62,6 +62,22 @@ export interface ShipPartDefinition {
 
 export type ShipPartCatalog = Record<string, ShipPartDefinition>;
 
+export interface GameTechDefinition {
+  category: string;
+  order: number;
+  base_cost: number;
+  min_cost?: number;
+  copies?: number;
+}
+
+export interface GameMetadata {
+  species?: string[];
+  tech_catalog?: Record<string, GameTechDefinition>;
+  ship_part_catalog?: ShipPartCatalog;
+  discovery_catalog?: DiscoveryCatalog;
+  npc_difficulties?: string[];
+}
+
 export interface DiscoveryTileDefinition {
   id: number;
   name: string;
@@ -105,6 +121,7 @@ export interface Sector {
   discovery_tile?: number | string;
   orbital_built: boolean;
   monolith_built: boolean;
+  player_warp_portal_vp?: number;
 }
 
 export interface PlanetLayout {
@@ -114,11 +131,17 @@ export interface PlanetLayout {
   dy: number;
 }
 
+export interface LayoutAnchor {
+  dx: number;
+  dy: number;
+}
+
 export interface SectorLayout {
-  influence_space: { dx: number; dy: number };
+  influence_space: LayoutAnchor;
   planets: PlanetLayout[];
-  monolith_anchor: { dx: number; dy: number };
-  orbital_anchor: { dx: number; dy: number };
+  monolith_anchor: LayoutAnchor;
+  orbital_anchor: LayoutAnchor;
+  ship_anchors?: LayoutAnchor[];
 }
 
 export interface Unit {
@@ -185,6 +208,14 @@ export interface InitiativeGroup {
   destroyed_count: number;
 }
 
+export interface CombatSectorInfo {
+  sector_id: number;
+  participant_count: number;
+  participant_ids: number[];
+  latest_arrival: number[];
+  defender_idx: number;
+}
+
 export interface DestroyedShipRecord {
   player_id: number;
   type: string;
@@ -195,6 +226,9 @@ export interface DestroyedShipRecord {
 export interface CombatState {
   phase: CombatPhase;
   active_sector_id: number;
+  battle_queue: CombatSectorInfo[];
+  battle_queue_size: number;
+  current_battle_idx: number;
   engagement_round: number;
   current_attacker_id: number;
   current_defender_id: number;
@@ -275,6 +309,10 @@ export interface GameState {
   move_state?: MoveState;
   combat_state?: CombatState;
   upkeep_state?: UpkeepState;
+  warped_universe?: boolean;
+  layout_kinds?: number[];
+  warp_link_dest_cell?: number[];
+  warp_link_dest_dir?: number[];
   sector_bag_inner: number;
   sector_bag_middle: number;
   sector_bag_outer: number;

@@ -317,6 +317,7 @@ inline void to_json(nlohmann::json& j, const State& s) {
         {"unit_registry", s.unit_registry},
         {"tech_tray", tray_j},
         {"tech_bag", s.tech_bag},
+        {"discovery_bag", s.discovery_bag},
         {"sector_bag_inner", s.sector_bag_inner},
         {"sector_bag_middle", s.sector_bag_middle},
         {"sector_bag_outer", s.sector_bag_outer},
@@ -340,7 +341,10 @@ inline void to_json(nlohmann::json& j, const State& s) {
         {"combat_state", s.combat_state},
         {"diplomacy_state", s.diplomacy_state},
         {"next_arrival_order", s.next_arrival_order},
-        {"warped_universe", s.warped_universe}
+        {"warped_universe", s.warped_universe},
+        {"layout_kinds", s.layout_kinds},
+        {"warp_link_dest_cell", s.warp_link_dest_cell},
+        {"warp_link_dest_dir", s.warp_link_dest_dir}
     };
 }
 
@@ -371,6 +375,11 @@ inline void from_json(const nlohmann::json& j, State& s) {
     }
 
     j.at("tech_bag").get_to(s.tech_bag);
+    if (j.contains("discovery_bag")) {
+        j.at("discovery_bag").get_to(s.discovery_bag);
+    } else {
+        s.discovery_bag.clear();
+    }
     if (j.contains("sector_bag_inner")) {
         j.at("sector_bag_inner").get_to(s.sector_bag_inner);
     }

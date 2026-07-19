@@ -5,6 +5,9 @@ Generate sector_layouts.json: pixel positions of planet slots per sector.
 Run from apps/eclipse_ui/:
   python tools/gen_sector_layouts.py [--debug] [--sector 101]
 
+Existing layouts are preserved by default. Use --regenerate-existing to
+re-detect planet and structure positions from the sector images.
+
 Outputs data/sector_layouts.json with (dx, dy) offsets from image center (512, 512).
 
 UI renders overlays at: svgX = cx + dx * scale, svgY = cy + dy * scale
@@ -250,15 +253,15 @@ def in_hex_flat_top(dx: float, dy: float, R: float = HEX_CIRCUMRADIUS) -> bool:
             and abs(3**0.5 * dx - dy) <= 2 * r_in)
 
 
-def find_free_anchors(planet_dxdy: list[tuple], n: int = 2,
-                      R: float = HEX_CIRCUMRADIUS) -> list[dict]:
+def find_free_anchors(occupied_dxdy: list[tuple], n: int = 2,
+                      R: float = HEX_CIRCUMRADIUS, step: int = 40,
+                      inner_fraction: float = 0.82) -> list[dict]:
     """
-    Find n positions inside the hex that maximise min-distance to planet positions.
-    Searches a grid at 40px steps, 85% of circumradius to stay well inside.
+    Find n positions inside the hex that maximise min-distance to occupied positions.
+    The returned anchors use dx/dy offsets from the image center.
     """
     candidates = []
-    step = 40
-    r_inner = int(R * 0.82)
+    r_inner = int(R * inner_fraction)
     for dy in range(-r_inner, r_inner + 1, step):
         for dx in range(-r_inner, r_inner + 1, step):
             if in_hex_flat_top(dx, dy, R * 0.85):
@@ -274,7 +277,7 @@ def find_free_anchors(planet_dxdy: list[tuple], n: int = 2,
         best: tuple | None = None
         best_score = -1.0
         for (dx, dy) in candidates:
-            all_others = planet_dxdy + taken
+            all_others = occupied_dxdy + taken
             if all_others:
                 dists = [((dx - px)**2 + (dy - py)**2)**0.5
                          for px, py in all_others]
@@ -291,6 +294,31 @@ def find_free_anchors(planet_dxdy: list[tuple], n: int = 2,
 
 
 CONFIDENCE_THRESHOLD = 0.25
+SHIP_ANCHOR_COUNT = 16
+
+
+def add_ship_anchors(layout: dict) -> dict:
+    """Add or refresh ship anchors without changing manual layout fields."""
+    planets = layout.get("planets", [])
+    planet_dxdy = [
+        (planet["dx"], planet["dy"])
+        for planet in planets
+        if planet.get("confidence", 0) > 0
+    ]
+    structure_dxdy = [
+        (layout[key]["dx"], layout[key]["dy"])
+        for key in ("monolith_anchor", "orbital_anchor")
+        if key in layout
+    ]
+    occupied_for_ships = planet_dxdy + [(0, 0)] + structure_dxdy
+    updated_layout = dict(layout)
+    updated_layout["ship_anchors"] = find_free_anchors(
+        occupied_for_ships,
+        n=SHIP_ANCHOR_COUNT,
+        step=55,
+        inner_fraction=0.74,
+    )
+    return updated_layout
 
 
 def process_sector(
@@ -359,13 +387,13 @@ def process_sector(
 
     planet_dxdy = [(p["dx"], p["dy"]) for p in planets if p["confidence"] > 0]
     anchors = find_free_anchors(planet_dxdy, n=2)
-
     result: dict = {
         "influence_space": {"dx": 0, "dy": 0},
         "planets": planets,
         "monolith_anchor": anchors[0] if anchors else {"dx": -200, "dy": 0},
         "orbital_anchor": anchors[1] if len(anchors) > 1 else {"dx": -200, "dy": 80},
     }
+    result = add_ship_anchors(result)
     if warnings:
         result["warnings"] = warnings
 
@@ -415,6 +443,8 @@ def main() -> None:
                         help="Save annotated debug images to tools/debug_layouts/")
     parser.add_argument("--sector", type=int, default=None,
                         help="Process only this sector ID")
+    parser.add_argument("--regenerate-existing", action="store_true",
+                        help="Re-detect existing sectors instead of preserving them")
     parser.add_argument("--threshold", type=float, default=0.25,
                         help="Minimum template match confidence (default 0.25)")
     args = parser.parse_args()
@@ -445,14 +475,20 @@ def main() -> None:
         slots = SECTOR_SLOTS.get(sid, [])
         label = f"sector {sid:3d} ({len(slots)} slots)"
 
+        if str(sid) in existing and not args.regenerate_existing:
+            layouts[str(sid)] = add_ship_anchors(existing[str(sid)])
+            print(f"  {label}  → preserved existing layout")
+            continue
+
         if not slots:
             # Sectors with no planets still need influence/anchor data
-            layouts[str(sid)] = {
+            structure_anchors = [{"dx": -200, "dy": 0}, {"dx": -200, "dy": 80}]
+            layouts[str(sid)] = add_ship_anchors({
                 "influence_space": {"dx": 0, "dy": 0},
                 "planets": [],
-                "monolith_anchor": {"dx": -200, "dy": 0},
-                "orbital_anchor": {"dx": -200, "dy": 80},
-            }
+                "monolith_anchor": structure_anchors[0],
+                "orbital_anchor": structure_anchors[1],
+            })
             print(f"  {label}  → no planets, skipping match")
             continue
 

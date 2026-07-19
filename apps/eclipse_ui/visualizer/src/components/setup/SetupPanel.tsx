@@ -1,4 +1,5 @@
 import { SPECIES_THEME } from '../../theme';
+import type { GameMetadata, GameState, SetupSnapshot } from '../../types/game';
 
 interface SetupPanelProps {
   rngSeed: number;
@@ -10,18 +11,18 @@ interface SetupPanelProps {
   warpedUniverse: boolean;
   setWarpedUniverse: (enabled: boolean) => void;
   warpedUniverseSupported: boolean;
-  gameMetadata: any;
+  gameMetadata: GameMetadata;
   speciesChoices: Record<number, string>;
   handleSpeciesChange: (playerId: number, species: string) => void;
   getAiDefault: (playerId: number) => boolean;
   handleAiChange: (playerId: number, isAi: boolean) => void;
   playerIds: number[];
   playerLabel: (pid: number) => string;
-  gameState: any;
+  gameState: GameState | null;
   loading: boolean;
   handleInitializeStage1: () => void;
   handleFinalizeStage2: () => void;
-  snapshot: any;
+  snapshot: SetupSnapshot | null;
   getSpeciesOptions: (playerId: number) => { value: string; label: string; disabled?: boolean }[];
   playerStartingSectors: Record<number, number>;
   speciesList: string[];

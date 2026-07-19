@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { discoveryRewardImageUrl } from '../../types/lobby';
 import type { DiscoveryTileDefinition } from '../../types/game';
 
@@ -20,28 +20,14 @@ export default function DiscoveryChoice({
   onAction,
 }: Props) {
   const legal = useMemo(() => new Set(legalActions), [legalActions]);
-  const [brokenRewardSlug, setBrokenRewardSlug] = useState<string | null>(null);
+  const [rewardImageError, setRewardImageError] = useState(false);
+
+  useEffect(() => {
+    setRewardImageError(false);
+  }, [tile?.slug]);
 
   const canTakeReward = legal.has(rewardActionId);
   const canTakeVp = legal.has(vpActionId);
-  const hasBrokenRewardImage = !!tile && brokenRewardSlug === tile.slug;
-
-  if (!tile || hasBrokenRewardImage) {
-    return (
-      <div className="action-row">
-        {canTakeReward && (
-          <button className="action-btn primary" disabled={busy} onClick={() => onAction(rewardActionId)}>
-            Take reward
-          </button>
-        )}
-        {canTakeVp && (
-          <button className="action-btn secondary" disabled={busy} onClick={() => onAction(vpActionId)}>
-            Take 2 VP
-          </button>
-        )}
-      </div>
-    );
-  }
 
   return (
     <div className="discovery-choice-grid">
@@ -51,17 +37,21 @@ export default function DiscoveryChoice({
           className="discovery-choice-card reward"
           disabled={busy}
           onClick={() => onAction(rewardActionId)}
-          title={`Take ${tile.name}`}
+          title={`Take ${tile?.name ?? 'reward'}`}
         >
           <span className="discovery-choice-frame">
-            <img
-              className="discovery-choice-img"
-              src={discoveryRewardImageUrl(tile.slug)}
-              alt={tile.name}
-              onError={() => setBrokenRewardSlug(tile.slug)}
-            />
+            {tile && !rewardImageError ? (
+              <img
+                className="discovery-choice-img"
+                src={discoveryRewardImageUrl(tile.slug)}
+                alt={tile.name}
+                onError={() => setRewardImageError(true)}
+              />
+            ) : (
+              <span className="discovery-choice-placeholder" aria-hidden="true">?</span>
+            )}
           </span>
-          <span className="discovery-choice-label">{tile.name}</span>
+          <span className="discovery-choice-label">{tile?.name ?? 'Take reward'}</span>
         </button>
       )}
       {canTakeVp && (

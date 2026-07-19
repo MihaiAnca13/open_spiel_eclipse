@@ -1,14 +1,159 @@
 import { useMemo, useState, useCallback, useRef, useEffect } from 'react';
-import type { GameState, Sector, SectorLayout } from '../../types/game';
+import type { MouseEvent } from 'react';
+import type { GameState, LayoutAnchor, Sector, SectorLayout, Unit } from '../../types/game';
 import { ACTION } from '../../actionTypes';
-import { UNOWNED_COLOR } from '../../theme';
+import { NPC_COLOR_GCDS, NPC_COLOR_GUARDIAN, UNOWNED_COLOR } from '../../theme';
 import { getPlayerHexColor } from '../../utils/game';
 import { axialToPixel, getHexPoints, hexSize, IMAGE_ROTATION_OFFSET, axialNeighbor } from '../../utils/hex';
 import { getPlayerColor } from '../../theme';
 import { shipImageUrl } from '../../types/lobby';
+import { NPC_PLAYER_ID, GALAXY_MAP_SIZE, GALAXY_OFFSET } from '../../constants';
 
 
 const INITIAL_SCALE = 1;
+const WARP_LAYOUT_KIND = 6;
+const NO_WARP_LINK = 255;
+const EDGE_ANGLES_DEG = [0, -60, -120, 180, 120, 60] as const;
+const FALLBACK_SHIP_ANCHORS: LayoutAnchor[] = [
+  { dx: -165, dy: 145 },
+  { dx: -85, dy: 165 },
+  { dx: -5, dy: 145 },
+  { dx: 75, dy: 165 },
+  { dx: 155, dy: 145 },
+  { dx: -125, dy: 85 },
+  { dx: -45, dy: 105 },
+  { dx: 35, dy: 85 },
+  { dx: 115, dy: 105 },
+  { dx: -85, dy: 25 },
+  { dx: -5, dy: 45 },
+  { dx: 75, dy: 25 },
+];
+const SHIP_SIZE_BY_TYPE: Record<string, number> = {
+  ancient: 17,
+  cruiser: 18,
+  dreadnought: 21,
+  gcds: 22,
+  guardian: 19,
+  interceptor: 15,
+  starbase: 18,
+};
+const DEFAULT_SHIP_SIZE = 16;
+const SHIP_OUTLINE = 2.2;
+
+interface UnitWithIndex {
+  unit: Unit;
+  globalIdx: number;
+}
+
+interface ShipRenderItem {
+  key: string;
+  unit: Unit;
+  globalIdx: number;
+  members: UnitWithIndex[];
+  sectorId: number;
+  x: number;
+  y: number;
+  size: number;
+  color: string;
+}
+
+interface WarpCell {
+  cell: number;
+  q: number;
+  r: number;
+  cx: number;
+  cy: number;
+}
+
+interface WarpLink {
+  id: string;
+  fromCell: number;
+  fromDir: number;
+  toCell: number;
+  toDir: number;
+}
+
+function cellToAxial(cell: number) {
+  return {
+    q: Math.floor(cell / GALAXY_MAP_SIZE) - GALAXY_OFFSET,
+    r: (cell % GALAXY_MAP_SIZE) - GALAXY_OFFSET,
+  };
+}
+
+function axialToCell(q: number, r: number) {
+  return (q + GALAXY_OFFSET) * GALAXY_MAP_SIZE + (r + GALAXY_OFFSET);
+}
+
+function warpEdgePoint(cell: number, dir: number, radius = hexSize - 5) {
+  const { q, r } = cellToAxial(cell);
+  const { cx, cy } = axialToPixel(q, r);
+  const angle = (Math.PI / 180) * (EDGE_ANGLES_DEG[dir as 0 | 1 | 2 | 3 | 4 | 5] ?? 0);
+  return {
+    x: cx + Math.cos(angle) * radius,
+    y: cy + Math.sin(angle) * radius,
+  };
+}
+
+function warpGateLine(cell: number, dir: number) {
+  const center = warpEdgePoint(cell, dir, hexSize - 3);
+  const angle = (Math.PI / 180) * ((EDGE_ANGLES_DEG[dir as 0 | 1 | 2 | 3 | 4 | 5] ?? 0) + 90);
+  const half = 7;
+  return {
+    x1: center.x - Math.cos(angle) * half,
+    y1: center.y - Math.sin(angle) * half,
+    x2: center.x + Math.cos(angle) * half,
+    y2: center.y + Math.sin(angle) * half,
+  };
+}
+
+function warpLinkPath(link: WarpLink) {
+  const start = warpEdgePoint(link.fromCell, link.fromDir);
+  const end = warpEdgePoint(link.toCell, link.toDir);
+  const midX = (start.x + end.x) / 2;
+  const midY = (start.y + end.y) / 2;
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const distance = Math.hypot(dx, dy);
+  if (distance < 1) return `M ${start.x} ${start.y} L ${end.x} ${end.y}`;
+  const lift = Math.min(75, Math.max(24, distance * 0.18));
+  const nx = -dy / distance;
+  const ny = dx / distance;
+  return `M ${start.x} ${start.y} Q ${midX + nx * lift} ${midY + ny * lift} ${end.x} ${end.y}`;
+}
+
+function normalizeShipType(type: string) {
+  return type.trim().toLowerCase();
+}
+
+function getShipColor(unit: Unit) {
+  if (unit.player_id !== NPC_PLAYER_ID) return getPlayerColor(unit.player_id);
+
+  const type = normalizeShipType(String(unit.type));
+  if (type === 'gcds') return NPC_COLOR_GCDS;
+  if (type === 'guardian') return NPC_COLOR_GUARDIAN;
+  return '#94a3b8';
+}
+
+function getShipSize(type: string) {
+  return SHIP_SIZE_BY_TYPE[normalizeShipType(type)] ?? DEFAULT_SHIP_SIZE;
+}
+
+function isCenteredShip(type: string) {
+  const normalizedType = normalizeShipType(type);
+  return normalizedType === 'ancient' || normalizedType === 'guardian' || normalizedType === 'gcds';
+}
+
+function rotateAnchor(cx: number, cy: number, anchor: LayoutAnchor, scale: number, degrees: number) {
+  const radians = (Math.PI / 180) * degrees;
+  const x = anchor.dx * scale;
+  const y = anchor.dy * scale;
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  return {
+    x: cx + x * cos - y * sin,
+    y: cy + x * sin + y * cos,
+  };
+}
 
 interface GalaxyMapProps {
   gameState: GameState | null;
@@ -37,9 +182,7 @@ interface GalaxyMapProps {
   selectedMoveUnitIdx?: number | null;
   onSelectMoveUnit?: (idx: number | null) => void;
   onSelectMoveSector?: (sectorId: number | null) => void;
-  combatActiveSectorId?: number;
-  combatRetreatActions?: number[];
-  combatTargetActions?: number[];
+  showMapDebug: boolean;
 }
 
 export default function GalaxyMap({
@@ -69,12 +212,13 @@ export default function GalaxyMap({
   selectedMoveUnitIdx,
   onSelectMoveUnit,
   onSelectMoveSector,
-  combatActiveSectorId = 0,
-  combatRetreatActions = [],
-  combatTargetActions = [],
+  showMapDebug,
 }: GalaxyMapProps) {
   const [hoveredSector, setHoveredSector] = useState<Sector | null>(null);
   const [brokenImages, setBrokenImages] = useState<Set<number>>(new Set());
+  const [hoveredWarpLinkId, setHoveredWarpLinkId] = useState<string | null>(null);
+  const [selectedWarpLinkId, setSelectedWarpLinkId] = useState<string | null>(null);
+  const [isPanActive, setIsPanActive] = useState(false);
 
   // Influence targets: cell index -> actionId for quick lookup.
   const influencePlaceCells = useMemo(() => {
@@ -106,20 +250,6 @@ export default function GalaxyMap({
   // Move phase detection & target cells for highlighting
   const movePhase = gameState?.move_state?.phase ?? 'inactive';
   const inMovePhase = movePhase === 'choose_move' || movePhase === 'choose_warp_destination';
-
-  // Combat: retreat-destination cells (cell index -> actionId) and targetable
-  // ships (global unit_registry index -> actionId).
-  const combatRetreatCells = useMemo(() => {
-    const map = new Map<number, number>();
-    for (const a of combatRetreatActions) map.set(a - ACTION.COMBAT_RETREAT_TO_CELL_START, a);
-    return map;
-  }, [combatRetreatActions]);
-  const combatTargetUnits = useMemo(() => {
-    const map = new Map<number, number>();
-    for (const a of combatTargetActions) map.set(a - ACTION.COMBAT_DICE_TARGET_START, a);
-    return map;
-  }, [combatTargetActions]);
-  const inCombat = combatActiveSectorId > 0;
 
   // Pan/zoom state
   const [viewTransform, setViewTransform] = useState({ x: 0, y: 0, scale: INITIAL_SCALE });
@@ -179,6 +309,7 @@ export default function GalaxyMap({
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     if (e.button !== 0) return;
     isPanning.current = true;
+    setIsPanActive(true);
     const pt = screenToSVG(e.clientX, e.clientY);
     panStart.current = { x: pt.x, y: pt.y, tx: viewTransform.x, ty: viewTransform.y };
   }, [viewTransform, screenToSVG]);
@@ -195,7 +326,10 @@ export default function GalaxyMap({
     }));
   }, [screenToSVG]);
 
-  const handleMouseUp = useCallback(() => { isPanning.current = false; }, []);
+  const handleMouseUp = useCallback(() => {
+    isPanning.current = false;
+    setIsPanActive(false);
+  }, []);
 
   // Non-passive wheel listener
   useEffect(() => {
@@ -209,22 +343,30 @@ export default function GalaxyMap({
   const sectorImageUrl = (id: number): string | null =>
     (!brokenImages.has(id) && sectorImages[id]) || null;
 
-  const getUnitsInSector = (sectorId: number) => {
-    if (!gameState) return [];
-    return gameState.unit_registry.filter((unit) => unit.sector_id === sectorId);
-  };
+  const unitsBySector = useMemo(() => {
+    const map = new Map<number, UnitWithIndex[]>();
+    gameState?.unit_registry.forEach((unit, globalIdx) => {
+      const units = map.get(unit.sector_id) ?? [];
+      units.push({ unit, globalIdx });
+      map.set(unit.sector_id, units);
+    });
+    return map;
+  }, [gameState]);
+
+  const getUnitsInSector = useCallback((sectorId: number) => {
+    return (unitsBySector.get(sectorId) ?? []).map(({ unit }) => unit);
+  }, [unitsBySector]);
 
   const activeSectors: { sector: Sector; cx: number; cy: number }[] = useMemo(() => {
     const list: { sector: Sector; cx: number; cy: number }[] = [];
     if (gameState?.galaxy) {
       const mapSize = gameState.galaxy.length;
-      const offset = 7;
       for (let qIdx = 0; qIdx < mapSize; qIdx++) {
         for (let rIdx = 0; rIdx < mapSize; rIdx++) {
           const sector = gameState.galaxy[qIdx][rIdx];
           if (sector && sector.sector_id > 0) {
-            const q = qIdx - offset;
-            const r = rIdx - offset;
+            const q = qIdx - GALAXY_OFFSET;
+            const r = rIdx - GALAXY_OFFSET;
             const { cx, cy } = axialToPixel(q, r);
             list.push({ sector, cx, cy });
           }
@@ -234,9 +376,125 @@ export default function GalaxyMap({
     return list;
   }, [gameState]);
 
+  const shipRenderItems = useMemo<ShipRenderItem[]>(() => {
+    const items: ShipRenderItem[] = [];
+    const scale = (2 * (hexSize - 1.5)) / 1024;
+
+    for (const { sector, cx, cy } of activeSectors) {
+      const units = unitsBySector.get(sector.sector_id) ?? [];
+      if (units.length === 0) continue;
+
+      const layout = sectorLayouts[sector.sector_id];
+      const anchors = layout?.ship_anchors?.length ? layout.ship_anchors : FALLBACK_SHIP_ANCHORS;
+      const imgDeg = IMAGE_ROTATION_OFFSET - 60 * (sector.rotation ?? 0);
+
+      const stacks = new Map<string, UnitWithIndex[]>();
+      for (const entry of units) {
+        const type = normalizeShipType(String(entry.unit.type));
+        const key = `${entry.unit.player_id}:${type}`;
+        const members = stacks.get(key) ?? [];
+        members.push(entry);
+        stacks.set(key, members);
+      }
+
+      let anchorIndex = 0;
+      for (const [stackKey, members] of stacks) {
+        const [entry] = members;
+        const type = String(entry.unit.type);
+        const centered = isCenteredShip(type);
+        const index = anchorIndex;
+        if (!centered) anchorIndex++;
+        const anchor = anchors[index % anchors.length];
+        const wrapOffset = Math.floor(index / anchors.length) * 4;
+        const point = centered
+          ? { x: cx, y: cy }
+          : rotateAnchor(
+            cx,
+            cy,
+            { dx: anchor.dx + wrapOffset, dy: anchor.dy + wrapOffset },
+            scale,
+            imgDeg
+          );
+        items.push({
+          key: `${sector.sector_id}:${stackKey}`,
+          unit: entry.unit,
+          globalIdx: entry.globalIdx,
+          members,
+          sectorId: sector.sector_id,
+          x: point.x,
+          y: point.y,
+          size: getShipSize(type),
+          color: getShipColor(entry.unit),
+        });
+      }
+    }
+
+    return items;
+  }, [activeSectors, sectorLayouts, unitsBySector]);
+
+  const warpCells: WarpCell[] = useMemo(() => {
+    if (!gameState?.warped_universe || !Array.isArray(gameState.layout_kinds)) return [];
+    return gameState.layout_kinds
+      .map((kind, cell) => {
+        if (kind !== WARP_LAYOUT_KIND) return null;
+        const { q, r } = cellToAxial(cell);
+        return { cell, q, r, ...axialToPixel(q, r) };
+      })
+      .filter((cell): cell is WarpCell => cell !== null);
+  }, [gameState]);
+
+  const warpLinks: WarpLink[] = useMemo(() => {
+    const destCells = gameState?.warp_link_dest_cell;
+    const destDirs = gameState?.warp_link_dest_dir;
+    if (!gameState?.warped_universe || !Array.isArray(destCells) || !Array.isArray(destDirs)) {
+      return [];
+    }
+
+    const links: WarpLink[] = [];
+    const seen = new Set<string>();
+    for (let cell = 0; cell < GALAXY_MAP_SIZE * GALAXY_MAP_SIZE; cell++) {
+      for (let dir = 0; dir < 6; dir++) {
+        const idx = cell * 6 + dir;
+        const toCell = destCells[idx];
+        const toDir = destDirs[idx];
+        if (toCell === undefined || toDir === undefined || toCell === NO_WARP_LINK || toDir === NO_WARP_LINK) {
+          continue;
+        }
+        const a = `${cell}:${dir}`;
+        const b = `${toCell}:${toDir}`;
+        const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        links.push({
+          id: key,
+          fromCell: cell,
+          fromDir: dir,
+          toCell,
+          toDir,
+        });
+      }
+    }
+    return links;
+  }, [gameState]);
+
+  const warpDestByCellDir = useMemo(() => {
+    const map = new Map<string, WarpLink>();
+    for (const link of warpLinks) {
+      map.set(`${link.fromCell}:${link.fromDir}`, link);
+      map.set(`${link.toCell}:${link.toDir}`, {
+        id: link.id,
+        fromCell: link.toCell,
+        fromDir: link.toDir,
+        toCell: link.fromCell,
+        toDir: link.fromDir,
+      });
+    }
+    return map;
+  }, [warpLinks]);
+
   // For move targets: compute destination cell for each direction
   const moveDestCells = useMemo(() => {
-    const map = new Map<string, number>();
+    const map = new Map<string, { actionId: number; isWarp: boolean; linkId?: string }>();
     if (!moveTargetCells || selectedMoveUnitIdx == null || !gameState) return map;
     const idx = selectedMoveUnitIdx;
     const unit = gameState.unit_registry[idx];
@@ -244,14 +502,21 @@ export default function GalaxyMap({
     const sectorEntry = activeSectors.find(s => s.sector.sector_id === unit.sector_id);
     if (!sectorEntry) return map;
     const { q, r } = sectorEntry.sector.coords;
+    const sourceCell = axialToCell(q, r);
     for (const [dir, actionId] of moveTargetCells) {
       if (dir < 6) {
-        const [nq, nr] = axialNeighbor(q, r, dir);
-        map.set(`${nq},${nr}`, actionId);
+        const warpLink = warpDestByCellDir.get(`${sourceCell}:${dir}`);
+        if (warpLink) {
+          const dest = cellToAxial(warpLink.toCell);
+          map.set(`${dest.q},${dest.r}`, { actionId, isWarp: true, linkId: warpLink.id });
+        } else {
+          const [nq, nr] = axialNeighbor(q, r, dir);
+          map.set(`${nq},${nr}`, { actionId, isWarp: false });
+        }
       }
     }
     return map;
-  }, [moveTargetCells, selectedMoveUnitIdx, gameState, activeSectors]);
+  }, [moveTargetCells, selectedMoveUnitIdx, gameState, activeSectors, warpDestByCellDir]);
 
   // Center view on sector 1 (0,0) on first render with sectors
   useEffect(() => {
@@ -280,8 +545,8 @@ export default function GalaxyMap({
           .filter((a) => a >= ACTION.EXPLORE_ZONE_START)
           .map((a) => {
             const idx = a - ACTION.EXPLORE_ZONE_START;
-            const q = Math.floor(idx / 15) - 7;
-            const r = (idx % 15) - 7;
+            const q = Math.floor(idx / GALAXY_MAP_SIZE) - GALAXY_OFFSET;
+            const r = (idx % GALAXY_MAP_SIZE) - GALAXY_OFFSET;
             return { action: a, q, r, ...axialToPixel(q, r) };
           })
       : [];
@@ -318,33 +583,90 @@ export default function GalaxyMap({
 
   const exploreState = gameState?.explore_state;
 
-  const previewZone =
+  const previewZone = useMemo(() => (
     inRotationPreview && exploreState
       ? {
           q: exploreState.zone_q,
           r: exploreState.zone_r,
           ...axialToPixel(exploreState.zone_q, exploreState.zone_r),
         }
-      : null;
+      : null
+  ), [exploreState, inRotationPreview]);
 
-  const drawnTilePreviewZone = inSelectDrawnTile && exploreState && previewingDrawnTile !== null && previewingDrawnTileIndex !== null
-    ? {
-        q: exploreState.zone_q,
-        r: exploreState.zone_r,
-        ...axialToPixel(exploreState.zone_q, exploreState.zone_r),
-        previewSectorId: previewingDrawnTile,
-        previewTileIndex: previewingDrawnTileIndex,
+  const drawnTilePreviewZone = useMemo(() => (
+    inSelectDrawnTile && exploreState && previewingDrawnTile !== null && previewingDrawnTileIndex !== null
+      ? {
+          q: exploreState.zone_q,
+          r: exploreState.zone_r,
+          ...axialToPixel(exploreState.zone_q, exploreState.zone_r),
+          previewSectorId: previewingDrawnTile,
+          previewTileIndex: previewingDrawnTileIndex,
+        }
+      : null
+  ), [exploreState, inSelectDrawnTile, previewingDrawnTile, previewingDrawnTileIndex]);
+
+  const contextualWarpLinks = useMemo(() => {
+    if (warpLinks.length === 0) return [];
+
+    const linksById = new Map<string, WarpLink>();
+    for (const link of warpLinks) linksById.set(link.id, link);
+
+    const targetCells = new Set<number>();
+    for (const zone of legalZones) {
+      targetCells.add(axialToCell(zone.q, zone.r));
+    }
+    for (const cell of influencePlaceCells.keys()) targetCells.add(cell);
+    for (const cell of influenceReclaimCells.keys()) targetCells.add(cell);
+
+    const exactMoveLinkIds = new Set<string>();
+    for (const target of moveDestCells.values()) {
+      if (target.isWarp && target.linkId) exactMoveLinkIds.add(target.linkId);
+    }
+
+    const activeCells = new Set(
+      activeSectors.map(({ sector }) => axialToCell(sector.coords.q, sector.coords.r))
+    );
+
+    const out = new Map<string, WarpLink>();
+    for (const id of exactMoveLinkIds) {
+      const link = linksById.get(id);
+      if (link) out.set(link.id, link);
+    }
+
+    if (inZoneSelect || inInfluencePhase) {
+      for (const link of warpLinks) {
+        const fromTarget = targetCells.has(link.fromCell) && activeCells.has(link.toCell);
+        const toTarget = targetCells.has(link.toCell) && activeCells.has(link.fromCell);
+        if (fromTarget || toTarget) out.set(link.id, link);
       }
-    : null;
+    }
+
+    return [...out.values()];
+  }, [
+    activeSectors,
+    inInfluencePhase,
+    inZoneSelect,
+    influencePlaceCells,
+    influenceReclaimCells,
+    legalZones,
+    moveDestCells,
+    warpLinks,
+  ]);
+
+  const emphasizedWarpLink = useMemo(() => {
+    const linkId = hoveredWarpLinkId ?? selectedWarpLinkId;
+    return linkId ? warpLinks.find((link) => link.id === linkId) ?? null : null;
+  }, [hoveredWarpLinkId, selectedWarpLinkId, warpLinks]);
 
   const transformStr = `translate(${viewTransform.x},${viewTransform.y}) scale(${viewTransform.scale})`;
 
   const viewBox = useMemo(() => {
+    const activeWarpCells = warpCells.map(({ cx, cy }) => ({ cx, cy }));
     const fitCells = previewZone
-      ? [...activeSectors, ...legalZones, previewZone]
+      ? [...activeWarpCells, ...activeSectors, ...legalZones, previewZone]
       : drawnTilePreviewZone
-        ? [...activeSectors, ...legalZones, drawnTilePreviewZone]
-        : [...activeSectors, ...legalZones];
+        ? [...activeWarpCells, ...activeSectors, ...legalZones, drawnTilePreviewZone]
+        : [...activeWarpCells, ...activeSectors, ...legalZones];
 
     if (fitCells.length === 0) return '0 0 600 520';
     const xs = fitCells.map((c) => c.cx);
@@ -355,7 +677,7 @@ export default function GalaxyMap({
     const w = Math.max(...xs) - Math.min(...xs) + 2 * (hexSize + pad);
     const h = Math.max(...ys) - Math.min(...ys) + 2 * (hexSize + pad);
     return `${minX} ${minY} ${w} ${h}`;
-  }, [activeSectors, legalZones, previewZone, drawnTilePreviewZone]);
+  }, [activeSectors, legalZones, previewZone, drawnTilePreviewZone, warpCells]);
 
   if (!gameState) {
     return (
@@ -382,15 +704,31 @@ export default function GalaxyMap({
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseUp}
-        style={{ cursor: isPanning.current ? 'grabbing' : 'grab' }}
+        style={{ cursor: isPanActive ? 'grabbing' : 'grab' }}
       >
         <g transform={transformStr}>
+          {warpCells.map(({ cell, cx, cy }) => (
+            <polygon
+              key={`warp-cell-${cell}`}
+              points={getHexPoints(cx, cy, hexSize - 1.5)}
+              className="warp-region-cell"
+            />
+          ))}
+
+          {contextualWarpLinks.map((link) => (
+            <path
+              key={`warp-context-${link.id}`}
+              d={warpLinkPath(link)}
+              className="warp-link-path contextual"
+            />
+          ))}
+
           {activeSectors.map(({ sector, cx, cy }) => {
           const fillColor = getPlayerHexColor(sector.owner_id, sector.sector_id);
           const isCenter = sector.sector_id === 1;
           const units = getUnitsInSector(sector.sector_id);
-          const owned = sector.owner_id !== 255;
-          const hasHostiles = units.some((u) => u.player_id === 255);
+          const owned = sector.owner_id !== NPC_PLAYER_ID;
+          const hasHostiles = units.some((u) => u.player_id === NPC_PLAYER_ID);
           const stroke = isCenter
             ? '#eab308'
             : owned
@@ -456,68 +794,32 @@ export default function GalaxyMap({
                 style={{ pointerEvents: 'all' }}
               />
 
-              <text
-                x={cx}
-                y={cy - 6}
-                textAnchor="middle"
-                fill="#f8fafc"
-                fontSize="11px"
-                fontWeight="bold"
-                style={{ pointerEvents: 'none' }}
-              >
-                {sector.sector_id === 1 ? 'GCDS' : sector.sector_id}
-              </text>
+              {showMapDebug && (
+                <>
+                  <text
+                    x={cx}
+                    y={cy - 6}
+                    textAnchor="middle"
+                    fill="#f8fafc"
+                    fontSize="11px"
+                    fontWeight="bold"
+                    style={{ pointerEvents: 'none' }}
+                  >
+                    {sector.sector_id === 1 ? 'GCDS' : sector.sector_id}
+                  </text>
 
-              <text
-                x={cx}
-                y={cy + 8}
-                textAnchor="middle"
-                fill="#94a3b8"
-                fontSize="8px"
-                style={{ pointerEvents: 'none' }}
-              >
-                ({sector.coords.q},{sector.coords.r})
-              </text>
-
-              {units.length > 0 && (
-  <g transform={`translate(${cx}, ${cy + 18})`}>
-    {units.map((unit, ui) => {
-      const uColor = getPlayerColor(unit.player_id);
-      const globalIdx = gameState!.unit_registry.indexOf(unit);
-      const targetAction = combatTargetUnits.get(globalIdx);
-      const isTargetable = targetAction !== undefined;
-      const damage = unit.damage ?? 0;
-      return (
-        <g
-          key={ui}
-          transform={`translate(${ui * 12}, 0)`}
-          style={{ cursor: isTargetable ? 'pointer' : 'default' }}
-          onClick={isTargetable ? (e) => { e.stopPropagation(); submitAction(targetAction!); } : undefined}
-        >
-          {isTargetable && (
-            <circle cx={0} cy={0} r={9} fill="#ef4444" fillOpacity={0.25} stroke="#ef4444" strokeWidth={1.2}>
-              <animate attributeName="r" values="8;10;8" dur="1s" repeatCount="indefinite" />
-            </circle>
-          )}
-          <image
-            href={shipImageUrl(String(unit.type))}
-            width={14}
-            height={14}
-            x={-7}
-            y={-7}
-            style={{ opacity: 0.9, pointerEvents: isTargetable ? 'all' : 'none' }}
-            onError={(e) => { e.currentTarget.style.display = 'none'; }}
-          />
-          <circle cx={5} cy={5} r={3} fill={uColor} stroke="#fff" strokeWidth={0.5} />
-          {/* Damage cubes */}
-          {damage > 0 && Array.from({ length: Math.min(damage, 4) }, (_, di) => (
-            <rect key={di} x={-7 + di * 3.5} y={-11} width={3} height={3} rx={0.5} fill="#ef4444" stroke="#000" strokeWidth={0.3} />
-          ))}
-        </g>
-      );
-    })}
-  </g>
-)}
+                  <text
+                    x={cx}
+                    y={cy + 8}
+                    textAnchor="middle"
+                    fill="#94a3b8"
+                    fontSize="8px"
+                    style={{ pointerEvents: 'none' }}
+                  >
+                    ({sector.coords.q},{sector.coords.r})
+                  </text>
+                </>
+              )}
 
               {/* ── sector overlay: planet cubes, influence disk, structures ── */}
               {(() => {
@@ -607,8 +909,7 @@ export default function GalaxyMap({
 
               {/* ── Influence overlay: clickable sectors for place/reclaim ── */}
               {inInfluencePhase && (() => {
-                const mapSize = gameState?.galaxy.length ?? 15;
-                const cellIdx = (sector.coords.q + 7) * mapSize + (sector.coords.r + 7);
+                const cellIdx = (sector.coords.q + GALAXY_OFFSET) * GALAXY_MAP_SIZE + (sector.coords.r + GALAXY_OFFSET);
                 const placeAction = influencePlaceCells.get(cellIdx);
                 const reclaimAction = influenceReclaimCells.get(cellIdx);
                 if (!placeAction && !reclaimAction) return null;
@@ -638,47 +939,9 @@ export default function GalaxyMap({
                 );
               })()}
 
-              {/* ── Combat: battle sector outline ── */}
-              {inCombat && sector.sector_id === combatActiveSectorId && (
-                <polygon
-                  points={getHexPoints(cx, cy, r)}
-                  fill="none"
-                  stroke="#ef4444"
-                  strokeWidth={3}
-                  className="combat-battle"
-                  style={{ pointerEvents: 'none' }}
-                >
-                  <animate attributeName="stroke-opacity" values="1;0.4;1" dur="1.2s" repeatCount="indefinite" />
-                </polygon>
-              )}
-
-              {/* ── Combat: retreat-destination hexes (clickable) ── */}
-              {inCombat && combatRetreatCells.size > 0 && (() => {
-                const mapSize = gameState?.galaxy.length ?? 15;
-                const cellIdx = (sector.coords.q + 7) * mapSize + (sector.coords.r + 7);
-                const action = combatRetreatCells.get(cellIdx);
-                if (action === undefined) return null;
-                return (
-                  <polygon
-                    points={getHexPoints(cx, cy, r)}
-                    fill="#22c55e"
-                    fillOpacity={0.25}
-                    stroke="#22c55e"
-                    strokeWidth={2.5}
-                    strokeDasharray="5 3"
-                    className="combat-retreat"
-                    style={{ cursor: 'pointer' }}
-                    onClick={(e) => { e.stopPropagation(); submitAction(action); }}
-                    onMouseEnter={() => setHoveredSector(sector)}
-                    onMouseLeave={() => setHoveredSector(null)}
-                  />
-                );
-              })()}
-
               {/* ── Build target overlay: clickable sectors ── */}
               {inBuildTargetPhase && (() => {
-                const mapSize = gameState?.galaxy.length ?? 15;
-                const cellIdx = (sector.coords.q + 7) * mapSize + (sector.coords.r + 7);
+                const cellIdx = (sector.coords.q + GALAXY_OFFSET) * GALAXY_MAP_SIZE + (sector.coords.r + GALAXY_OFFSET);
                 const encodedIdx = (selectedBuildType ?? 0) * ACTION.GALAXY_CELL_COUNT + cellIdx;
                 if (!buildTargetCells.has(encodedIdx)) return null;
                 const actionId = ACTION.BUILD_CHOICE_START + encodedIdx;
@@ -730,20 +993,21 @@ export default function GalaxyMap({
               {/* ── Move destination highlight: hexes adjacent to selected unit ── */}
               {inMovePhase && movePhase === 'choose_move' && selectedMoveUnitIdx !== null && moveDestCells.size > 0 && (() => {
                 const cellKey = `${sector.coords.q},${sector.coords.r}`;
-                const targetAction = moveDestCells.get(cellKey);
-                if (!targetAction) return null;
+                const target = moveDestCells.get(cellKey);
+                if (!target) return null;
                 return (
                   <polygon
                     points={getHexPoints(cx, cy, r)}
-                    fill="#22c55e"
+                    fill={target.isWarp ? '#f59e0b' : '#22c55e'}
                     fillOpacity={0.25}
-                    stroke="#22c55e"
+                    stroke={target.isWarp ? '#f59e0b' : '#22c55e'}
                     strokeWidth={2.5}
-                    className="move-target"
+                    strokeDasharray={target.isWarp ? '4 3' : undefined}
+                    className={`move-target ${target.isWarp ? 'warp-route-target' : ''}`}
                     style={{ cursor: 'pointer' }}
                     onClick={(e) => {
                       e.stopPropagation();
-                      submitAction(targetAction);
+                      submitAction(target.actionId);
                     }}
                     onMouseEnter={() => setHoveredSector(sector)}
                     onMouseLeave={() => setHoveredSector(null)}
@@ -753,8 +1017,7 @@ export default function GalaxyMap({
 
               {/* ── Warp destination highlight ── */}
               {inMovePhase && movePhase === 'choose_warp_destination' && (() => {
-                const mapSize = gameState?.galaxy.length ?? 15;
-                const cellIdx = (sector.coords.q + 7) * mapSize + (sector.coords.r + 7);
+                const cellIdx = (sector.coords.q + GALAXY_OFFSET) * GALAXY_MAP_SIZE + (sector.coords.r + GALAXY_OFFSET);
                 const base = ACTION.MOVE_WARP_DESTINATION_START;
                 if (!legalActions.includes(base + cellIdx)) return null;
                 return (
@@ -779,6 +1042,44 @@ export default function GalaxyMap({
             </g>
           );
         })}
+
+        {warpLinks.flatMap((link) => {
+          const sourceGate = warpGateLine(link.fromCell, link.fromDir);
+          const destGate = warpGateLine(link.toCell, link.toDir);
+          const isActive = emphasizedWarpLink?.id === link.id;
+          const events = {
+            onMouseEnter: () => setHoveredWarpLinkId(link.id),
+            onMouseLeave: () => setHoveredWarpLinkId(null),
+            onMouseDown: (event: MouseEvent<SVGLineElement>) => {
+              event.stopPropagation();
+            },
+            onClick: (event: MouseEvent<SVGLineElement>) => {
+              event.stopPropagation();
+              setSelectedWarpLinkId((current) => current === link.id ? null : link.id);
+            },
+          };
+          return [
+            <line
+              key={`warp-gate-a-${link.id}`}
+              {...sourceGate}
+              className={`warp-gate ${isActive ? 'selected' : ''}`}
+              {...events}
+            />,
+            <line
+              key={`warp-gate-b-${link.id}`}
+              {...destGate}
+              className={`warp-gate ${isActive ? 'selected' : ''}`}
+              {...events}
+            />,
+          ];
+        })}
+
+        {emphasizedWarpLink && (
+          <path
+            d={warpLinkPath(emphasizedWarpLink)}
+            className="warp-link-path selected"
+          />
+        )}
 
         {inRotationPreview && previewZone && currentPreviewRotation !== null && (() => {
           const imgUrl = sectorImageUrl(selectedSectorId);
@@ -939,6 +1240,122 @@ export default function GalaxyMap({
             </text>
           </g>
         ))}
+
+        {shipRenderItems.map((ship) => {
+          const imageUrl = shipImageUrl(String(ship.unit.type));
+          const isStack = ship.members.length > 1;
+          const half = ship.size / 2;
+          const outlineSize = ship.size + SHIP_OUTLINE * 2;
+          const outlineHalf = outlineSize / 2;
+          const shipMaskId = `ship-mask-${ship.sectorId}-${ship.globalIdx}`;
+          const outlineMaskId = `ship-outline-mask-${ship.sectorId}-${ship.globalIdx}`;
+          const damage = ship.unit.damage ?? 0;
+          const badgeText = String(ship.members.length);
+          const badgeWidth = Math.max(10, 5 + badgeText.length * 5);
+          const badgeX = ship.x + half - 2;
+          const badgeY = ship.y - half - 8;
+
+          return (
+            <g
+              key={ship.key}
+              className="map-ship"
+              style={{ pointerEvents: 'none' }}
+            >
+              <mask
+                id={outlineMaskId}
+                x={ship.x - outlineHalf}
+                y={ship.y - outlineHalf}
+                width={outlineSize}
+                height={outlineSize}
+                maskUnits="userSpaceOnUse"
+              >
+                <image
+                  href={imageUrl}
+                  x={ship.x - outlineHalf}
+                  y={ship.y - outlineHalf}
+                  width={outlineSize}
+                  height={outlineSize}
+                  preserveAspectRatio="xMidYMid meet"
+                />
+              </mask>
+              <rect
+                x={ship.x - outlineHalf}
+                y={ship.y - outlineHalf}
+                width={outlineSize}
+                height={outlineSize}
+                fill="#020617"
+                fillOpacity={0.95}
+                mask={`url(#${outlineMaskId})`}
+              />
+
+              <mask
+                id={shipMaskId}
+                x={ship.x - half}
+                y={ship.y - half}
+                width={ship.size}
+                height={ship.size}
+                maskUnits="userSpaceOnUse"
+              >
+                <image
+                  href={imageUrl}
+                  x={ship.x - half}
+                  y={ship.y - half}
+                  width={ship.size}
+                  height={ship.size}
+                  preserveAspectRatio="xMidYMid meet"
+                />
+              </mask>
+              <rect
+                x={ship.x - half}
+                y={ship.y - half}
+                width={ship.size}
+                height={ship.size}
+                fill={ship.color}
+                mask={`url(#${shipMaskId})`}
+              />
+
+              {!isStack && damage > 0 && Array.from({ length: Math.min(damage, 4) }, (_, damageIdx) => (
+                <rect
+                  key={damageIdx}
+                  x={ship.x - half + damageIdx * 3.5}
+                  y={ship.y - half - 4.5}
+                  width={3}
+                  height={3}
+                  rx={0.5}
+                  fill="#ef4444"
+                  stroke="#020617"
+                  strokeWidth={0.4}
+                />
+              ))}
+
+              {isStack && (
+                <g style={{ pointerEvents: 'none' }}>
+                  <rect
+                    x={badgeX}
+                    y={badgeY}
+                    width={badgeWidth}
+                    height={11}
+                    rx={2}
+                    fill="#020617"
+                    stroke="#f8fafc"
+                    strokeWidth={0.75}
+                  />
+                  <text
+                    x={badgeX + badgeWidth / 2}
+                    y={badgeY + 8}
+                    textAnchor="middle"
+                    fill="#f8fafc"
+                    fontSize="9px"
+                    fontWeight="bold"
+                  >
+                    {badgeText}
+                  </text>
+                </g>
+              )}
+            </g>
+          );
+        })}
+
         </g>
       </svg>
 
@@ -963,7 +1380,7 @@ export default function GalaxyMap({
           <div className="galaxy-info-item">
             <span>Owner</span>
             <span>
-              {hoveredSector.owner_id === 255
+              {hoveredSector.owner_id === NPC_PLAYER_ID
                 ? 'Unowned (Neutral)'
                 : `${playerLabel(hoveredSector.owner_id)} (${gameState.players[hoveredSector.owner_id]?.species_id})`}
             </span>

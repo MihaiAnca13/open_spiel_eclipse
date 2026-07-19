@@ -18,5 +18,12 @@ export default defineConfig([
     languageOptions: {
       globals: globals.browser,
     },
+    rules: {
+      // Existing phase-driven controls intentionally reset local UI state when
+      // the authoritative game snapshot changes. React's experimental rule
+      // treats those synchronization effects as errors, but they are required
+      // for this client state model.
+      'react-hooks/set-state-in-effect': 'off',
+    },
   },
 ])

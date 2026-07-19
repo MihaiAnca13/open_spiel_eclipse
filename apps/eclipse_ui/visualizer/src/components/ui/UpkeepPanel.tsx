@@ -4,10 +4,11 @@
 // reclaim / return-track action ranges (see UpkeepLegalActions in eclipse.cc),
 // so decoding mirrors App.tsx's action-phase decoders.
 
-import { useMemo } from 'react';
+import { useCallback, useMemo } from 'react';
 import { ACTION, POP_TRACK_LABELS, TRADE_LABELS } from '../../actionTypes';
 import { INFLUENCE_UPKEEP, POPULATION_PRODUCTION_TABLE, POP_TRACK_MAX } from '../../utils/game';
 import type { GameState, Player, UpkeepState } from '../../types/game';
+import { GALAXY_MAP_SIZE } from '../../constants';
 
 interface Props {
   upkeep: UpkeepState | undefined;
@@ -31,11 +32,11 @@ export default function UpkeepPanel({
   const legal = useMemo(() => new Set(legalActions), [legalActions]);
   const step = upkeep?.step ?? 'inactive';
 
-  const cellToSectorId = (cell: number): number => {
-    const qIdx = Math.floor(cell / 15);
-    const rIdx = cell % 15;
-    return gameState.galaxy?.[qIdx]?.[rIdx]?.sector_id ?? 0;
-  };
+  const cellToSectorId = useCallback((cell: number): number => {
+    const qIdx = Math.floor(cell / GALAXY_MAP_SIZE);
+    const rIdx = cell % GALAXY_MAP_SIZE;
+    return gameState.galaxy[qIdx]?.[rIdx]?.sector_id ?? 0;
+  }, [gameState.galaxy]);
 
   const inRange = (id: number, start: number, end: number) => id >= start && id < end;
 
@@ -51,7 +52,7 @@ export default function UpkeepPanel({
         const track = rem % ACTION.COLONY_SHIP_TRACKS;
         return { id, sectorId: cellToSectorId(cellIdx), slotIdx, track };
       });
-  }, [legalActions, gameState]);
+  }, [cellToSectorId, legalActions]);
 
   const tradeActions = useMemo(
     () => legalActions.filter((id) => inRange(id, ACTION.TRADE_START, ACTION.COLONY_SHIP_START)),

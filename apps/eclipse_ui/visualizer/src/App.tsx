@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState, useCallback } from 'react';
 import './App.css';
-import { ImageHoverPreview, useImageHoverPreview } from './ImageHoverPreview';
+import { ImageHoverPreview } from './ImageHoverPreview';
+import { useImageHoverPreview } from './hooks/useImageHoverPreview';
 import { SPECIES_THEME, getPlayerColor } from './theme';
 import ActionPanel from './ActionPanel';
 import { ACTION } from './actionTypes';
 import { API_BASE, buildTechMarketRows, TECH_CATEGORIES, techImageUrl } from './types/lobby';
-import type { SetupSnapshot, Player, BuildCosts, ShipPartCatalog, DiscoveryCatalog } from './types/game';
+import type { SetupSnapshot, Player, BuildCosts, ShipPartCatalog, DiscoveryCatalog, DiscoveryTileDefinition, GameMetadata } from './types/game';
 
 // Custom Hooks
 import { useGameSocket } from './hooks/useGameSocket';
@@ -14,6 +15,8 @@ import { useSectorLayouts } from './hooks/useSectorLayouts';
 
 // Utils
 import { bagCount, EMPTY_LEGAL_ACTIONS, INFLUENCE_TOTAL, POPULATION_PRODUCTION_TABLE, POP_TRACK_MAX } from './utils/game';
+import { errorMessage } from './utils/errors';
+import { NPC_PLAYER_ID, GALAXY_MAP_SIZE } from './constants';
 
 // Components
 import SetupPanel from './components/setup/SetupPanel';
@@ -27,11 +30,12 @@ import InfluenceTrack from './components/ui/InfluenceTrack';
 import ColonyShips from './components/ui/ColonyShips';
 import TradePanel from './components/ui/TradePanel';
 import ResearchTracks from './ResearchTracks';
+import ShipLegend from './components/game/ShipLegend';
 
 type MainActionPreview = 'research' | 'build' | 'influence' | 'upgrade' | 'move' | 'explore';
 
 export interface AppProps {
-  initialMetadata: any;
+  initialMetadata: GameMetadata;
   initialSnapshot?: SetupSnapshot;
   mySeatIdx?: number;
   playerNames?: (string | null)[];
@@ -45,10 +49,14 @@ function App({
   playerNames = [],
   isHost = false,
 }: AppProps) {
-  const playerLabel = (pid: number) => playerNames[pid] || `Player ${pid + 1}`;
+  const playerLabel = useCallback(
+    (pid: number) => playerNames[pid] || `Player ${pid + 1}`,
+    [playerNames]
+  );
+  const showMapDebug = new URLSearchParams(window.location.search).get('mapDebug') === '1';
   const [rngSeed, setRngSeed] = useState<number>(initialSnapshot?.config.rng_seed ?? 42);
   const [numPlayers, setNumPlayers] = useState<number>(initialSnapshot?.config.players ?? 4);
-  const [gameMetadata] = useState<any>(initialMetadata);
+  const gameMetadata = initialMetadata;
   const [difficulty, setDifficulty] = useState<string>(initialMetadata.npc_difficulties?.[0] ?? 'Easy');
   const [warpedUniverse, setWarpedUniverse] = useState<boolean>(initialSnapshot?.config.warped_universe ?? false);
   const [snapshot, setSnapshot] = useState<SetupSnapshot | null>(initialSnapshot ?? null);
@@ -68,6 +76,7 @@ function App({
   const [builtShipsCount, setBuiltShipsCount] = useState<number>(0);
   const [selectedMoveUnitIdx, setSelectedMoveUnitIdx] = useState<number | null>(null);
   const [selectedMoveSectorId, setSelectedMoveSectorId] = useState<number | null>(null);
+  const [showShipLegend, setShowShipLegend] = useState<boolean>(true);
   const [previewAction, setPreviewAction] = useState<MainActionPreview | null>(null);
   const handleSelectBuildType = useCallback((type: number | null) => {
     setSelectedBuildType(type);
@@ -95,7 +104,10 @@ function App({
     return Object.fromEntries(Array.from({ length: 6 }, (_, i) => [i, i !== 0]));
   });
 
-  const getAiDefault = (playerId: number) => aiChoices[playerId] ?? (playerId !== 0);
+  const getAiDefault = useCallback(
+    (playerId: number) => aiChoices[playerId] ?? (playerId !== 0),
+    [aiChoices]
+  );
   const warpedUniverseSupported = numPlayers >= 3 && numPlayers <= 5;
 
   useEffect(() => {
@@ -134,7 +146,7 @@ function App({
         species: speciesChoices[playerId] || speciesList[playerId % speciesList.length],
         is_ai: getAiDefault(playerId)
       })),
-    [aiChoices, numPlayers, speciesChoices, speciesList]
+    [getAiDefault, numPlayers, speciesChoices, speciesList]
   );
 
   const handleInitializeStage1 = async () => {
@@ -158,8 +170,8 @@ function App({
       }
       const data = await response.json();
       setSnapshot(data);
-    } catch (err: any) {
-      setError(err.message || 'An unexpected error occurred');
+    } catch (err: unknown) {
+      setError(errorMessage(err, 'An unexpected error occurred'));
     } finally {
       setLoading(false);
     }
@@ -190,8 +202,8 @@ function App({
       const data = await response.json();
       setSnapshot(data);
       setSetupFinalized(true);
-    } catch (err: any) {
-      setError(err.message || 'An unexpected error occurred');
+    } catch (err: unknown) {
+      setError(errorMessage(err, 'An unexpected error occurred'));
     } finally {
       setLoading(false);
     }
@@ -228,7 +240,7 @@ function App({
   const sectorImages = useSectorAssets();
   const sectorLayouts = useSectorLayouts();
 
-  const submitAction = async (actionId: number): Promise<SetupSnapshot | null> => {
+  const submitAction = useCallback(async (actionId: number): Promise<SetupSnapshot | null> => {
     if (actionInProgress) return null;
     const isBuildAction = actionId >= ACTION.BUILD_CHOICE_START && actionId < ACTION.BUILD_END;
     setActionInProgress(true);
@@ -249,22 +261,22 @@ function App({
         if (isBuildAction) setBuiltShipsCount(prev => prev + 1);
         return updated as SetupSnapshot;
       }
-    } catch (err: any) {
-      setError(err.message || 'Action failed');
+    } catch (err: unknown) {
+      setError(errorMessage(err, 'Action failed'));
     } finally {
       setActionInProgress(false);
     }
     return null;
-  };
+  }, [actionInProgress, mySeatIdx]);
 
-  const submitActionSequence = async (actionIds: number[]) => {
+  const submitActionSequence = useCallback(async (actionIds: number[]) => {
     let updated: SetupSnapshot | null = null;
     for (const actionId of actionIds) {
       updated = await submitAction(actionId);
       if (!updated) break;
     }
     return updated;
-  };
+  }, [submitAction]);
 
   const getPlayerId = () => sessionStorage.getItem('eclipse_player_id') ?? '';
 
@@ -284,8 +296,8 @@ function App({
       }
       const data = await response.json();
       setDebugStateText(JSON.stringify(data.game_blob, null, 2));
-    } catch (err: any) {
-      setError(err.message || 'Dump failed');
+    } catch (err: unknown) {
+      setError(errorMessage(err, 'Dump failed'));
     } finally {
       setDebugBusy(false);
     }
@@ -312,8 +324,8 @@ function App({
       const updated = await response.json();
       if (updated) setSnapshot(updated as SetupSnapshot);
       setDebugStateText(JSON.stringify(gameBlob, null, 2));
-    } catch (err: any) {
-      setError(err.message || 'Load failed');
+    } catch (err: unknown) {
+      setError(errorMessage(err, 'Load failed'));
     } finally {
       setDebugBusy(false);
     }
@@ -351,12 +363,13 @@ function App({
     ? gameState?.players[snapshot.current_player]
     : undefined;
   const previewResearchActions = useMemo(() => {
-    if (!gameState || mySeatIdx < 0 || !gameMetadata.tech_catalog) return [];
+    const techCatalog = gameMetadata.tech_catalog;
+    if (!gameState || mySeatIdx < 0 || !techCatalog) return [];
     const player = gameState.players[mySeatIdx];
     if (!player) return [];
 
     const trackTileCount = (category: 'Military' | 'Grid' | 'Nano') =>
-      Object.entries(gameMetadata.tech_catalog).reduce((count: number, [, tech]: [string, any]) => {
+      Object.entries(techCatalog).reduce((count: number, [, tech]) => {
         const bit = BigInt(tech.order);
         const categoryMask =
           category === 'Military'
@@ -396,15 +409,23 @@ function App({
     return actions;
   }, [gameState, mySeatIdx, gameMetadata.tech_catalog]);
   const selectedSectorId = exploreState?.selected_sector_id ?? 0;
-  const findDiscoveryTileForSector = (sectorId: number) => {
+  const findDiscoveryTileForSector = (sectorId: number): DiscoveryTileDefinition | undefined => {
     if (!gameState || sectorId <= 0) return undefined;
     for (const row of gameState.galaxy) {
       const sector = row.find((candidate) => candidate.sector_id === sectorId);
-      if (!sector) continue;
-      if (sector.discovery_tile === undefined || sector.discovery_tile === 0 || sector.discovery_tile === 'None') {
+      if (!sector || !sector.discovery_tile_present) continue;
+      const raw = sector.discovery_tile;
+      if (raw === undefined || raw === 0 || raw === null || raw === 'None' || raw === 'none') {
         return undefined;
       }
-      return discoveryCatalog[String(sector.discovery_tile)];
+      const key = String(raw);
+      if (discoveryCatalog[key]) {
+        return discoveryCatalog[key];
+      }
+      // Fallback: search by id, slug, or name if the value is a string form.
+      return Object.values(discoveryCatalog).find(
+        (def) => def && (String(def.id) === key || def.slug === key || def.name === key)
+      );
     }
     return undefined;
   };
@@ -431,7 +452,7 @@ function App({
   const ancientsOnSelected =
     !!gameState &&
     selectedSectorId > 0 &&
-    gameState.unit_registry.some((u) => u.sector_id === selectedSectorId && u.player_id === 255);
+    gameState.unit_registry.some((u) => u.sector_id === selectedSectorId && u.player_id === NPC_PLAYER_ID);
 
   const confirmPreviewRotation = () => {
     if (currentPreviewRotation === null || !legalRotations.includes(currentPreviewRotation)) return;
@@ -439,9 +460,12 @@ function App({
   };
 
   // Bonus actions available this turn.
-  const legalTradeActions = isMyTurn
-    ? legalActions.filter(a => a >= ACTION.TRADE_START && a < ACTION.COLONY_SHIP_START)
-    : [];
+  const legalTradeActions = useMemo(
+    () => isMyTurn
+      ? legalActions.filter(a => a >= ACTION.TRADE_START && a < ACTION.COLONY_SHIP_START)
+      : [],
+    [isMyTurn, legalActions]
+  );
   const legalColonyShipActions = isMyTurn
     ? legalActions.filter(a => a >= ACTION.COLONY_SHIP_START && a < ACTION.INFLUENCE)
     : [];
@@ -454,18 +478,6 @@ function App({
     ? legalActions.filter(a => a >= ACTION.RECLAIM_FROM_CELL_START && a < ACTION.CHOOSE_RETURN_TRACK_START)
     : [];
 
-  // Combat overlays: retreat-destination hexes and targetable ships on the map.
-  const inCombatPhase = currentPhase === 'combat';
-  const combatRetreatActions = (isMyTurn && inCombatPhase)
-    ? legalActions.filter(a => a >= ACTION.COMBAT_RETREAT_TO_CELL_START && a < ACTION.COMBAT_DICE_TARGET_START)
-    : EMPTY_LEGAL_ACTIONS;
-  const combatTargetActions = (isMyTurn && inCombatPhase)
-    ? legalActions.filter(a => a >= ACTION.COMBAT_DICE_TARGET_START && a < ACTION.COMBAT_REP_SELECT_START)
-    : EMPTY_LEGAL_ACTIONS;
-  const combatActiveSectorId = (inCombatPhase && combatState && combatState.phase !== 'inactive')
-    ? combatState.active_sector_id
-    : 0;
-
   // Decode colony ship actions into (sectorId, slotIdx, track) for display.
   const colonyShipPlacements = legalColonyShipActions.map(actionId => {
     const encoded = actionId - ACTION.COLONY_SHIP_START;
@@ -473,8 +485,8 @@ function App({
     const rem = encoded % ACTION.COLONY_SHIP_CODES_PER_CELL;
     const slotIdx = Math.floor(rem / ACTION.COLONY_SHIP_TRACKS);
     const track = rem % ACTION.COLONY_SHIP_TRACKS;
-    const qIdx = Math.floor(cellIdx / 15);
-    const rIdx = cellIdx % 15;
+    const qIdx = Math.floor(cellIdx / GALAXY_MAP_SIZE);
+    const rIdx = cellIdx % GALAXY_MAP_SIZE;
     const sector = gameState?.galaxy[qIdx]?.[rIdx];
     return { actionId, sectorId: sector?.sector_id ?? 0, slotIdx, track };
   });
@@ -593,11 +605,12 @@ function App({
     }
   }, [buildState?.phase]);
 
+  const isChoosingBuild = buildState?.phase === 'choose_build';
   useEffect(() => {
-    if (buildState?.phase === 'choose_build') {
+    if (isChoosingBuild) {
       setBuiltShipsCount(0);
     }
-  }, [buildState?.phase === 'choose_build']);
+  }, [isChoosingBuild]);
 
   const handleStartPreviewAction = useCallback((actionId: number) => {
     if (actionId === ACTION.RESEARCH) setPreviewAction('research');
@@ -709,7 +722,7 @@ function App({
         {player.has_passed && <div className="economy-meta"><span className="economy-passed">passed</span></div>}
       </div>
     );
-  }, [gameState?.current_player, mySeatIdx, playerLabel, colonyShipPlacements, legalTradeActions, submitAction, gameMetadata]);
+  }, [gameState?.current_player, gameState?.scores, mySeatIdx, playerLabel, colonyShipPlacements, legalTradeActions, submitAction, gameMetadata]);
 
   return (
     <div className="app-container">
@@ -756,7 +769,7 @@ function App({
               {isStarted ? `R${gameState.current_round}` : 'Active:'}
             </span>
             {gameState.turn_order.map((playerId, idx) => {
-              if (playerId === 255) return null;
+              if (playerId === NPC_PLAYER_ID) return null;
               const player = gameState.players[playerId];
               const isActive = gameState.current_player === playerId;
               const passed = player?.has_passed;
@@ -785,6 +798,14 @@ function App({
                 <span className="stack-ring">III</span> {bagCount(gameState.sector_bag_outer)}
               </span>
             </span>
+            <button
+              className="legend-toggle"
+              onClick={() => setShowShipLegend(v => !v)}
+              title={showShipLegend ? 'Hide ship legend' : 'Show ship legend'}
+              aria-pressed={showShipLegend}
+            >
+              {showShipLegend ? '🛈 Hide' : '🛈 Legend'}
+            </button>
             <button
               className="tech-btn"
               onClick={() => setShowTechModal(true)}
@@ -823,25 +844,11 @@ function App({
               selectedMoveUnitIdx={selectedMoveUnitIdx}
               onSelectMoveUnit={setSelectedMoveUnitIdx}
               onSelectMoveSector={setSelectedMoveSectorId}
-              combatActiveSectorId={combatActiveSectorId}
-              combatRetreatActions={combatRetreatActions}
-              combatTargetActions={combatTargetActions}
+              showMapDebug={showMapDebug}
             />
 
-            {/* Floating combat panel */}
-            {isStarted && isMyTurn && !isTerminal && currentPhase === 'combat' && combatState && (
-              <div className="action-float">
-                <CombatPanel
-                  combat={combatState}
-                  gameState={gameState}
-                  discoveryCatalog={discoveryCatalog}
-                  legalActions={legalActions}
-                  actionStrings={actionStrings}
-                  busy={actionInProgress}
-                  onAction={submitAction}
-                  playerLabel={playerLabel}
-                />
-              </div>
+            {showShipLegend && (
+              <ShipLegend onClose={() => setShowShipLegend(false)} />
             )}
 
             {/* Floating upkeep / cleanup panel */}
@@ -941,6 +948,20 @@ function App({
         <div className="galaxy-main" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <span className="text-xs text-[#64748b]">Starting game…</span>
         </div>
+      )}
+
+      {isStarted && !isTerminal && currentPhase === 'combat' && combatState && combatState.phase !== 'inactive' && (
+        <CombatPanel
+          combat={combatState}
+          gameState={gameState}
+          sectorLayouts={sectorLayouts}
+          discoveryCatalog={discoveryCatalog}
+          legalActions={legalActions}
+          canAct={isMyTurn}
+          busy={actionInProgress}
+          onAction={submitAction}
+          playerLabel={playerLabel}
+        />
       )}
 
       {/* ── Player info modal ── */}

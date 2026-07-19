@@ -194,7 +194,7 @@ export default function ActionPanel({
                 {previewAction === 'influence' && 'Influence preview. Commit when you are ready to place or reclaim discs.'}
                 {previewAction === 'upgrade' && 'Upgrade preview. Commit when you are ready to modify your blueprints.'}
                 {previewAction === 'move' && 'Move preview. Commit when you are ready to choose ships and destinations.'}
-                {previewAction === 'explore' && `Explore preview. Ring sizes: ${RING_NAME[0]} ${legal.has(ACTION.EXPLORE) ? '' : ''}. Commit when you are ready to pick a zone.`}
+                {previewAction === 'explore' && 'Explore preview. Commit when you are ready to pick a zone.'}
               </span>
               {previewAction === 'build' && buildCosts && (
                 <div className="text-xs text-[#cbd5e1]">

@@ -1,4 +1,4 @@
-import type { Player, PlayerScoreBreakdown } from '../../types/game';
+import type { GameMetadata, Player, PlayerScoreBreakdown } from '../../types/game';
 import { getPlayerColor } from '../../theme';
 import { POPULATION_PRODUCTION_TABLE, POP_TRACK_MAX, INFLUENCE_TOTAL } from '../../utils/game';
 import PopulationTracks from '../ui/PopulationTracks';
@@ -16,7 +16,7 @@ interface PlayerCardProps {
   colonyShipPlacements: { actionId: number; sectorId: number; slotIdx: number; track: number }[];
   legalTradeActions: number[];
   submitAction: (actionId: number) => void;
-  gameMetadata: any;
+  gameMetadata: GameMetadata;
   scoreBreakdown?: PlayerScoreBreakdown;
 }
 

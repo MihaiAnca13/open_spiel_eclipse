@@ -4,8 +4,9 @@ import './index.css'
 import Root from './Root'
 import { API_BASE } from './types/lobby'
 import { SPECIES_THEME } from './theme'
+import type { GameMetadata } from './types/game'
 
-const DEFAULT_METADATA = {
+const DEFAULT_METADATA: GameMetadata = {
   species: Object.keys(SPECIES_THEME),
   tech_catalog: {},
   ship_part_catalog: {},
@@ -14,8 +15,8 @@ const DEFAULT_METADATA = {
 }
 
 async function bootstrap() {
-  const metadata = await fetch(`${API_BASE}/metadata`)
-    .then((r) => r.json())
+  const metadata: GameMetadata = await fetch(`${API_BASE}/metadata`)
+    .then((r) => r.json() as Promise<GameMetadata>)
     .catch(() => DEFAULT_METADATA)
 
   createRoot(document.getElementById('root')!).render(

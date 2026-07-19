@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
-import { ImageHoverPreview, useImageHoverPreview } from './ImageHoverPreview';
+import { ImageHoverPreview } from './ImageHoverPreview';
+import { useImageHoverPreview } from './hooks/useImageHoverPreview';
 import { API_BASE, WS_BASE, buildTechMarketRows, techImageUrl, TECH_CATEGORIES } from './types/lobby';
 import type { LobbyData, LobbySeat } from './types/lobby';
+import { errorMessage } from './utils/errors';
+import { NPC_PLAYER_ID } from './constants';
 import type { TechCatalog, TechMarketEntry } from './types/lobby';
 import { SPECIES_THEME } from './theme';
 import type { SetupSnapshot } from './types/game';
@@ -144,7 +147,7 @@ export default function LobbyScreen({ speciesList, techCatalog, difficulties, on
         const body = await res.json().catch(() => ({}));
         throw new Error(body.detail ?? 'Failed to join lobby');
       }
-    } catch (e: any) { setError(e.message); }
+    } catch (e: unknown) { setError(errorMessage(e, 'Failed to join lobby')); }
   }
 
   async function handleStartFromDebugState() {
@@ -174,8 +177,8 @@ export default function LobbyScreen({ speciesList, techCatalog, difficulties, on
       setJoined(true);
       startedRef.current = true;
       onStart(data.snapshot as SetupSnapshot, data.seat ?? 0, playerNames, true);
-    } catch (e: any) {
-      setError(e.message ?? 'Failed to start from state');
+    } catch (e: unknown) {
+      setError(errorMessage(e, 'Failed to start from state'));
     } finally {
       setBusy(false);
     }
@@ -201,7 +204,7 @@ export default function LobbyScreen({ speciesList, techCatalog, difficulties, on
           );
         }
       }
-    } catch (e: any) { setError(e.message); }
+    } catch (e: unknown) { setError(errorMessage(e, `Failed: ${path}`)); }
     finally { setBusy(false); }
   }
 
@@ -221,7 +224,7 @@ export default function LobbyScreen({ speciesList, techCatalog, difficulties, on
         const body = await res.json().catch(() => ({}));
         throw new Error(body.detail ?? 'Failed to change Warped Universe');
       }
-    } catch (e: any) { setError(e.message); }
+    } catch (e: unknown) { setError(errorMessage(e, 'Failed to change Warped Universe')); }
     finally { setBusy(false); }
   }
 
@@ -234,7 +237,7 @@ export default function LobbyScreen({ speciesList, techCatalog, difficulties, on
         const body = await res.json().catch(() => ({}));
         throw new Error(body.detail ?? 'Failed to claim seat');
       }
-    } catch (e: any) { setError(e.message); }
+    } catch (e: unknown) { setError(errorMessage(e, 'Failed to claim seat')); }
     finally { setBusy(false); }
   }
 
@@ -567,9 +570,9 @@ function SetupPhase({
   lobby, mySeatIdx, isHost, hasNoSeat, effectiveSpecies, techCatalog, busy, error,
   onSpeciesChange, onAiSpeciesChange, onFinalize, onReset, onClaimSeat,
 }: SetupPhaseProps) {
-  const stage1 = lobby.stage1_snapshot as any;
+  const stage1 = lobby.stage1_snapshot as SetupSnapshot | undefined;
   const rawTurnOrder: number[] = stage1?.state?.turn_order ?? [];
-  const turnOrder = rawTurnOrder.filter((id: number) => id !== 255);
+  const turnOrder = rawTurnOrder.filter((id: number) => id !== NPC_PLAYER_ID);
   const techTray: Record<string, TechMarketEntry> = stage1?.state?.tech_tray ?? {};
   const techRows = buildTechMarketRows(techCatalog, techTray);
   const { preview, beginPreview, clearPreview } = useImageHoverPreview();

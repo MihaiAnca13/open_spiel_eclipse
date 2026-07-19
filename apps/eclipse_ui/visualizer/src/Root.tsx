@@ -1,13 +1,13 @@
 import { useState } from 'react';
 import App from './App';
-import type { SetupSnapshot } from './types/game';
+import type { GameMetadata, SetupSnapshot } from './types/game';
 import LobbyScreen from './LobbyScreen';
 
 type View =
   | { screen: 'lobby' }
   | { screen: 'game'; snapshot: SetupSnapshot; mySeatIdx: number; playerNames: (string | null)[]; isHost: boolean };
 
-export default function Root({ initialMetadata }: { initialMetadata: any }) {
+export default function Root({ initialMetadata }: { initialMetadata: GameMetadata }) {
   const [view, setView] = useState<View>({ screen: 'lobby' });
 
   if (view.screen === 'game') {
