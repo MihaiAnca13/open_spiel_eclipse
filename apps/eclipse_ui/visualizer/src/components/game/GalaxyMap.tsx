@@ -13,7 +13,8 @@ import { NPC_PLAYER_ID, GALAXY_MAP_SIZE, GALAXY_OFFSET } from '../../constants';
 const INITIAL_SCALE = 1;
 const WARP_LAYOUT_KIND = 6;
 const NO_WARP_LINK = 255;
-const EDGE_ANGLES_DEG = [0, -60, -120, 180, 120, 60] as const;
+const EDGE_ANGLES_DEG = [30, -30, -90, -150, 150, 90] as const;
+const HEX_EDGE_RADIUS = (hexSize - 1.5) * Math.sqrt(3) / 2;
 const FALLBACK_SHIP_ANCHORS: LayoutAnchor[] = [
   { dx: -165, dy: 145 },
   { dx: -85, dy: 165 },
@@ -84,18 +85,18 @@ function axialToCell(q: number, r: number) {
   return (q + GALAXY_OFFSET) * GALAXY_MAP_SIZE + (r + GALAXY_OFFSET);
 }
 
-function warpEdgePoint(cell: number, dir: number, radius = hexSize - 5) {
+function warpEdgePoint(cell: number, dir: number) {
   const { q, r } = cellToAxial(cell);
   const { cx, cy } = axialToPixel(q, r);
   const angle = (Math.PI / 180) * (EDGE_ANGLES_DEG[dir as 0 | 1 | 2 | 3 | 4 | 5] ?? 0);
   return {
-    x: cx + Math.cos(angle) * radius,
-    y: cy + Math.sin(angle) * radius,
+    x: cx + Math.cos(angle) * HEX_EDGE_RADIUS,
+    y: cy + Math.sin(angle) * HEX_EDGE_RADIUS,
   };
 }
 
 function warpGateLine(cell: number, dir: number) {
-  const center = warpEdgePoint(cell, dir, hexSize - 3);
+  const center = warpEdgePoint(cell, dir);
   const angle = (Math.PI / 180) * ((EDGE_ANGLES_DEG[dir as 0 | 1 | 2 | 3 | 4 | 5] ?? 0) + 90);
   const half = 7;
   return {

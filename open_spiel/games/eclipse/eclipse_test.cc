@@ -2542,6 +2542,24 @@ void WarpedUniverseTest() {
   ::State s = es->RawState();
 
   SPIEL_CHECK_TRUE(s.warped_universe);
+  for (const Unit& unit : s.unit_registry) {
+    SPIEL_CHECK_TRUE(unit.type != ShipType::GUARDIAN);
+  }
+  for (const CanonicalPortalPairing& pair : CANONICAL_PORTAL_PAIRINGS) {
+    for (const auto& endpoint : {
+             std::pair{HexCoord{pair.qA, pair.rA}, pair.edgeA},
+             std::pair{HexCoord{pair.qB, pair.rB}, pair.edgeB}}) {
+      const HexCoord neighbor{
+          static_cast<int8_t>(endpoint.first.q + HEX_DIRECTIONS[endpoint.second].first),
+          static_cast<int8_t>(endpoint.first.r + HEX_DIRECTIONS[endpoint.second].second)};
+      const bool points_into_warp = std::any_of(
+          CANONICAL_WARP_CELLS.begin(), CANONICAL_WARP_CELLS.end(),
+          [&neighbor](const HexCoord& warp) {
+            return warp.q == neighbor.q && warp.r == neighbor.r;
+          });
+      SPIEL_CHECK_FALSE(points_into_warp);
+    }
+  }
 
   // Check that layout kinds are populated correctly
   // In 3p, missing player positions are 1, 3, 5.
@@ -2563,7 +2581,7 @@ void WarpedUniverseTest() {
   SPIEL_CHECK_TRUE(IsExplorableSlot(s, -1, 0));
 
   // Test virtual adjacency GetAdjacency for a portal pairing in Slice 5 (missing player 5, steps = 4)
-  // Canonical pairing index 0 is: { 2, -6, 3,  2, -6, 5 } (exit edge 3 <-> exit edge 5 of warp cell 2, -6)
+  // Canonical pairing index 0 is: { 0, -1, 0,  0, -1, 4 } (exit edge 0 <-> exit edge 4 of warp cell 0, -1)
   // Let's rotate this to missing player position 5 (steps = 4):
   // Helper to rotate CW (copied from state.h logic for test)
   auto rotate_cw_test = [](int8_t q, int8_t r, uint8_t steps) -> HexCoord {
@@ -2580,16 +2598,16 @@ void WarpedUniverseTest() {
   };
 
   uint8_t steps = (5 + 5) % 6; // pos 5 missing -> steps = 4 CW
-  HexCoord rot_A = rotate_cw_test(2, -6, steps); // rotated warp cell A
-  uint8_t edgeA = (3 + steps) % 6; // rotated exit edge A
+  HexCoord rot_A = rotate_cw_test(0, -1, steps); // rotated warp cell A
+  uint8_t edgeA = (0 + steps) % 6; // rotated exit edge A
 
   // Sector A coordinate (neighbor of warp cell A in direction edgeA)
   HexCoord sect_A{static_cast<int8_t>(rot_A.q + HEX_DIRECTIONS[edgeA].first),
                   static_cast<int8_t>(rot_A.r + HEX_DIRECTIONS[edgeA].second)};
   uint8_t opposite_edge_A = (edgeA + 3) % 6; // edge of sector A pointing back to warp
 
-  HexCoord rot_warp_B = rotate_cw_test(2, -6, steps);
-  uint8_t edgeB = (5 + steps) % 6;
+  HexCoord rot_warp_B = rotate_cw_test(0, -1, steps);
+  uint8_t edgeB = (4 + steps) % 6;
   HexCoord sect_B{static_cast<int8_t>(rot_warp_B.q + HEX_DIRECTIONS[edgeB].first),
                   static_cast<int8_t>(rot_warp_B.r + HEX_DIRECTIONS[edgeB].second)};
   uint8_t opposite_edge_B = (edgeB + 3) % 6;

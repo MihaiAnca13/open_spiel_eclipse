@@ -223,7 +223,7 @@ void ResolveInitialSetupRandomness(std::mt19937_64& rng,
     });
 
     const auto guardian_positions = GuardianPositionIndices(config.players);
-    if (!guardian_positions.empty()) {
+    if (!state.warped_universe && !guardian_positions.empty()) {
         std::vector<uint16_t> guardian_sectors = {271, 272, 273, 274};
         std::shuffle(guardian_sectors.begin(), guardian_sectors.end(), rng);
 

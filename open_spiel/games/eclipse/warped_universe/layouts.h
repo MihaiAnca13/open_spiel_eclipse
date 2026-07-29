@@ -170,7 +170,10 @@ inline constexpr std::array<HexCoord, 18> CANONICAL_WARP_CELLS = {{
     { 2, -5},
 }};
 
-// Canonical portal pairings within the canonical warp region frame
+// Canonical portal pairings within the canonical warp region frame. The warp
+// region has three equivalent orientations; these are the orientation selected
+// by the original pairing tool, with its gates closest to the galaxy center.
+// Edge indices use HEX_DIRECTIONS.
 struct CanonicalPortalPairing {
     int8_t qA, rA;
     uint8_t edgeA;
@@ -179,18 +182,18 @@ struct CanonicalPortalPairing {
 };
 
 inline constexpr std::array<CanonicalPortalPairing, 12> CANONICAL_PORTAL_PAIRINGS = {{
-    { 2, -6, 3,  2, -6, 5},
-    { 2, -6, 2,  2, -5, 4},
-    { 1, -5, 3,  2, -5, 5},
-    { 0, -5, 4,  2, -5, 0},
-    { 0, -5, 3,  1, -4, 5},
-    { 0, -5, 2,  1, -3, 4},
-    {-1, -4, 3,  1, -3, 5},
-    {-2, -4, 4,  1, -3, 0},
-    {-2, -4, 3,  0, -2, 5},
-    {-2, -4, 2,  0, -1, 4},
-    {-3, -3, 3,  0, -1, 5},
-    {-3, -3, 2,  0, -1, 0},
+    { 0, -1, 0,   0, -1, 4},
+    { 0, -1, 1,  -1, -1, 5},
+    { 0, -2, 0,  -1, -1, 4},
+    { 1, -3, 5,  -1, -1, 3},
+    { 1, -3, 0,  -1, -2, 4},
+    { 1, -3, 1,  -2, -2, 5},
+    { 1, -4, 0,  -2, -2, 4},
+    { 2, -5, 5,  -2, -2, 3},
+    { 2, -5, 0,  -2, -3, 4},
+    { 2, -5, 1,  -3, -3, 5},
+    { 2, -6, 0,  -3, -3, 4},
+    { 2, -6, 1,  -3, -3, 3},
 }};
 
 }  // namespace open_spiel::eclipse
