@@ -19,6 +19,7 @@
 #include "fixed_vector.h"
 #include "species.h"
 #include "discovery_tiles.h"
+#include "minor_species.h"
 #include "systems/actions/explore.h"
 #include "systems/actions/research.h"
 #include "systems/actions/build.h"
@@ -137,6 +138,9 @@ struct Player {
     // the WARP_PORTAL Rare Tech. Cleared once the tile is placed.
     bool warp_portal_eligible = false;
 
+    // Minor Species Ambassador Tiles owned (indices into MINOR_SPECIES_TABLE).
+    FixedVector<uint8_t, MINOR_SPECIES_COUNT> owned_minor_species;
+
     // Helper to check if a tech is owned (checks all 3 track masks).
     [[nodiscard]] bool has_tech(TechBit tech) const {
         uint64_t b = static_cast<uint64_t>(tech);
@@ -157,7 +161,7 @@ struct Player {
 
 static_assert(static_cast<size_t>(ShipType::STARBASE) + 1 == 4, "The first 4 ShipType values must map to blueprints index 0-3");
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Player, id, score, species_id, is_ai, has_passed, disks_on_sectors, disks_on_actions, resources, colony_ships_total, colony_ships_available, orbitals, monoliths, blueprints, reputation_track, trade_rate, extra_influence_discs, graveyard_counts, eliminated, researched_techs_military, researched_techs_grid, researched_techs_nano, ambassador_tiles_held, ambassador_tiles_pending_return, traitor_held, discovery_vp_tiles_kept, parts_inventory, warp_portal_eligible);
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Player, id, score, species_id, is_ai, has_passed, disks_on_sectors, disks_on_actions, resources, colony_ships_total, colony_ships_available, orbitals, monoliths, blueprints, reputation_track, trade_rate, extra_influence_discs, graveyard_counts, eliminated, researched_techs_military, researched_techs_grid, researched_techs_nano, ambassador_tiles_held, ambassador_tiles_pending_return, traitor_held, discovery_vp_tiles_kept, parts_inventory, warp_portal_eligible, owned_minor_species);
 
 struct UpkeepState {
     enum class Step : uint8_t {
@@ -240,6 +244,15 @@ struct State {
     // return-track choice after a break). Sub-state machine, free bonus action:
     // does not advance the turn until it returns to inactive.
     DiplomacyState diplomacy_state;
+
+    // The 4 Minor Species tiles selected at setup (indices into MINOR_SPECIES_TABLE).
+    // When a tile is formed with, it is removed from this pool.
+    FixedVector<uint8_t, MINOR_SPECIES_COUNT> minor_species_pool;
+
+    // Non-255 when a PLACE_POP_CUBE Minor Species formation is awaiting
+    // a Pop Track choice from this player. The player picks a track and
+    // the cube is placed immediately.
+    uint8_t minor_species_pending_track = 255;
 
     // Monotonic counter for Unit::arrival_order. Bumped whenever a unit is
     // added to unit_registry (setup, build, explore, move, warp). 0 is the
@@ -340,6 +353,8 @@ inline void to_json(nlohmann::json& j, const State& s) {
         {"upkeep_state", s.upkeep_state},
         {"combat_state", s.combat_state},
         {"diplomacy_state", s.diplomacy_state},
+        {"minor_species_pool", s.minor_species_pool},
+        {"minor_species_pending_track", s.minor_species_pending_track},
         {"next_arrival_order", s.next_arrival_order},
         {"warped_universe", s.warped_universe},
         {"layout_kinds", s.layout_kinds},
@@ -451,6 +466,13 @@ inline void from_json(const nlohmann::json& j, State& s) {
     } else {
         s.diplomacy_state = DiplomacyState{};
     }
+
+    if (j.contains("minor_species_pool")) {
+        j.at("minor_species_pool").get_to(s.minor_species_pool);
+    } else {
+        s.minor_species_pool.clear();
+    }
+    s.minor_species_pending_track = 255;
 
     if (j.contains("next_arrival_order")) {
         j.at("next_arrival_order").get_to(s.next_arrival_order);

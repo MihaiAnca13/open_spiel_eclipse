@@ -12,6 +12,7 @@
 #include "open_spiel/games/eclipse/species.h"
 #include "open_spiel/games/eclipse/systems/actions/bonus.h"
 #include "open_spiel/games/eclipse/systems/actions/diplomacy.h"
+#include "open_spiel/games/eclipse/systems/actions/minor_species_diplomacy.h"
 #include "open_spiel/games/eclipse/systems/actions/explore.h"
 #include "open_spiel/games/eclipse/systems/actions/research.h"
 #include "open_spiel/games/eclipse/systems/actions/build.h"
@@ -162,7 +163,19 @@ constexpr Action action_diplomacy_swap_end =
 constexpr Action action_diplomacy_accept = action_diplomacy_swap_end; // 10453
 constexpr Action action_diplomacy_decline = action_diplomacy_accept + 1; // 10454
 
-constexpr int num_distinct_actions = action_diplomacy_decline + 1; // 10455
+// ── Minor Species Diplomacy action IDs ─────────────────────────────────────
+// Free bonus action: form diplomatic relations with a minor species.
+// Encoding: action_minor_species_start + ms_idx (0..8)
+constexpr Action action_minor_species_start = action_diplomacy_decline + 1; // 10455
+constexpr Action action_minor_species_end =
+    action_minor_species_start + MINOR_SPECIES_COUNT; // 10464
+
+// PLACE_POP_CUBE track choice: 3 tracks (0=Money, 1=Science, 2=Materials).
+constexpr Action action_minor_species_track_start = action_minor_species_end; // 10464
+constexpr Action action_minor_species_track_end =
+    action_minor_species_track_start + POP_TRACK_COUNT; // 10467
+
+constexpr int num_distinct_actions = action_minor_species_track_end; // 10467
 
 const GameType game_type{
     /*short_name=*/"eclipse",
@@ -605,6 +618,19 @@ std::vector<Action> EclipseState::LegalActions() const {
     return DiplomacyLegalActions();
   }
 
+  // Minor Species PLACE_POP_CUBE track choice (free bonus sub-action).
+  if (s.minor_species_pending_track != 255) {
+    const ::Player& p = s.players[s.minor_species_pending_track];
+    std::vector<Action> track_actions;
+    if (p.resources.gold_prod > 0)
+        track_actions.push_back(action_minor_species_track_start + 0);
+    if (p.resources.science_prod > 0)
+        track_actions.push_back(action_minor_species_track_start + 1);
+    if (p.resources.materials_prod > 0)
+        track_actions.push_back(action_minor_species_track_start + 2);
+    return track_actions;
+  }
+
   if (s.upkeep_state.step != UpkeepState::Step::inactive) {
     return UpkeepLegalActions();
   }
@@ -668,6 +694,13 @@ std::vector<Action> EclipseState::LegalActions() const {
           actions.push_back(action_diplomacy_propose_start +
                             current_player * MAX_PLAYERS + p);
         }
+      }
+    }
+
+    // Minor Species formation (free bonus action; available in all player counts).
+    for (uint8_t ms_idx : s.minor_species_pool) {
+      if (can_form_minor_species(s, current_player, ms_idx)) {
+        actions.push_back(action_minor_species_start + ms_idx);
       }
     }
   }
@@ -1335,6 +1368,16 @@ std::string EclipseState::ActionToString(Player player, Action action_id) const 
   }
   if (action_id == action_diplomacy_accept) return "DIPLOMACY_ACCEPT";
   if (action_id == action_diplomacy_decline) return "DIPLOMACY_DECLINE";
+  if (action_id >= action_minor_species_start && action_id < action_minor_species_end) {
+    uint8_t ms_idx = action_id - action_minor_species_start;
+    if (ms_idx < MINOR_SPECIES_COUNT) {
+      return std::string("MINOR_SPECIES_FORM_") + MINOR_SPECIES_TABLE[ms_idx].name;
+    }
+  }
+  if (action_id >= action_minor_species_track_start && action_id < action_minor_species_track_end) {
+    static const char* kTrackNames[3] = {"MONEY", "SCIENCE", "MATERIALS"};
+    return std::string("MINOR_SPECIES_PLACE_POP_") + kTrackNames[action_id - action_minor_species_track_start];
+  }
   return "UNKNOWN_ACTION(" + std::to_string(action_id) + ")";
 }
 
@@ -2839,6 +2882,23 @@ void EclipseState::DoApplyAction(Action action_id) {
       // Stay in the diplomacy sub-state until it returns to inactive.
       return;
     }
+  } else if (action_id >= action_minor_species_start &&
+             action_id < action_minor_species_end) {
+    // Bonus action: minor species formation — no disc, no turn advance.
+    uint8_t ms_idx = action_id - action_minor_species_start;
+    if (ms_idx < MINOR_SPECIES_COUNT) {
+      begin_minor_species_formation(eclipse_state_, current_player, ms_idx);
+      // May set minor_species_pending_track for PLACE_POP_CUBE; stay in
+      // action phase for the track choice.
+    }
+    return;
+  } else if (action_id >= action_minor_species_track_start &&
+             action_id < action_minor_species_track_end) {
+    // PLACE_POP_CUBE track choice sub-action.
+    uint8_t track = action_id - action_minor_species_track_start;
+    SPIEL_CHECK_TRUE(execute_minor_species_pick_track(
+        eclipse_state_, current_player, static_cast<PopTrack>(track)));
+    return;
   }
 
   AdvanceTurn();

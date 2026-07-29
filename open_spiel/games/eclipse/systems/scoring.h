@@ -19,15 +19,16 @@ namespace open_spiel {
     namespace eclipse {
 
         struct PlayerScoreBreakdown {
-            int16_t reputation_vp = 0;
-            int16_t ambassador_vp = 0;
-            int16_t sector_vp     = 0;
-            int16_t monolith_vp   = 0;
-            int16_t discovery_vp  = 0;
-            int16_t tech_track_vp = 0;
-            int16_t traitor_vp    = 0;
-            int16_t species_vp    = 0;
-            int16_t total_vp      = 0;
+            int16_t reputation_vp    = 0;
+            int16_t ambassador_vp    = 0;
+            int16_t sector_vp        = 0;
+            int16_t monolith_vp      = 0;
+            int16_t discovery_vp     = 0;
+            int16_t tech_track_vp    = 0;
+            int16_t traitor_vp       = 0;
+            int16_t species_vp       = 0;
+            int16_t minor_species_vp = 0;
+            int16_t total_vp         = 0;
         };
 
         inline void to_json(nlohmann::json& j, const PlayerScoreBreakdown& sb) {
@@ -40,6 +41,7 @@ namespace open_spiel {
                 {"tech_track_vp", sb.tech_track_vp},
                 {"traitor_vp", sb.traitor_vp},
                 {"species_vp", sb.species_vp},
+                {"minor_species_vp", sb.minor_species_vp},
                 {"total_vp", sb.total_vp}
             };
         }

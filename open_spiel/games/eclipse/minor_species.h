@@ -31,31 +31,20 @@ struct MinorSpeciesData {
     uint8_t ability_param;       // Discount magnitude (1 or 2), or N/A when unused
 };
 
-// Data extracted from apps/eclipse_ui/minor_species.md.
-// Money costs are not visible in the markdown text (they live in icon
-// images in the rulebook); left as 0 here pending verification.
-//   1. 1 VP per Reputation Tile
-//   2. -2 Materials for Dreadnoughts; 1 VP
-//   3. 1 VP per Ambassador Tile (including itself)
-//   4. -1 Materials for Orbitals; 1 VP
-//   5. 3 VP
-//   6. -2 Materials for Monoliths; 1 VP
-//   7. Place 1 Pop Cube from a chosen track; 1 VP
-//   8. -1 Science for Researching Techs (min cost still applies); 1 VP
-//   9. -1 Materials for Cruisers; 1 VP
+static constexpr uint8_t MINOR_SPECIES_COUNT = 9;
+
 static const MinorSpeciesData MINOR_SPECIES_TABLE[] = {
-    { "Minor Species 1", 0, 0, MinorSpeciesAbility::VP_PER_REPUTATION,    0 },
-    { "Minor Species 2", 0, 1, MinorSpeciesAbility::DISCOUNT_DREADNOUGHT, 2 },
-    { "Minor Species 3", 0, 0, MinorSpeciesAbility::VP_PER_AMBASSADOR,    0 },
-    { "Minor Species 4", 0, 1, MinorSpeciesAbility::DISCOUNT_ORBITAL,     1 },
-    { "Minor Species 5", 0, 3, MinorSpeciesAbility::FLAT_VP,              3 },
-    { "Minor Species 6", 0, 1, MinorSpeciesAbility::DISCOUNT_MONOLITH,    2 },
-    { "Minor Species 7", 0, 1, MinorSpeciesAbility::PLACE_POP_CUBE,       0 },
-    { "Minor Species 8", 0, 1, MinorSpeciesAbility::DISCOUNT_RESEARCH,    1 },
-    { "Minor Species 9", 0, 1, MinorSpeciesAbility::DISCOUNT_CRUISER,     1 },
+    { "Reputation Savants",       8, 0, MinorSpeciesAbility::VP_PER_REPUTATION,    0 },
+    { "Dreadnought Allies",       4, 1, MinorSpeciesAbility::DISCOUNT_DREADNOUGHT, 2 },
+    { "Ambassador Glyphs",        4, 0, MinorSpeciesAbility::VP_PER_AMBASSADOR,    0 },
+    { "Orbital Architects",       4, 1, MinorSpeciesAbility::DISCOUNT_ORBITAL,     1 },
+    { "Neutron Star Cult",        8, 3, MinorSpeciesAbility::FLAT_VP,              3 },
+    { "Monolith Patrons",         6, 1, MinorSpeciesAbility::DISCOUNT_MONOLITH,    2 },
+    { "Populous Traders",         9, 1, MinorSpeciesAbility::PLACE_POP_CUBE,       0 },
+    { "Quantum Sages",            4, 1, MinorSpeciesAbility::DISCOUNT_RESEARCH,    1 },
+    { "Cruiser Cartel",           4, 1, MinorSpeciesAbility::DISCOUNT_CRUISER,     1 },
 };
 
-static constexpr size_t MINOR_SPECIES_COUNT =
-    sizeof(MINOR_SPECIES_TABLE) / sizeof(MINOR_SPECIES_TABLE[0]);
+
 
 #endif // ECLIPSE_MINOR_SPECIES_H

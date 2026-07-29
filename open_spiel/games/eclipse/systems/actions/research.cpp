@@ -7,6 +7,7 @@
 
 #include "../../state.h"
 #include "../../tech.h"
+#include "../../minor_species.h"
 
 
 namespace open_spiel::eclipse {
@@ -37,6 +38,15 @@ uint8_t calculate_research_cost(const ::Player& player, const TechDefinition& te
     // Discount = number of tiles already on target track (standard + rare).
     // Rare techs both give and receive discounts just like standard techs.
     uint8_t discount = get_track_tile_count(player, target_track);
+
+    // Minor Species DISCOUNT_RESEARCH: subtract ability_param from cost
+    // (rulebook: minimum science cost still applies).
+    for (uint8_t ms_idx : player.owned_minor_species) {
+        const MinorSpeciesData& ms = MINOR_SPECIES_TABLE[ms_idx];
+        if (ms.ability == MinorSpeciesAbility::DISCOUNT_RESEARCH) {
+            discount += ms.ability_param;
+        }
+    }
 
     int16_t cost = static_cast<int16_t>(tech_def.base_cost) - discount;
     return static_cast<uint8_t>(std::max(static_cast<int16_t>(tech_def.min_cost), cost));

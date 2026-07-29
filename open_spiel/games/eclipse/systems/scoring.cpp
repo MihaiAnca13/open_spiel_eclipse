@@ -7,6 +7,7 @@
 #include "../galaxy.h"
 #include "../types.h"
 #include "../species.h"
+#include "../minor_species.h"
 
 using open_spiel::eclipse::ReputationSlot;
 
@@ -126,10 +127,37 @@ PlayerScoreBreakdown compute_player_score(const ::State& state, uint8_t player_i
         score.species_vp += active_ancients_count;
     }
 
+    // 8. MINOR SPECIES AMBASSADOR TILES
+    for (uint8_t ms_idx : player.owned_minor_species) {
+        const MinorSpeciesData& ms = MINOR_SPECIES_TABLE[ms_idx];
+        switch (ms.ability) {
+            case MinorSpeciesAbility::VP_PER_REPUTATION:
+                // Count non-ambassador Reputation Tiles on the track.
+                for (const auto& slot : player.reputation_track) {
+                    if (!slot.holds_ambassador && slot.rep_value != ReputationTiles::NONE) {
+                        score.minor_species_vp += 1;
+                    }
+                }
+                break;
+            case MinorSpeciesAbility::VP_PER_AMBASSADOR:
+                // Count Ambassador Tiles including itself.
+                score.minor_species_vp +=
+                    static_cast<int16_t>(player.ambassador_tiles_held) + 1;
+                break;
+            case MinorSpeciesAbility::FLAT_VP:
+                score.minor_species_vp += static_cast<int16_t>(ms.ability_param);
+                break;
+            default:
+                // All other tiles grant end_vp flat points.
+                score.minor_species_vp += static_cast<int16_t>(ms.end_vp);
+                break;
+        }
+    }
+
     // Total absolute compilation
     score.total_vp = score.reputation_vp + score.ambassador_vp + score.sector_vp +
                      score.monolith_vp + score.discovery_vp + score.tech_track_vp +
-                     score.traitor_vp + score.species_vp;
+                     score.traitor_vp + score.species_vp + score.minor_species_vp;
 
     return score;
 }

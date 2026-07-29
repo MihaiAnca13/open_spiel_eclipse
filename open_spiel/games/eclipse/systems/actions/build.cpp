@@ -11,6 +11,7 @@
 #include "open_spiel/games/eclipse/sectors.h"
 #include "open_spiel/games/eclipse/species.h"
 #include "open_spiel/games/eclipse/tech.h"
+#include "open_spiel/games/eclipse/minor_species.h"
 
 namespace open_spiel::eclipse
 {
@@ -84,16 +85,46 @@ namespace open_spiel::eclipse
         // Check if the species is Mechanema for discount structures
         bool is_mechanema = (player.species_id == Species::MECHANEMA);
 
+        int16_t cost;
         switch (type)
         {
-        case BuildType::INTERCEPTOR: return is_mechanema ? 2 : 3;
-        case BuildType::CRUISER: return is_mechanema ? 4 : 5;
-        case BuildType::DREADNOUGHT: return is_mechanema ? 7 : 8;
-        case BuildType::STARBASE: return is_mechanema ? 2 : 3;
-        case BuildType::ORBITAL: return is_mechanema ? 3 : 4;
-        case BuildType::MONOLITH: return is_mechanema ? 8 : 10;
+        case BuildType::INTERCEPTOR: cost = is_mechanema ? 2 : 3; break;
+        case BuildType::CRUISER:     cost = is_mechanema ? 4 : 5; break;
+        case BuildType::DREADNOUGHT: cost = is_mechanema ? 7 : 8; break;
+        case BuildType::STARBASE:    cost = is_mechanema ? 2 : 3; break;
+        case BuildType::ORBITAL:     cost = is_mechanema ? 3 : 4; break;
+        case BuildType::MONOLITH:    cost = is_mechanema ? 8 : 10; break;
+        default: return 255;
         }
-        return 255;
+
+        // Apply minor species discounts.
+        for (uint8_t ms_idx : player.owned_minor_species) {
+            const MinorSpeciesData& ms = MINOR_SPECIES_TABLE[ms_idx];
+            switch (ms.ability) {
+                case MinorSpeciesAbility::DISCOUNT_DREADNOUGHT:
+                    if (type == BuildType::DREADNOUGHT)
+                        cost -= static_cast<int16_t>(ms.ability_param);
+                    break;
+                case MinorSpeciesAbility::DISCOUNT_CRUISER:
+                    if (type == BuildType::CRUISER)
+                        cost -= static_cast<int16_t>(ms.ability_param);
+                    break;
+                case MinorSpeciesAbility::DISCOUNT_ORBITAL:
+                    if (type == BuildType::ORBITAL)
+                        cost -= static_cast<int16_t>(ms.ability_param);
+                    break;
+                case MinorSpeciesAbility::DISCOUNT_MONOLITH:
+                    if (type == BuildType::MONOLITH)
+                        cost -= static_cast<int16_t>(ms.ability_param);
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        // Minimum cost is 1 (even for infrastructure; rulebook p.24: costs
+        // cannot be reduced below 1).
+        return cost > 0 ? static_cast<uint8_t>(cost) : 1;
     }
 
     bool can_build(const ::State& state, const uint8_t player_id, const BuildType type, const uint8_t galaxy_cell_idx)

@@ -94,6 +94,8 @@ set(GAME_SOURCES
   eclipse/systems/actions/bonus.h
   eclipse/systems/actions/diplomacy.cpp
   eclipse/systems/actions/diplomacy.h
+  eclipse/systems/actions/minor_species_diplomacy.cpp
+  eclipse/systems/actions/minor_species_diplomacy.h
   eclipse/systems/actions/explore.cpp
   eclipse/systems/actions/explore.h
   eclipse/systems/actions/research.cpp

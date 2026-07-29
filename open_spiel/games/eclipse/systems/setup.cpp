@@ -183,6 +183,16 @@ void ResolveInitialSetupRandomness(std::mt19937_64& rng,
         state.sector_bag_outer |= (1U << outer_indices[i]);
     }
 
+    // 5.5. Randomly select 4 Minor Species tiles for the pool (rulebook: shuffle
+    //       all 9, randomly pick 4 for the play area).
+    state.minor_species_pool.clear();
+    std::vector<uint8_t> all_ms(MINOR_SPECIES_COUNT);
+    std::iota(all_ms.begin(), all_ms.end(), 0);
+    std::shuffle(all_ms.begin(), all_ms.end(), rng);
+    for (uint8_t i = 0; i < 4 && i < MINOR_SPECIES_COUNT; ++i) {
+        state.minor_species_pool.push_back(all_ms[i]);
+    }
+
     // 6. Populate the fixed galaxy sectors resolved during setup.
     state.galaxy = Galaxy{};
     state.unit_registry.clear();
