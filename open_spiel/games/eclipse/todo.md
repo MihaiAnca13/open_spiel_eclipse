@@ -1,5 +1,5 @@
 - [x] integrate scoring
-- [ ] initiative? (same player ship order selection?)
+- [x] initiative? (same player ship order selection?)
 - [x] traitor card  
 - [x] diplomacy
 - [x] discovery tiles (parts)

@@ -1509,6 +1509,333 @@ void CombatDiceChanceFlowTest() {
   SPIEL_CHECK_GT(combat_rolls, 0);    // dice resolved as chance nodes
 }
 
+void TiedInitiativeOrderTest() {
+  // Player 0 has Interceptor + Cruiser (both initiative 0) vs Player 1's
+  // Interceptor in the same sector. Player 1 (defender, earliest arrival)
+  // fires first. Player 0's two groups are tied (same initiative, same
+  // player), so the engine asks player 0 to choose firing order before any
+  // of their groups fire.
+
+  std::shared_ptr<const Game> game = LoadEclipseGame(2, 7);
+  std::unique_ptr<State> state = game->NewInitialState();
+  state->ApplyAction(0);  // resolve setup
+
+  EclipseState* eclipse_state = static_cast<EclipseState*>(state.get());
+  ::State& raw = const_cast<::State&>(eclipse_state->RawState());
+  raw.turn_order[0] = 0;
+  raw.turn_order[1] = 1;
+  raw.current_player = 0;
+  raw.current_round = 1;
+  for (int p = 0; p < 2; ++p) {
+    raw.players[p].resources.gold = 5;
+    raw.players[p].colony_ships_total = 0;
+    raw.players[p].colony_ships_available = 0;
+    // Give each ship type one cannon die so they can actually fire.
+    raw.players[p].blueprints[static_cast<size_t>(ShipType::INTERCEPTOR)]
+        .total_stats.cannons[0] = 1;
+  }
+  // Player 0's Cruiser also gets the same cannons.
+  raw.players[0].blueprints[static_cast<size_t>(ShipType::CRUISER)]
+      .total_stats.cannons[0] = 1;
+
+  // Force all ships to initiative 0 so Interceptor and Cruiser tie.
+  for (int p = 0; p < 2; ++p) {
+    raw.players[p].blueprints[static_cast<size_t>(ShipType::INTERCEPTOR)]
+        .total_stats.initiative = 0;
+  }
+  raw.players[0].blueprints[static_cast<size_t>(ShipType::CRUISER)]
+      .total_stats.initiative = 0;
+
+  // Pick a real sector and stage ships.
+  uint16_t battle_sector = 0;
+  for (const Unit& u : raw.unit_registry) {
+    if (u.player_id == 0 && u.sector_id != 0) {
+      battle_sector = u.sector_id;
+      break;
+    }
+  }
+  SPIEL_CHECK_GT(battle_sector, 0);
+
+  // Player 1 ships arrive first (defender), player 0 later (attacker).
+  for (int p = 1; p >= 0; --p) {
+    Unit interceptor{};
+    interceptor.player_id = static_cast<uint8_t>(p);
+    interceptor.type = ShipType::INTERCEPTOR;
+    interceptor.sector_id = battle_sector;
+    interceptor.damage = 0;
+    interceptor.arrival_order = raw.AllocateArrivalOrder();
+    raw.unit_registry.push_back(interceptor);
+  }
+  // Player 0 also has a Cruiser (same initiative as their Interceptor).
+  Unit cruiser{};
+  cruiser.player_id = 0;
+  cruiser.type = ShipType::CRUISER;
+  cruiser.sector_id = battle_sector;
+  cruiser.damage = 0;
+  cruiser.arrival_order = raw.AllocateArrivalOrder();
+  raw.unit_registry.push_back(cruiser);
+
+  // End the action phase; combat begins.
+  state->ApplyAction(FindActionByName(*state, "PASS"));
+  state->ApplyAction(FindActionByName(*state, "PASS"));
+  SPIEL_CHECK_TRUE(raw.current_phase == RoundPhase::COMBAT);
+
+  bool saw_ship_order = false;
+  int combat_rolls = 0;
+  int steps = 0;
+  const int kMaxSteps = 8000;
+  while (!state->IsTerminal() &&
+         raw.current_phase == RoundPhase::COMBAT && steps < kMaxSteps) {
+    ++steps;
+    if (state->IsChanceNode()) {
+      const ActionsAndProbs outcomes = state->ChanceOutcomes();
+      SPIEL_CHECK_GT(outcomes.size(), 0);
+      double sum = 0.0;
+      for (const auto& [a, p] : outcomes) sum += p;
+      SPIEL_CHECK_TRUE(std::abs(sum - 1.0) < 1e-9);
+      const Action chosen = outcomes[0].first;
+      if (state->ActionToString(kChancePlayerId, chosen).rfind("COMBAT_ROLL", 0) ==
+          0) {
+        ++combat_rolls;
+      }
+      state->ApplyAction(chosen);
+    } else {
+      const std::vector<Action> legal = state->LegalActions();
+      SPIEL_CHECK_GT(legal.size(), 0);
+      // Look for the ship-order action: if present, choose the first one (which
+      // fires Interceptor first). Record that we saw it.
+      Action chosen = legal[0];
+      for (Action a : legal) {
+        const std::string name =
+            state->ActionToString(state->CurrentPlayer(), a);
+        if (name.rfind("COMBAT_SHIP_ORDER_", 0) == 0) {
+          if (!saw_ship_order) {
+            // On first encounter, pick the first ship order action.
+            chosen = a;
+            saw_ship_order = true;
+          }
+          break;
+        }
+      }
+      state->ApplyAction(chosen);
+    }
+  }
+  SPIEL_CHECK_LT(steps, kMaxSteps);
+  SPIEL_CHECK_GT(combat_rolls, 0);
+  SPIEL_CHECK_TRUE(saw_ship_order);  // the key assertion: player 0 was asked
+}
+
+void TiedInitiativeMissileEdgeTest() {
+  // Edge case: missile phase destroys one of the tied groups before the
+  // engagement phase. Player 0 has INT + CR (tied initiative 0). Player 1
+  // has an INT (initiative 2) with missiles. Player 1 fires missiles first
+  // (higher initiative). If missiles kill player 0's INT, only CR remains
+  // in the tied batch → no ship-order question needed. If missiles don't
+  // kill anything, normal ship-order flow happens. Either way, no hang.
+
+  std::shared_ptr<const Game> game = LoadEclipseGame(2, 7);
+  std::unique_ptr<State> state = game->NewInitialState();
+  state->ApplyAction(0);
+
+  EclipseState* eclipse_state = static_cast<EclipseState*>(state.get());
+  ::State& raw = const_cast<::State&>(eclipse_state->RawState());
+  raw.turn_order[0] = 0;
+  raw.turn_order[1] = 1;
+  raw.current_player = 0;
+  raw.current_round = 1;
+  for (int p = 0; p < 2; ++p) {
+    raw.players[p].resources.gold = 5;
+    raw.players[p].colony_ships_total = 0;
+    raw.players[p].colony_ships_available = 0;
+    raw.players[p].blueprints[static_cast<size_t>(ShipType::INTERCEPTOR)]
+        .total_stats.cannons[0] = 1;
+  }
+  raw.players[0].blueprints[static_cast<size_t>(ShipType::CRUISER)]
+      .total_stats.cannons[0] = 1;
+  for (int p = 0; p < 2; ++p) {
+    raw.players[p].blueprints[static_cast<size_t>(ShipType::INTERCEPTOR)]
+        .total_stats.initiative = 0;
+  }
+  raw.players[0].blueprints[static_cast<size_t>(ShipType::CRUISER)]
+      .total_stats.initiative = 0;
+  // Player 1's Interceptor has a strong missile battery (guarantees dice
+  // are queued during missile phase, but hits are stochastic).
+  raw.players[1].blueprints[static_cast<size_t>(ShipType::INTERCEPTOR)]
+      .total_stats.missiles[0] = 4;  // 4 yellow missile dice
+  // Player 1's Interceptor has initiative 2 (higher than player 0's 0)
+  // so missiles fire first.
+  raw.players[1].blueprints[static_cast<size_t>(ShipType::INTERCEPTOR)]
+      .total_stats.initiative = 2;
+
+  uint16_t battle_sector = 0;
+  for (const Unit& u : raw.unit_registry) {
+    if (u.player_id == 0 && u.sector_id != 0) {
+      battle_sector = u.sector_id;
+      break;
+    }
+  }
+  SPIEL_CHECK_GT(battle_sector, 0);
+
+  for (int p = 1; p >= 0; --p) {
+    Unit interceptor{};
+    interceptor.player_id = static_cast<uint8_t>(p);
+    interceptor.type = ShipType::INTERCEPTOR;
+    interceptor.sector_id = battle_sector;
+    interceptor.damage = 0;
+    interceptor.arrival_order = raw.AllocateArrivalOrder();
+    raw.unit_registry.push_back(interceptor);
+  }
+  Unit cruiser{};
+  cruiser.player_id = 0;
+  cruiser.type = ShipType::CRUISER;
+  cruiser.sector_id = battle_sector;
+  cruiser.damage = 0;
+  cruiser.arrival_order = raw.AllocateArrivalOrder();
+  raw.unit_registry.push_back(cruiser);
+
+  state->ApplyAction(FindActionByName(*state, "PASS"));
+  state->ApplyAction(FindActionByName(*state, "PASS"));
+  SPIEL_CHECK_TRUE(raw.current_phase == RoundPhase::COMBAT);
+
+  int combat_rolls = 0;
+  int steps = 0;
+  const int kMaxSteps = 8000;
+  while (!state->IsTerminal() &&
+         raw.current_phase == RoundPhase::COMBAT && steps < kMaxSteps) {
+    ++steps;
+    if (state->IsChanceNode()) {
+      const ActionsAndProbs outcomes = state->ChanceOutcomes();
+      SPIEL_CHECK_GT(outcomes.size(), 0);
+      double sum = 0.0;
+      for (const auto& [a, p] : outcomes) sum += p;
+      SPIEL_CHECK_TRUE(std::abs(sum - 1.0) < 1e-9);
+      const Action chosen = outcomes[0].first;
+      if (state->ActionToString(kChancePlayerId, chosen).rfind("COMBAT_ROLL", 0) ==
+          0) {
+        ++combat_rolls;
+      }
+      state->ApplyAction(chosen);
+    } else {
+      const std::vector<Action> legal = state->LegalActions();
+      SPIEL_CHECK_GT(legal.size(), 0);
+      Action chosen = legal[0];
+      // If ship-order is available, pick the first option.
+      for (Action a : legal) {
+        if (state->ActionToString(state->CurrentPlayer(), a).rfind("COMBAT_SHIP_ORDER_", 0) == 0) {
+          chosen = a;
+          break;
+        }
+      }
+      state->ApplyAction(chosen);
+    }
+  }
+  SPIEL_CHECK_LT(steps, kMaxSteps);
+  SPIEL_CHECK_GT(combat_rolls, 0);
+}
+
+void TiedInitiativeMidRoundDeathTest() {
+  // Edge case: queue is built with 2 tied groups, but one is destroyed by
+  // the opponent's fire during the same round before its turn. Player 0
+  // (attacker) has INT + CR (tied initiative 0). Player 1 (defender) has
+  // INT (initiative 0, wins tie as defender). Player 1 fires first and
+  // may destroy player 0's INT. The queue still has [INT, CR]. When
+  // SetupVolley tries to fire the dead INT, it gets 0 dice and skips.
+  // Verify no hang and combat completes.
+
+  std::shared_ptr<const Game> game = LoadEclipseGame(2, 7);
+  std::unique_ptr<State> state = game->NewInitialState();
+  state->ApplyAction(0);
+
+  EclipseState* eclipse_state = static_cast<EclipseState*>(state.get());
+  ::State& raw = const_cast<::State&>(eclipse_state->RawState());
+  raw.turn_order[0] = 0;
+  raw.turn_order[1] = 1;
+  raw.current_player = 0;
+  raw.current_round = 1;
+  for (int p = 0; p < 2; ++p) {
+    raw.players[p].resources.gold = 5;
+    raw.players[p].colony_ships_total = 0;
+    raw.players[p].colony_ships_available = 0;
+    // Give both player 0's and player 1's ships one cannon die.
+    raw.players[p].blueprints[static_cast<size_t>(ShipType::INTERCEPTOR)]
+        .total_stats.cannons[0] = 3;  // 3 yellow dice per ship for higher hit chance
+  }
+  raw.players[0].blueprints[static_cast<size_t>(ShipType::CRUISER)]
+      .total_stats.cannons[0] = 3;
+  // All ships initiative 0 — defender wins tie so player 1 fires first.
+  for (int p = 0; p < 2; ++p) {
+    raw.players[p].blueprints[static_cast<size_t>(ShipType::INTERCEPTOR)]
+        .total_stats.initiative = 0;
+  }
+  raw.players[0].blueprints[static_cast<size_t>(ShipType::CRUISER)]
+      .total_stats.initiative = 0;
+
+  uint16_t battle_sector = 0;
+  for (const Unit& u : raw.unit_registry) {
+    if (u.player_id == 0 && u.sector_id != 0) {
+      battle_sector = u.sector_id;
+      break;
+    }
+  }
+  SPIEL_CHECK_GT(battle_sector, 0);
+
+  // Player 1 (defender) arrives first.
+  for (int p = 1; p >= 0; --p) {
+    Unit interceptor{};
+    interceptor.player_id = static_cast<uint8_t>(p);
+    interceptor.type = ShipType::INTERCEPTOR;
+    interceptor.sector_id = battle_sector;
+    interceptor.damage = 0;
+    interceptor.arrival_order = raw.AllocateArrivalOrder();
+    raw.unit_registry.push_back(interceptor);
+  }
+  Unit cruiser{};
+  cruiser.player_id = 0;
+  cruiser.type = ShipType::CRUISER;
+  cruiser.sector_id = battle_sector;
+  cruiser.damage = 0;
+  cruiser.arrival_order = raw.AllocateArrivalOrder();
+  raw.unit_registry.push_back(cruiser);
+
+  state->ApplyAction(FindActionByName(*state, "PASS"));
+  state->ApplyAction(FindActionByName(*state, "PASS"));
+  SPIEL_CHECK_TRUE(raw.current_phase == RoundPhase::COMBAT);
+
+  int combat_rolls = 0;
+  int steps = 0;
+  const int kMaxSteps = 8000;
+  while (!state->IsTerminal() &&
+         raw.current_phase == RoundPhase::COMBAT && steps < kMaxSteps) {
+    ++steps;
+    if (state->IsChanceNode()) {
+      const ActionsAndProbs outcomes = state->ChanceOutcomes();
+      SPIEL_CHECK_GT(outcomes.size(), 0);
+      double sum = 0.0;
+      for (const auto& [a, p] : outcomes) sum += p;
+      SPIEL_CHECK_TRUE(std::abs(sum - 1.0) < 1e-9);
+      const Action chosen = outcomes[0].first;
+      if (state->ActionToString(kChancePlayerId, chosen).rfind("COMBAT_ROLL", 0) ==
+          0) {
+        ++combat_rolls;
+      }
+      state->ApplyAction(chosen);
+    } else {
+      const std::vector<Action> legal = state->LegalActions();
+      SPIEL_CHECK_GT(legal.size(), 0);
+      Action chosen = legal[0];
+      for (Action a : legal) {
+        if (state->ActionToString(state->CurrentPlayer(), a).rfind("COMBAT_SHIP_ORDER_", 0) == 0) {
+          chosen = a;
+          break;
+        }
+      }
+      state->ApplyAction(chosen);
+    }
+  }
+  SPIEL_CHECK_LT(steps, kMaxSteps);
+  SPIEL_CHECK_GT(combat_rolls, 0);
+}
+
 // ── Scoring integration ───────────────────────────────────────────────────────
 
 void ScoringAmbassadorTest() {
@@ -2356,6 +2683,9 @@ int main(int argc, char** argv) {
   RUN_TEST(RoundEightCleanupEndsGameTest);
   RUN_TEST(UpkeepObservationTensorTest);
   RUN_TEST(CombatDiceChanceFlowTest);
+  RUN_TEST(TiedInitiativeOrderTest);
+  RUN_TEST(TiedInitiativeMissileEdgeTest);
+  RUN_TEST(TiedInitiativeMidRoundDeathTest);
   RUN_TEST(ScoringAmbassadorTest);
   RUN_TEST(ScoringTraitorTest);
   RUN_TEST(ScoringDiscoveryVpTest);
@@ -2393,5 +2723,5 @@ int main(int argc, char** argv) {
   RUN_TEST(SectorCoordMapTest);
 
 #undef RUN_TEST
-  std::cout << "[==========] 69 tests passed." << std::endl;
+  std::cout << "[==========] 72 tests passed." << std::endl;
 }

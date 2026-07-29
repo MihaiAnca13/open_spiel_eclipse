@@ -618,6 +618,8 @@ bool StartNextPairInActiveSector(::State& state) {
     cs.initiative_idx = 0;
     cs.engagement_round = 0;
     cs.pending_player = kNoPlayer;
+    cs.ship_order_size = 0;
+    cs.ship_order_idx = 0;
     cs.pending_target_count = 0;
     cs.pending_die_count = 0;
     cs.pending_target_group_player = kNoPlayer;
@@ -896,8 +898,23 @@ void OnVolleyComplete(::State& state) {
     cs.pending_dice_are_missiles = false;
     cs.pending_dice_pop_attack = false;
     if (pop_attack) {
-        // Population bombardment continues in the attack_population phase, which
-        // owns the initiative-independent unit cursor.
+        return;
+    }
+    // If draining the ship-order queue, advance within it rather than advancing
+    // initiative_idx (which still points at the first tied group).
+    if (cs.ship_order_size > 0) {
+        ++cs.ship_order_idx;
+        if (cs.ship_order_idx < cs.ship_order_size) {
+            // More tied types to fire this round; stay in firing phase with
+            // the next type.
+            cs.active_ship_type = cs.ship_order_queue[cs.ship_order_idx];
+            return;
+        }
+        // Queue exhausted. Advance initiative_idx past the tied batch.
+        cs.initiative_idx += cs.ship_order_size;
+        cs.ship_order_size = 0;
+        cs.ship_order_idx = 0;
+        cs.phase = CombatState::Phase::choose_engagement_action;
         return;
     }
     ++cs.initiative_idx;
@@ -1060,11 +1077,36 @@ bool StepCombat(::State& state) {
             }
             const InitiativeGroup& g = cs.initiative_timeline[cs.initiative_idx];
             if (g.is_npc) {
-                // NPCs never retreat; they always attack.
                 cs.active_ship_type = g.type;
                 cs.phase = CombatState::Phase::engagement_firing;
                 return false;
             }
+            // Check whether this player has multiple groups with the same
+            // initiative value still alive (tied initiative). If so, the
+            // player must choose the firing order once per round.
+            cs.ship_order_size = 0;
+            const int8_t base_init = g.initiative;
+            // g is at initiative_idx. Scan forward for same-player same-initiative
+            // groups (the sort guarantees they're adjacent).
+            for (uint8_t i = cs.initiative_idx; i < cs.initiative_size; ++i) {
+                const auto& candidate = cs.initiative_timeline[i];
+                if (candidate.player_id != g.player_id) break;
+                if (candidate.initiative != base_init) break;
+                if (CountAliveInSector(state, candidate.player_id, candidate.type,
+                                       cs.active_sector_id) == 0) continue;
+                if (cs.ship_order_size < kMaxInitiativeGroups) {
+                    cs.ship_order_queue[cs.ship_order_size++] = candidate.type;
+                }
+            }
+            if (cs.ship_order_size > 1) {
+                // Tied initiative: player chooses firing order.
+                cs.pending_player = g.player_id;
+                cs.active_ship_type = g.type;
+                cs.ship_order_idx = 0;
+                cs.phase = CombatState::Phase::select_ship_order;
+                return true;
+            }
+            cs.ship_order_size = 0;  // no tie or only one group
             cs.pending_player = g.player_id;
             cs.active_ship_type = g.type;
             ComputeLegalRetreatDestinations(state, g.player_id,
@@ -1073,6 +1115,30 @@ bool StepCombat(::State& state) {
             return true;
         }
         case CombatState::Phase::engagement_firing: {
+            if (cs.ship_order_size > 0 && cs.ship_order_idx < cs.ship_order_size) {
+                // Draining the ship-order queue: fire one tied group at a time.
+                // The player is the owner of the first group in the tied batch
+                // (all groups in the queue belong to the same player).
+                const uint8_t player =
+                    cs.initiative_timeline[cs.initiative_idx].player_id;
+                const ShipType qtype = cs.ship_order_queue[cs.ship_order_idx];
+                cs.active_ship_type = qtype;
+                if (SetupVolley(state, player, qtype, /*missiles=*/false,
+                                /*pop_attack=*/false) > 0) {
+                    return false;
+                }
+                ++cs.ship_order_idx;
+                if (cs.ship_order_idx < cs.ship_order_size) {
+                    cs.active_ship_type = cs.ship_order_queue[cs.ship_order_idx];
+                    return false;
+                }
+                // Queue exhausted; advance initiative_idx past the tied batch.
+                cs.initiative_idx += cs.ship_order_size;
+                cs.ship_order_size = 0;
+                cs.ship_order_idx = 0;
+                cs.phase = CombatState::Phase::choose_engagement_action;
+                return false;
+            }
             if (cs.initiative_idx < cs.initiative_size) {
                 const InitiativeGroup& g =
                     cs.initiative_timeline[cs.initiative_idx];

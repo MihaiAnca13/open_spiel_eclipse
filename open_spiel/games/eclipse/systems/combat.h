@@ -144,11 +144,12 @@ struct CombatState {
         missile_phase             = 2,
         choose_engagement_action  = 3, // player decision: attack or retreat
         engagement_firing         = 4, // cannons + dice rolls
-        select_reputation_tile    = 5, // player decision
-        attack_population         = 6, // auto: remaining ships attack population
-        influence_sectors         = 7, // remove control, then player disc decisions
-        discovery_award           = 8, // player decision: reward vs VP
-        repair                    = 9, // auto: zero damage, reset state
+        select_ship_order         = 5, // player chooses firing order among tied initiative groups
+        select_reputation_tile    = 6, // player decision
+        attack_population         = 7, // auto: remaining ships attack population
+        influence_sectors         = 8, // remove control, then player disc decisions
+        discovery_award           = 9, // player decision: reward vs VP
+        repair                    = 10, // auto: zero damage, reset state
     };
 
     Phase phase = Phase::inactive;
@@ -180,6 +181,16 @@ struct CombatState {
     // Player whose decision is currently pending (engagement choice, rep tile
     // selection, influence disc placement, discovery reward).
     uint8_t pending_player = kNoPlayer;
+
+    // Tied-initiative ship ordering: when a player has multiple ship types with
+    // the same initiative in the same pair, they choose the firing order once
+    // per round. ship_order_queue holds the ShipType values of tied groups for
+    // the current pending_player; empty means no decision is required.
+    // The queue is populated at choose_engagement_action time, then the player
+    // picks the first ship to fire; remaining ships fire in queue order.
+    std::array<ShipType, kMaxInitiativeGroups> ship_order_queue{};
+    uint8_t ship_order_size = 0;
+    uint8_t ship_order_idx = 0;
 
     // Active ship type for the current group (used by dice-target assignment
     // and the engagement-action phase).
@@ -281,6 +292,8 @@ struct CombatState {
         rep_draw_target = 0;
         reputation_drawn_mask.fill(0);
         reputation_earned = 0;
+        ship_order_size = 0;
+        ship_order_idx = 0;
         pending_target_group_player = kNoPlayer;
         pending_target_group_type = ShipType::INTERCEPTOR;
         pending_target_count = 0;
@@ -317,6 +330,7 @@ NLOHMANN_JSON_SERIALIZE_ENUM(CombatState::Phase, {
     {CombatState::Phase::missile_phase, "missile_phase"},
     {CombatState::Phase::choose_engagement_action, "choose_engagement_action"},
     {CombatState::Phase::engagement_firing, "engagement_firing"},
+    {CombatState::Phase::select_ship_order, "select_ship_order"},
     {CombatState::Phase::select_reputation_tile, "select_reputation_tile"},
     {CombatState::Phase::attack_population, "attack_population"},
     {CombatState::Phase::influence_sectors, "influence_sectors"},
@@ -340,6 +354,9 @@ inline void to_json(nlohmann::json& j, const CombatState& s) {
     j["initiative_idx"] = s.initiative_idx;
     j["engagement_round"] = s.engagement_round;
     j["current_attacker_id"] = s.current_attacker_id;
+    j["ship_order_queue"] = s.ship_order_queue;
+    j["ship_order_size"] = s.ship_order_size;
+    j["ship_order_idx"] = s.ship_order_idx;
     j["current_defender_id"] = s.current_defender_id;
     j["pending_player"] = s.pending_player;
     j["active_ship_type"] = s.active_ship_type;
@@ -397,6 +414,9 @@ inline void from_json(const nlohmann::json& j, CombatState& s) {
     if (j.contains("engagement_round")) j.at("engagement_round").get_to(s.engagement_round);
     if (j.contains("current_attacker_id")) j.at("current_attacker_id").get_to(s.current_attacker_id);
     if (j.contains("current_defender_id")) j.at("current_defender_id").get_to(s.current_defender_id);
+    if (j.contains("ship_order_queue")) j.at("ship_order_queue").get_to(s.ship_order_queue);
+    if (j.contains("ship_order_size")) j.at("ship_order_size").get_to(s.ship_order_size);
+    if (j.contains("ship_order_idx")) j.at("ship_order_idx").get_to(s.ship_order_idx);
     if (j.contains("pending_player")) j.at("pending_player").get_to(s.pending_player);
     if (j.contains("active_ship_type")) j.at("active_ship_type").get_to(s.active_ship_type);
     if (j.contains("retreat_destinations")) j.at("retreat_destinations").get_to(s.retreat_destinations);

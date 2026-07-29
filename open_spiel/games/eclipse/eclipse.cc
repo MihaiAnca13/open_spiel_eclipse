@@ -123,13 +123,18 @@ constexpr Action action_combat_influence_yes =
 constexpr Action action_combat_influence_no = action_combat_influence_yes + 1; // 10133
 constexpr Action action_combat_discovery_reward = action_combat_influence_no + 1; // 10134
 constexpr Action action_combat_discovery_vp = action_combat_discovery_reward + 1; // 10135
+
+// Ship order selection: player picks which of their tied-initiative ship types
+// fires first. 4 ShipType values (INTERCEPTOR, CRUISER, DREADNOUGHT, STARBASE).
+// This action appears during combat's select_ship_order phase.
+constexpr Action action_combat_ship_order_start = action_combat_discovery_vp + 1; // 10136
 constexpr Action action_combat_influence_to_cell_start =
-    action_combat_discovery_vp + 1; // 10136 (+ 225 cells)
+    action_combat_ship_order_start + 4; // 10140 (+ 225 cells)
 
 // ── Diplomacy action IDs (rulebook p.14-15) ──────────────────────────────────
 // Propose: one per (proposer, partner) pair, 6*6 = 36 ids.
 constexpr Action action_diplomacy_propose_start =
-    action_combat_influence_to_cell_start + GALAXY_CELL_COUNT; // 10361
+    action_combat_influence_to_cell_start + GALAXY_CELL_COUNT; // 10365
 constexpr Action action_diplomacy_propose_end =
     action_diplomacy_propose_start + MAX_PLAYERS * MAX_PLAYERS; // 10397
 
@@ -1281,6 +1286,13 @@ std::string EclipseState::ActionToString(Player player, Action action_id) const 
   if (action_id == action_combat_discovery_vp) {
     return "COMBAT_DISCOVERY_VP";
   }
+  if (action_id >= action_combat_ship_order_start &&
+      action_id < action_combat_ship_order_start + 4) {
+    static const char* kShipTypeNames[4] = {
+        "INTERCEPTOR", "CRUISER", "DREADNOUGHT", "STARBASE"};
+    return "COMBAT_SHIP_ORDER_" +
+           std::string(kShipTypeNames[action_id - action_combat_ship_order_start]);
+  }
   if (action_id >= action_combat_influence_to_cell_start &&
       action_id < action_diplomacy_propose_start) {
     HexCoord c = index_to_hex(action_id - action_combat_influence_to_cell_start);
@@ -2129,6 +2141,10 @@ void EclipseState::DriveCombat() {
         cs.pending_player != kNoPlayer) {
       return;
     }
+    if (cs.phase == CombatState::Phase::select_ship_order &&
+        cs.pending_player != kNoPlayer) {
+      return;
+    }
     if (cs.phase == CombatState::Phase::attack_population &&
         cs.pop_attack_damage_remaining > 0) {
       return;
@@ -2208,6 +2224,17 @@ std::vector<Action> EclipseState::CombatLegalActions() const {
           if (h.q != -128) {
             actions.push_back(action_combat_retreat_to_cell_start + hex_to_index(h.q, h.r));
           }
+        }
+      } else {
+        actions.push_back(action_combat_continue);
+      }
+      break;
+    }
+    case CombatState::Phase::select_ship_order: {
+      if (cs.pending_player != kNoPlayer && cs.ship_order_size > 0) {
+        for (uint8_t i = 0; i < cs.ship_order_size; ++i) {
+          actions.push_back(action_combat_ship_order_start +
+                            static_cast<Action>(cs.ship_order_queue[i]));
         }
       } else {
         actions.push_back(action_combat_continue);
@@ -2323,6 +2350,35 @@ void EclipseState::ApplyCombatSubAction(Action action_id) {
       cs.pop_attack_player = kNoPlayer;
       cs.pop_attack_owner = kNoPlayer;
     }
+  }
+
+  // Ship order selection for tied-initiative groups.
+  if (cs.phase == CombatState::Phase::select_ship_order) {
+    if (cs.pending_player == kNoPlayer || cs.ship_order_size == 0) return;
+    if (action_id < action_combat_ship_order_start ||
+        action_id >= action_combat_ship_order_start + 4) return;
+    ShipType chosen = static_cast<ShipType>(
+        action_id - action_combat_ship_order_start);
+    bool found = false;
+    for (uint8_t i = 0; i < cs.ship_order_size; ++i) {
+      if (cs.ship_order_queue[i] == chosen) { found = true; break; }
+    }
+    if (!found) return;
+    // Permute queue so chosen is first; rest preserve relative order.
+    for (uint8_t i = 0; i < cs.ship_order_size; ++i) {
+      if (cs.ship_order_queue[i] == chosen) {
+        for (uint8_t j = i; j > 0; --j) {
+          cs.ship_order_queue[j] = cs.ship_order_queue[j - 1];
+        }
+        cs.ship_order_queue[0] = chosen;
+        break;
+      }
+    }
+    cs.ship_order_idx = 0;
+    cs.phase = CombatState::Phase::engagement_firing;
+    cs.active_ship_type = cs.ship_order_queue[0];
+    cs.pending_player = kNoPlayer;  // cleared; CombatLegalActions uses this
+    return;
   }
 
   switch (cs.phase) {
