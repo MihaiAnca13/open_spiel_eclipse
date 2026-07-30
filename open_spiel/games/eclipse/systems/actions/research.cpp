@@ -8,6 +8,8 @@
 #include "../../state.h"
 #include "../../tech.h"
 #include "../../minor_species.h"
+#include "../../galaxy.h"
+#include "../../sectors.h"
 
 
 namespace open_spiel::eclipse {
@@ -96,6 +98,24 @@ bool research_tech(::State& state, uint8_t player_id, const TechDefinition& tech
     // a Warp Portal Tile that may be placed on any Controlled Sector.
     if (tech_def.bit == TechBit::WARP_PORTAL) {
         player.warp_portal_eligible = true;
+    }
+
+    // Artifact Key (Nano Tech): immediately gain 5 Resources of a single type
+    // per Artifact symbol on Sectors you Control. The choice is deferred to a
+    // pending sub-action so the player picks Materials / Science / Money.
+    if (tech_def.bit == TechBit::ARTIFACT_KEY) {
+        int count = 0;
+        for (int q = -GALAXY_RADIUS; q <= GALAXY_RADIUS; ++q) {
+            for (int r = -GALAXY_RADIUS; r <= GALAXY_RADIUS; ++r) {
+                if (!in_galaxy_bounds(q, r)) continue;
+                const auto& sector = state.galaxy.at(q, r);
+                if (sector.owner_id != player_id) continue;
+                if (sector.sector_id == 0) continue;
+                const SectorDefinition* def = get_sector_definition(sector.sector_id);
+                if (def && def->has_artifact) ++count;
+            }
+        }
+        player.pending_artifact_key_chunks = static_cast<uint8_t>(count);
     }
 
     return true;

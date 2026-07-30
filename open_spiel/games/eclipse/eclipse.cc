@@ -175,7 +175,12 @@ constexpr Action action_minor_species_track_start = action_minor_species_end; //
 constexpr Action action_minor_species_track_end =
     action_minor_species_track_start + POP_TRACK_COUNT; // 10467
 
-constexpr int num_distinct_actions = action_minor_species_track_end; // 10467
+// Artifact Key resource-choice sub-action (3 ids: Materials/Science/Money).
+constexpr Action action_artifact_key_track_start = action_minor_species_track_end; // 10467
+constexpr Action action_artifact_key_track_end =
+    action_artifact_key_track_start + POP_TRACK_COUNT; // 10470
+
+constexpr int num_distinct_actions = action_artifact_key_track_end; // 10470
 
 const GameType game_type{
     /*short_name=*/"eclipse",
@@ -666,6 +671,19 @@ std::vector<Action> EclipseState::LegalActions() const {
     if (p.resources.materials_prod > 0)
         track_actions.push_back(action_minor_species_track_start + 2);
     return track_actions;
+  }
+
+  // Artifact Key resource-choice sub-action: pick a resource type per chunk.
+  // Intercepts before action phase / upkeep / combat so the player resolves
+  // pending chunks before continuing.
+  for (const ::Player& p : s.players) {
+    if (p.pending_artifact_key_chunks > 0) {
+      std::vector<Action> chunk_actions;
+      chunk_actions.push_back(action_artifact_key_track_start + 0); // Money
+      chunk_actions.push_back(action_artifact_key_track_start + 1); // Science
+      chunk_actions.push_back(action_artifact_key_track_start + 2); // Materials
+      return chunk_actions;
+    }
   }
 
   if (s.upkeep_state.step != UpkeepState::Step::inactive) {
@@ -1414,6 +1432,10 @@ std::string EclipseState::ActionToString(Player player, Action action_id) const 
   if (action_id >= action_minor_species_track_start && action_id < action_minor_species_track_end) {
     static const char* kTrackNames[3] = {"MONEY", "SCIENCE", "MATERIALS"};
     return std::string("MINOR_SPECIES_PLACE_POP_") + kTrackNames[action_id - action_minor_species_track_start];
+  }
+  if (action_id >= action_artifact_key_track_start && action_id < action_artifact_key_track_end) {
+    static const char* kTrackNames[3] = {"MONEY", "SCIENCE", "MATERIALS"};
+    return std::string("ARTIFACT_KEY_") + kTrackNames[action_id - action_artifact_key_track_start];
   }
   return "UNKNOWN_ACTION(" + std::to_string(action_id) + ")";
 }
@@ -2936,12 +2958,35 @@ void EclipseState::DoApplyAction(Action action_id) {
     SPIEL_CHECK_TRUE(execute_minor_species_pick_track(
         eclipse_state_, current_player, static_cast<PopTrack>(track)));
     return;
+  } else if (action_id >= action_artifact_key_track_start &&
+             action_id < action_artifact_key_track_end) {
+    // Artifact Key resource-choice sub-action.
+    // Find the player with pending chunks and grant 5 of the chosen type.
+    uint8_t resource_type = action_id - action_artifact_key_track_start;
+    for (::Player& p : eclipse_state_.players) {
+      if (p.pending_artifact_key_chunks > 0) {
+        switch (resource_type) {
+          case 0: p.resources.gold += 5; break;
+          case 1: p.resources.science += 5; break;
+          case 2: p.resources.materials += 5; break;
+        }
+        --p.pending_artifact_key_chunks;
+        return;
+      }
+    }
+    return;
   }
 
   AdvanceTurn();
 }
 
 void EclipseState::AdvanceTurn() {
+  // Do not advance the turn while any player has pending Artifact Key resource
+  // choices — they must pick a resource type per chunk before play continues.
+  for (const ::Player& p : eclipse_state_.players) {
+    if (p.pending_artifact_key_chunks > 0) return;
+  }
+
   const uint8_t current_player = eclipse_state_.current_player;
 
   // Detect an Act of Aggression: any sector the current player moved into or

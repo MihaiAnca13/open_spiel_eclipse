@@ -1210,13 +1210,21 @@ bool StepCombat(::State& state) {
                 cs.pop_attack_player = attacker.player_id;
                 cs.pop_attack_owner = sector->owner_id;
                 cs.pop_attack_damage_remaining = 0;
-                // Neutron Bombs destroy all population automatically (no roll).
+                // Neutron Bombs destroy all population automatically (no roll),
+                // unless the defender has Neutron Absorber (which Planta's
+                // species weakness overrides per rulebook p.30).
                 if (attacker.player_id < state.players.size() &&
                     state.players[attacker.player_id].has_tech(
                         TechBit::NEUTRON_BOMBS)) {
-                    cs.pop_attack_damage_remaining =
-                        CountOccupiedSlots(sector->occupied_slots_mask);
-                    return true;
+                    bool defender_immune = sector->owner_id < state.players.size() &&
+                        state.players[sector->owner_id].has_tech(TechBit::NEUTRON_ABSORBER) &&
+                        state.players[sector->owner_id].species_id != Species::PLANTA;
+                    if (!defender_immune) {
+                        cs.pop_attack_damage_remaining =
+                            CountOccupiedSlots(sector->occupied_slots_mask);
+                        return true;
+                    }
+                    // Absorbed — fall through to normal bombardment dice roll.
                 }
                 if (SetupVolley(state, attacker.player_id, attacker.type,
                                 /*missiles=*/false, /*pop_attack=*/true) > 0) {

@@ -11,6 +11,14 @@
 
 
 
+# Backend Gaps
+- [ ] **REACTION actions**: `ActionType::REACTION` declared but never implemented. After passing, should allow 1 Activation of Upgrade/Build/Move.
+- [x] **Neutron Absorber**: Rare tech — negates enemy NEUTRON BOMBS during pop attack (Planta's species weakness overrides).
+- [x] **Artifact Key**: Nano tech — gain 5 Resources of a single type per Artifact on controlled sectors. Pending choice sub-action in research flow.
+- [ ] **Ancient sector discovery tile award in Combat Phase**: Deferred from explore (`explore.cpp:515`) but no combat-side logic awards it.
+- [ ] **Storage Markers / Storage Track**: Physical game's storage marker mechanic (exceeding 40 resources) not modeled.
+- [ ] **Geminga/Simeis 147 sectors**: Two special sectors granting extra actions commented out in `sectors.h`.
+
 maybe later:
 - [ ] galactic events module (extra sectors)
 - [ ] supernova sector

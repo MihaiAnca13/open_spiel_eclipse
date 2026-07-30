@@ -512,7 +512,7 @@ bool claim_explore_control(State& state, uint8_t player_id, bool take_control) {
     }
 
     // Discovery is only awarded immediately from an undefended sector; Ancient
-    // sectors defer the tile to the Combat Phase (not implemented yet).
+    // sectors defer the tile to the Combat Phase.
     if (cell.discovery_tile_present && !has_ancients) {
         es.phase = ExplorePhase::discovery_reward;
     } else {

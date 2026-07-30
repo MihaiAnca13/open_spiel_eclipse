@@ -141,6 +141,12 @@ struct Player {
     // Minor Species Ambassador Tiles owned (indices into MINOR_SPECIES_TABLE).
     FixedVector<uint8_t, MINOR_SPECIES_COUNT> owned_minor_species;
 
+    // Pending Artifact Key resource chunks: each chunk = 5 resources of a
+    // single type the player must choose (Materials / Science / Money).
+    // Set when ARTIFACT_KEY is researched; consumed one-by-one as the player
+    // picks a resource type per chunk. Cleared when all chunks are resolved.
+    uint8_t pending_artifact_key_chunks = 0;
+
     // Helper to check if a tech is owned (checks all 3 track masks).
     [[nodiscard]] bool has_tech(TechBit tech) const {
         uint64_t b = static_cast<uint64_t>(tech);
@@ -161,7 +167,7 @@ struct Player {
 
 static_assert(static_cast<size_t>(ShipType::STARBASE) + 1 == 4, "The first 4 ShipType values must map to blueprints index 0-3");
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Player, id, score, species_id, is_ai, has_passed, disks_on_sectors, disks_on_actions, resources, colony_ships_total, colony_ships_available, orbitals, monoliths, blueprints, reputation_track, trade_rate, extra_influence_discs, graveyard_counts, eliminated, researched_techs_military, researched_techs_grid, researched_techs_nano, ambassador_tiles_held, ambassador_tiles_pending_return, traitor_held, discovery_vp_tiles_kept, parts_inventory, warp_portal_eligible, owned_minor_species);
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Player, id, score, species_id, is_ai, has_passed, disks_on_sectors, disks_on_actions, resources, colony_ships_total, colony_ships_available, orbitals, monoliths, blueprints, reputation_track, trade_rate, extra_influence_discs, graveyard_counts, eliminated, researched_techs_military, researched_techs_grid, researched_techs_nano, ambassador_tiles_held, ambassador_tiles_pending_return, traitor_held, discovery_vp_tiles_kept, parts_inventory, warp_portal_eligible, owned_minor_species, pending_artifact_key_chunks);
 
 struct UpkeepState {
     enum class Step : uint8_t {
