@@ -199,7 +199,7 @@ void RingIISectorsUseArtworkAlignedRotationTest() {
       HexCoord{2, -2}, HexCoord{0, -2}, HexCoord{-2, 0},
       HexCoord{-2, 2}, HexCoord{0, 2}, HexCoord{2, 0},
   };
-  constexpr std::array<uint8_t, 6> kRotations = {5, 0, 4, 2, 3, 1};
+  constexpr std::array<uint8_t, 6> kRotations = {5, 0, 1, 2, 3, 4};
 
   auto assert_rotation = [](const Sector& sector, SectorType type,
                             uint8_t rotation) {
@@ -214,8 +214,10 @@ void RingIISectorsUseArtworkAlignedRotationTest() {
   setup.rng_seed = 23;
   setup.staged_players.assign(
       6, StagedPlayerConfig{.species = Species::TERRAN_FACTIONS, .is_ai = false});
+  const SetupSnapshot snapshot = CreatePreChoiceSnapshot(setup);
+  SPIEL_CHECK_EQ(snapshot.state.galaxy.at(0, 0).rotation, 3);
   const SetupSnapshot finalized = FinalizeSetupSnapshot(
-      CreatePreChoiceSnapshot(setup),
+      snapshot,
       std::vector<PlayerConfig>(
           6, PlayerConfig{.species = Species::TERRAN_FACTIONS, .is_ai = false}));
   for (size_t i = 0; i < kPositions.size(); ++i) {
