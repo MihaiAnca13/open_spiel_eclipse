@@ -45,6 +45,7 @@ int PlayerUpkeepCost(const ::Player& player) {
       SPECIES_TABLE[static_cast<size_t>(player.species_id)].starting_disk_penalty;
   const int revealed =
       std::max(0, static_cast<int>(player.disks_on_actions) +
+                      static_cast<int>(player.disks_on_reactions) +
                       static_cast<int>(player.disks_on_sectors) + penalty -
                       static_cast<int>(player.extra_influence_discs));
   return INFLUENCE_UPKEEP_TABLE[std::min(revealed, total_influence_discs)];

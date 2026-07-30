@@ -180,7 +180,13 @@ constexpr Action action_artifact_key_track_start = action_minor_species_track_en
 constexpr Action action_artifact_key_track_end =
     action_artifact_key_track_start + POP_TRACK_COUNT; // 10470
 
-constexpr int num_distinct_actions = action_artifact_key_track_end; // 10470
+// ── REACTION action IDs ─────────────────────────────────────────────────────
+// After passing, players may take 1 Activation of Upgrade, Build, or Move.
+constexpr Action action_reaction_upgrade = action_artifact_key_track_end;     // 10470
+constexpr Action action_reaction_build   = action_artifact_key_track_end + 1; // 10471
+constexpr Action action_reaction_move    = action_artifact_key_track_end + 2; // 10472
+
+constexpr int num_distinct_actions = action_reaction_move + 1; // 10473
 
 const GameType game_type{
     /*short_name=*/"eclipse",
@@ -320,6 +326,93 @@ bool HasLegalUpgradeChoice(const ::State& state, uint8_t player_id) {
     }
   }
   return false;
+}
+
+bool HasLegalMoveChoice(const ::State& state, uint8_t player_id) {
+  if (player_id >= state.players.size()) return false;
+  // Reuse legal_move_steps to check if any unit can move.
+  // A non-empty result means at least one legal move step exists.
+  return !open_spiel::eclipse::legal_move_steps(state, player_id).empty();
+}
+
+void AppendActionPhaseBonusActions(const ::State& state, uint8_t player_id,
+                                   std::vector<Action>* actions) {
+  if (player_id >= state.players.size()) return;
+
+  const ::Player& player = state.players[player_id];
+  for (int c = 0; c < TRADE_CONVERSION_COUNT; ++c) {
+    if (can_trade(player, static_cast<TradeConversion>(c))) {
+      actions->push_back(action_trade_start + c);
+    }
+  }
+  for (const auto& placement : legal_colony_ship_placements(state, player_id)) {
+    actions->push_back(action_colony_ship_start +
+                       placement.cell * COLONY_SHIP_CODES_PER_CELL +
+                       placement.slot * COLONY_SHIP_TRACKS +
+                       static_cast<int>(placement.track));
+  }
+
+  if (state.players.size() >= 4) {
+    for (uint8_t partner = 0; partner < state.players.size(); ++partner) {
+      if (partner != player_id && can_propose_diplomacy(state, player_id, partner)) {
+        actions->push_back(action_diplomacy_propose_start +
+                           player_id * MAX_PLAYERS + partner);
+      }
+    }
+  }
+
+  for (uint8_t ms_idx : state.minor_species_pool) {
+    if (can_form_minor_species(state, player_id, ms_idx)) {
+      actions->push_back(action_minor_species_start + ms_idx);
+    }
+  }
+}
+
+bool IsActionPhaseBonusAction(Action action_id) {
+  return (action_id >= action_trade_start &&
+          action_id < action_colony_ship_start) ||
+         (action_id >= action_colony_ship_start &&
+          action_id < action_influence_start) ||
+         (action_id >= action_diplomacy_propose_start &&
+          action_id < action_diplomacy_propose_end) ||
+         (action_id >= action_minor_species_start &&
+          action_id < action_minor_species_end);
+}
+
+void ApplyActionPhaseBonusAction(::State& state, uint8_t player_id,
+                                 Action action_id) {
+  SPIEL_CHECK_TRUE(player_id < state.players.size());
+
+  if (action_id >= action_trade_start && action_id < action_colony_ship_start) {
+    SPIEL_CHECK_TRUE(execute_trade(
+        state, player_id,
+        static_cast<TradeConversion>(action_id - action_trade_start)));
+    return;
+  }
+  if (action_id >= action_colony_ship_start && action_id < action_influence_start) {
+    const int encoded = static_cast<int>(action_id - action_colony_ship_start);
+    const int cell = encoded / COLONY_SHIP_CODES_PER_CELL;
+    const int remainder = encoded % COLONY_SHIP_CODES_PER_CELL;
+    SPIEL_CHECK_TRUE(use_colony_ship(
+        state, player_id, static_cast<uint8_t>(cell),
+        static_cast<uint8_t>(remainder / COLONY_SHIP_TRACKS),
+        static_cast<PopTrack>(remainder % COLONY_SHIP_TRACKS)));
+    return;
+  }
+  if (action_id >= action_diplomacy_propose_start &&
+      action_id < action_diplomacy_propose_end) {
+    const int encoded = static_cast<int>(action_id - action_diplomacy_propose_start);
+    const int proposer = encoded / MAX_PLAYERS;
+    const int partner = encoded % MAX_PLAYERS;
+    SPIEL_CHECK_EQ(proposer, player_id);
+    SPIEL_CHECK_TRUE(begin_diplomacy(state, player_id,
+                                     static_cast<uint8_t>(partner)));
+    return;
+  }
+  SPIEL_CHECK_TRUE(action_id >= action_minor_species_start &&
+                   action_id < action_minor_species_end);
+  SPIEL_CHECK_TRUE(begin_minor_species_formation(
+      state, player_id, action_id - action_minor_species_start));
 }
 
 bool SectorHasOpponentShips(const ::State& state, uint8_t player_id,
@@ -619,48 +712,13 @@ std::vector<Action> EclipseState::LegalActions() const {
     return actions;
   }
 
-  // Mid-Explore: only the choices valid for the current sub-phase are legal.
   const ::State& s = eclipse_state_;
-  if (s.explore_state.phase != ExplorePhase::inactive) {
-    return ExploreLegalActions();
-  }
 
-  // Mid-Research: only tech choices are legal.
-  if (s.research_state.phase != ::ResearchState::Phase::inactive) {
-    return ResearchLegalActions();
-  }
-
-  // Mid-Influence: only influence choices are legal.
-  if (s.influence_state.phase != ::InfluenceState::Phase::inactive) {
-    return InfluenceLegalActions();
-  }
-
-  // Mid-Build: only build choices are legal.
-  if (s.build_state.phase != ::BuildState::Phase::inactive) {
-    return BuildLegalActions();
-  }
-
-  // Mid-Upgrade: only upgrade choices are legal.
-  if (s.upgrade_state.phase != ::UpgradeState::Phase::inactive) {
-    return UpgradeLegalActions();
-  }
-
-  // Mid-Move: only move choices are legal.
-  if (s.move_state.phase != ::MoveState::Phase::inactive) {
-    return MoveLegalActions();
-  }
-
-  // Mid-Diplomacy: only diplomacy sub-actions are legal.
+  // Diplomacy responses and Minor Species track choices must resolve before an
+  // interrupted Action or Reaction resumes.
   if (s.diplomacy_state.phase != DiplomacyState::Phase::inactive) {
     return DiplomacyLegalActions();
   }
-
-  // Deferred return-track choice after a Diplomatic Relations break.
-  if (s.diplomacy_state.phase == DiplomacyState::Phase::choose_return_track) {
-    return DiplomacyLegalActions();
-  }
-
-  // Minor Species PLACE_POP_CUBE track choice (free bonus sub-action).
   if (s.minor_species_pending_track != 255) {
     const ::Player& p = s.players[s.minor_species_pending_track];
     std::vector<Action> track_actions;
@@ -671,6 +729,36 @@ std::vector<Action> EclipseState::LegalActions() const {
     if (p.resources.materials_prod > 0)
         track_actions.push_back(action_minor_species_track_start + 2);
     return track_actions;
+  }
+
+  const auto add_bonuses = [&](uint8_t player_id, std::vector<Action> actions) {
+    if (s.current_phase == RoundPhase::ACTION) {
+      AppendActionPhaseBonusActions(s, player_id, &actions);
+    }
+    std::sort(actions.begin(), actions.end());
+    return actions;
+  };
+
+  if (s.explore_state.phase != ExplorePhase::inactive) {
+    return ExploreLegalActions();
+  }
+  if (s.research_state.phase != ::ResearchState::Phase::inactive) {
+    return ResearchLegalActions();
+  }
+  if (s.influence_state.phase != ::InfluenceState::Phase::inactive) {
+    return InfluenceLegalActions();
+  }
+  if (s.build_state.phase != ::BuildState::Phase::inactive) {
+    return add_bonuses(s.build_state.player_id, BuildLegalActions());
+  }
+  if (s.upgrade_state.phase != ::UpgradeState::Phase::inactive) {
+    return add_bonuses(s.upgrade_state.player_id, UpgradeLegalActions());
+  }
+  if (s.move_state.phase != ::MoveState::Phase::inactive) {
+    if (s.move_state.phase == ::MoveState::Phase::choose_move) {
+      return add_bonuses(s.move_state.player_id, MoveLegalActions());
+    }
+    return MoveLegalActions();
   }
 
   // Artifact Key resource-choice sub-action: pick a resource type per chunk.
@@ -704,10 +792,30 @@ std::vector<Action> EclipseState::LegalActions() const {
   actions.push_back(action_pass);
 
   uint8_t current_player = eclipse_state_.current_player;
-  if (current_player < eclipse_state_.players.size() &&
-      !eclipse_state_.players[current_player].has_passed) {
-    const auto& player = eclipse_state_.players[current_player];
-    const bool has_action_disk = player.available_influence_discs() > 0;
+  if (current_player >= eclipse_state_.players.size()) {
+    SPIEL_CHECK_TRUE(eclipse_state_.players.empty());
+    return actions;
+  }
+
+  const auto& player = eclipse_state_.players[current_player];
+  const bool has_action_disk = player.available_influence_discs() > 0;
+
+  if (player.has_passed) {
+    // Passed players may only take Reaction actions (1 Activation each, no tech
+    // bonuses). Reactions do not consume an action-track influence disc — they
+    // use the Reaction Track instead.
+    if (has_action_disk) {
+      if (HasLegalUpgradeChoice(s, current_player)) {
+        actions.push_back(action_reaction_upgrade);
+      }
+      if (HasLegalBuildChoice(s, current_player)) {
+        actions.push_back(action_reaction_build);
+      }
+      if (HasLegalMoveChoice(s, current_player)) {
+        actions.push_back(action_reaction_move);
+      }
+    }
+  } else {
     if (has_action_disk && player.resources.science >= 2 && HasLegalResearchChoice(s, current_player)) {
       actions.push_back(action_research);
     }
@@ -727,38 +835,9 @@ std::vector<Action> EclipseState::LegalActions() const {
       actions.push_back(action_move);
     }
 
-    // Bonus actions (no disc cost, no turn advance).
-    for (int c = 0; c < TRADE_CONVERSION_COUNT; ++c) {
-      if (can_trade(player, static_cast<TradeConversion>(c))) {
-        actions.push_back(action_trade_start + c);
-      }
-    }
-    for (const auto& p : legal_colony_ship_placements(s, current_player)) {
-      actions.push_back(action_colony_ship_start +
-                        p.cell * COLONY_SHIP_CODES_PER_CELL +
-                        p.slot * COLONY_SHIP_TRACKS +
-                        static_cast<int>(p.track));
-    }
-
-    // Diplomacy propose (free bonus action; available any time during the
-    // actioner's Action). Only offered in 4+ player games.
-    if (eclipse_state_.players.size() >= 4) {
-      for (uint8_t p = 0; p < eclipse_state_.players.size(); ++p) {
-        if (p == current_player) continue;
-        if (can_propose_diplomacy(s, current_player, p)) {
-          actions.push_back(action_diplomacy_propose_start +
-                            current_player * MAX_PLAYERS + p);
-        }
-      }
-    }
-
-    // Minor Species formation (free bonus action; available in all player counts).
-    for (uint8_t ms_idx : s.minor_species_pool) {
-      if (can_form_minor_species(s, current_player, ms_idx)) {
-        actions.push_back(action_minor_species_start + ms_idx);
-      }
-    }
   }
+
+  AppendActionPhaseBonusActions(s, current_player, &actions);
 
   std::sort(actions.begin(), actions.end());
   return actions;
@@ -1171,6 +1250,15 @@ std::string EclipseState::ActionToString(Player player, Action action_id) const 
   }
   if (pending_random_event_ != PendingRandomEvent::none) {
     return "RESOLVE_" + PendingRandomEventToString(pending_random_event_);
+  }
+  if (action_id == action_reaction_upgrade) {
+    return "REACTION_UPGRADE";
+  }
+  if (action_id == action_reaction_build) {
+    return "REACTION_BUILD";
+  }
+  if (action_id == action_reaction_move) {
+    return "REACTION_MOVE";
   }
   if (action_id == action_pass) {
     return "PASS";
@@ -2049,6 +2137,7 @@ void EclipseState::BeginCleanup() {
   eclipse_state_.upkeep_state = UpkeepState{};
   for (auto& player : eclipse_state_.players) {
     player.disks_on_actions = 0;
+    player.disks_on_reactions = 0;
   }
 
   DrawCleanupTechTiles(eclipse_state_, setup_config_.players);
@@ -2726,6 +2815,29 @@ void EclipseState::DoApplyAction(Action action_id) {
     return;
   }
 
+  const uint8_t current_player = eclipse_state_.current_player;
+  if (eclipse_state_.current_phase == RoundPhase::ACTION &&
+      IsActionPhaseBonusAction(action_id)) {
+    ApplyActionPhaseBonusAction(eclipse_state_, current_player, action_id);
+    return;
+  }
+
+  // Resolve a Diplomacy response before resuming an interrupted Action or
+  // Reaction. CurrentPlayer() identifies the partner or proposer as needed.
+  if (eclipse_state_.diplomacy_state.phase != DiplomacyState::Phase::inactive) {
+    ApplyDiplomacySubAction(action_id);
+    return;
+  }
+
+  if (eclipse_state_.minor_species_pending_track != 255) {
+    const uint8_t track = action_id - action_minor_species_track_start;
+    SPIEL_CHECK_TRUE(action_id >= action_minor_species_track_start &&
+                     action_id < action_minor_species_track_end);
+    SPIEL_CHECK_TRUE(execute_minor_species_pick_track(
+        eclipse_state_, current_player, static_cast<PopTrack>(track)));
+    return;
+  }
+
   // Resolve a step of an in-flight Explore action without advancing the turn,
   // until all activations are done (phase returns to inactive).
   if (eclipse_state_.explore_state.phase != ExplorePhase::inactive) {
@@ -2796,14 +2908,6 @@ void EclipseState::DoApplyAction(Action action_id) {
     return;
   }
 
-  // Resolve a step of an in-flight Diplomacy sub-state (formation or deferred
-  // return-track choice). Free bonus action: does NOT advance the turn.
-  if (eclipse_state_.diplomacy_state.phase != DiplomacyState::Phase::inactive) {
-    ApplyDiplomacySubAction(action_id);
-    // Stay in the diplomacy sub-state until it returns to inactive.
-    return;
-  }
-
   if (eclipse_state_.upkeep_state.step != UpkeepState::Step::inactive) {
     ApplyUpkeepAction(action_id);
     return;
@@ -2818,9 +2922,44 @@ void EclipseState::DoApplyAction(Action action_id) {
     return;
   }
 
-  uint8_t current_player = eclipse_state_.current_player;
-
-  if (action_id == action_pass) {
+  // ── REACTION actions (after passing) ─────────────────────────────────
+  // Each reaction gives exactly 1 Activation, ignoring species/tech bonuses.
+  // The disc cost is tracked via disks_on_reactions (Reaction Track) rather
+  // than disks_on_actions (Action Track).
+  if (action_id == action_reaction_upgrade) {
+    if (current_player < eclipse_state_.players.size()) {
+      bool started = begin_upgrade(eclipse_state_, current_player);
+      if (started) {
+        eclipse_state_.upgrade_state.activations_remaining = 1;
+        ++eclipse_state_.players[current_player].disks_on_reactions;
+      }
+      if (eclipse_state_.upgrade_state.phase != ::UpgradeState::Phase::inactive) {
+        return;
+      }
+    }
+  } else if (action_id == action_reaction_build) {
+    if (current_player < eclipse_state_.players.size()) {
+      bool started = begin_build(eclipse_state_, current_player);
+      if (started) {
+        eclipse_state_.build_state.activations_remaining = 1;
+        ++eclipse_state_.players[current_player].disks_on_reactions;
+      }
+      if (eclipse_state_.build_state.phase != ::BuildState::Phase::inactive) {
+        return;
+      }
+    }
+  } else if (action_id == action_reaction_move) {
+    if (current_player < eclipse_state_.players.size()) {
+      bool started = begin_move(eclipse_state_, current_player);
+      if (started) {
+        eclipse_state_.move_state.activations_remaining = 1;
+        ++eclipse_state_.players[current_player].disks_on_reactions;
+      }
+      if (eclipse_state_.move_state.phase != ::MoveState::Phase::inactive) {
+        return;
+      }
+    }
+  } else if (action_id == action_pass) {
     if (current_player < eclipse_state_.players.size()) {
       ::Player& player = eclipse_state_.players[current_player];
       if (!player.has_passed) {
@@ -2910,54 +3049,6 @@ void EclipseState::DoApplyAction(Action action_id) {
         }
       }
     }
-  } else if (action_id >= action_trade_start &&
-             action_id < action_colony_ship_start) {
-    // Bonus action: trade — no disc, no turn advance.
-    SPIEL_CHECK_TRUE(execute_trade(
-        eclipse_state_, current_player,
-        static_cast<TradeConversion>(action_id - action_trade_start)));
-    return;
-  } else if (action_id >= action_colony_ship_start &&
-             action_id < action_influence_start) {
-    // Bonus action: colony ship — no disc, no turn advance.
-    int encoded = static_cast<int>(action_id - action_colony_ship_start);
-    int cell = encoded / COLONY_SHIP_CODES_PER_CELL;
-    int rem  = encoded % COLONY_SHIP_CODES_PER_CELL;
-    SPIEL_CHECK_TRUE(use_colony_ship(
-        eclipse_state_, current_player, static_cast<uint8_t>(cell),
-        static_cast<uint8_t>(rem / COLONY_SHIP_TRACKS),
-        static_cast<PopTrack>(rem % COLONY_SHIP_TRACKS)));
-    return;
-  } else if (action_id >= action_diplomacy_propose_start &&
-             action_id < action_diplomacy_propose_end) {
-    // Bonus action: diplomacy propose — no disc, no turn advance.
-    int encoded = static_cast<int>(action_id - action_diplomacy_propose_start);
-    int proposer = encoded / MAX_PLAYERS;
-    int partner = encoded % MAX_PLAYERS;
-    if (current_player < eclipse_state_.players.size() &&
-        proposer == current_player) {
-      begin_diplomacy(eclipse_state_, current_player,
-                      static_cast<uint8_t>(partner));
-      // Stay in the diplomacy sub-state until it returns to inactive.
-      return;
-    }
-  } else if (action_id >= action_minor_species_start &&
-             action_id < action_minor_species_end) {
-    // Bonus action: minor species formation — no disc, no turn advance.
-    uint8_t ms_idx = action_id - action_minor_species_start;
-    if (ms_idx < MINOR_SPECIES_COUNT) {
-      begin_minor_species_formation(eclipse_state_, current_player, ms_idx);
-      // May set minor_species_pending_track for PLACE_POP_CUBE; stay in
-      // action phase for the track choice.
-    }
-    return;
-  } else if (action_id >= action_minor_species_track_start &&
-             action_id < action_minor_species_track_end) {
-    // PLACE_POP_CUBE track choice sub-action.
-    uint8_t track = action_id - action_minor_species_track_start;
-    SPIEL_CHECK_TRUE(execute_minor_species_pick_track(
-        eclipse_state_, current_player, static_cast<PopTrack>(track)));
-    return;
   } else if (action_id >= action_artifact_key_track_start &&
              action_id < action_artifact_key_track_end) {
     // Artifact Key resource-choice sub-action.
@@ -3026,8 +3117,7 @@ void EclipseState::AdvanceTurn() {
     const int next_index = (current_index + step) % num_players;
     const uint8_t next_player_id = eclipse_state_.turn_order[next_index];
     if (next_player_id < eclipse_state_.players.size() &&
-        !eclipse_state_.players[next_player_id].eliminated &&
-        !eclipse_state_.players[next_player_id].has_passed) {
+        !eclipse_state_.players[next_player_id].eliminated) {
       eclipse_state_.current_player = next_player_id;
       return;
     }

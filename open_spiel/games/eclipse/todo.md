@@ -12,7 +12,7 @@
 
 
 # Backend Gaps
-- [ ] **REACTION actions**: `ActionType::REACTION` declared but never implemented. After passing, should allow 1 Activation of Upgrade/Build/Move.
+- [x] **REACTION actions**: `ActionType::REACTION` declared but never implemented. After passing, should allow 1 Activation of Upgrade/Build/Move.
 - [x] **Neutron Absorber**: Rare tech — negates enemy NEUTRON BOMBS during pop attack (Planta's species weakness overrides).
 - [x] **Artifact Key**: Nano tech — gain 5 Resources of a single type per Artifact on controlled sectors. Pending choice sub-action in research flow.
 - [x] **Ancient sector discovery tile award in Combat Phase**: Deferred from explore, awarded by combat `discovery_award` step.

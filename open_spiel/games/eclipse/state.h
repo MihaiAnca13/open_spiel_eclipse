@@ -108,7 +108,7 @@ struct Player {
     Species species_id;
     bool is_ai;
     bool has_passed;
-    uint8_t disks_on_sectors, disks_on_actions;
+    uint8_t disks_on_sectors, disks_on_actions, disks_on_reactions;
     Resources resources;
     uint8_t colony_ships_total = 0;
     uint8_t colony_ships_available = 0;
@@ -160,14 +160,15 @@ struct Player {
         int penalty = SPECIES_TABLE[static_cast<size_t>(species_id)].starting_disk_penalty;
         int available = total_influence_discs + static_cast<int>(extra_influence_discs) - penalty -
                         static_cast<int>(disks_on_sectors) -
-                        static_cast<int>(disks_on_actions);
+                        static_cast<int>(disks_on_actions) -
+                        static_cast<int>(disks_on_reactions);
         return available > 0 ? static_cast<uint8_t>(available) : 0;
     }
 };
 
 static_assert(static_cast<size_t>(ShipType::STARBASE) + 1 == 4, "The first 4 ShipType values must map to blueprints index 0-3");
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Player, id, score, species_id, is_ai, has_passed, disks_on_sectors, disks_on_actions, resources, colony_ships_total, colony_ships_available, orbitals, monoliths, blueprints, reputation_track, trade_rate, extra_influence_discs, graveyard_counts, eliminated, researched_techs_military, researched_techs_grid, researched_techs_nano, ambassador_tiles_held, ambassador_tiles_pending_return, traitor_held, discovery_vp_tiles_kept, parts_inventory, warp_portal_eligible, owned_minor_species, pending_artifact_key_chunks);
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Player, id, score, species_id, is_ai, has_passed, disks_on_sectors, disks_on_actions, disks_on_reactions, resources, colony_ships_total, colony_ships_available, orbitals, monoliths, blueprints, reputation_track, trade_rate, extra_influence_discs, graveyard_counts, eliminated, researched_techs_military, researched_techs_grid, researched_techs_nano, ambassador_tiles_held, ambassador_tiles_pending_return, traitor_held, discovery_vp_tiles_kept, parts_inventory, warp_portal_eligible, owned_minor_species, pending_artifact_key_chunks);
 
 struct UpkeepState {
     enum class Step : uint8_t {

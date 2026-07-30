@@ -292,6 +292,7 @@ void FinalizeGameSetup(State& state,
         player.trade_rate = species_data.trade_rate;
         player.disks_on_sectors = 1;
         player.disks_on_actions = 0;
+        player.disks_on_reactions = 0;
         player.extra_influence_discs = 0;
         player.orbitals = 0;
         player.monoliths = 0;

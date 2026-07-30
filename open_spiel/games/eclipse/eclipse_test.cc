@@ -4,6 +4,7 @@
 #include <array>
 #include <iostream>
 #include <random>
+#include <string>
 #include <vector>
 
 #include "open_spiel/games/eclipse/systems/actions/explore.h"
@@ -12,6 +13,7 @@
 #include "open_spiel/games/eclipse/systems/actions/influence.h"
 #include "open_spiel/games/eclipse/systems/actions/bonus.h"
 #include "open_spiel/games/eclipse/systems/scoring.h"
+#include "open_spiel/games/eclipse/systems/upkeep.h"
 #include "open_spiel/games/eclipse/galaxy.h"
 #include "open_spiel/games/eclipse/warped_universe/adjacency.h"
 #include "open_spiel/games/eclipse/warped_universe/warped_universe.h"
@@ -49,6 +51,24 @@ int CountRareTechTilesInTray(const ::State& raw) {
     }
   }
   return rare_tiles;
+}
+
+Action FindLegalAction(const State& state, const std::string& name) {
+  for (Action action : state.LegalActions()) {
+    if (state.ActionToString(state.CurrentPlayer(), action) == name) {
+      return action;
+    }
+  }
+  SpielFatalError("Missing legal action: " + name);
+}
+
+bool HasLegalAction(const State& state, const std::string& name) {
+  for (Action action : state.LegalActions()) {
+    if (state.ActionToString(state.CurrentPlayer(), action) == name) {
+      return true;
+    }
+  }
+  return false;
 }
 
 void BasicEclipseTests() {
@@ -1227,6 +1247,49 @@ void MoveFullActionTest() {
   // Move phase should now be inactive, and turn should advance to player 1
   SPIEL_CHECK_TRUE(raw.move_state.phase == MoveState::Phase::inactive);
   SPIEL_CHECK_EQ(state->CurrentPlayer(), 1);
+}
+
+void ReactionTurnAndBonusActionTest() {
+  auto game = LoadEclipseGame(2, 7);
+  std::unique_ptr<State> state = game->NewInitialState();
+  state->ApplyAction(0);  // Resolve setup.
+
+  EclipseState* eclipse_state = static_cast<EclipseState*>(state.get());
+  ::State& raw = const_cast<::State&>(eclipse_state->RawState());
+  const uint8_t first_player = state->CurrentPlayer();
+  raw.players[first_player].resources.gold = 10;
+  raw.players[first_player].resources.materials = 10;
+
+  state->ApplyAction(FindLegalAction(*state, "PASS"));
+  const uint8_t second_player = state->CurrentPlayer();
+  SPIEL_CHECK_NE(second_player, first_player);
+
+  // MOVE is always an Action choice with an available influence disc. With no
+  // legal destination it completes immediately and returns the turn to the
+  // passed player, who may then react.
+  state->ApplyAction(FindLegalAction(*state, "MOVE"));
+  SPIEL_CHECK_EQ(state->CurrentPlayer(), first_player);
+  SPIEL_CHECK_TRUE(HasLegalAction(*state, "REACTION_BUILD"));
+  SPIEL_CHECK_TRUE(HasLegalAction(*state, "TRADE_GOLD_TO_SCIENCE"));
+
+  state->ApplyAction(FindLegalAction(*state, "TRADE_GOLD_TO_SCIENCE"));
+  SPIEL_CHECK_EQ(state->CurrentPlayer(), first_player);
+
+  state->ApplyAction(FindLegalAction(*state, "REACTION_BUILD"));
+  SPIEL_CHECK_EQ(raw.players[first_player].disks_on_reactions, 1);
+  ::Player without_reaction_disc = raw.players[first_player];
+  without_reaction_disc.disks_on_reactions = 0;
+  SPIEL_CHECK_GT(PlayerUpkeepCost(raw.players[first_player]),
+                 PlayerUpkeepCost(without_reaction_disc));
+  SPIEL_CHECK_TRUE(HasLegalAction(*state, "TRADE_GOLD_TO_SCIENCE"));
+  state->ApplyAction(FindLegalAction(*state, "TRADE_GOLD_TO_SCIENCE"));
+  SPIEL_CHECK_TRUE(raw.build_state.phase == BuildState::Phase::choose_build);
+
+  state->ApplyAction(FindLegalAction(*state, "BUILD_STOP"));
+  SPIEL_CHECK_EQ(state->CurrentPlayer(), second_player);
+  state->ApplyAction(FindLegalAction(*state, "PASS"));
+  SPIEL_CHECK_NE(static_cast<int>(raw.current_phase),
+                 static_cast<int>(RoundPhase::ACTION));
 }
 
 void StrictMainActionFilteringTest() {
@@ -2853,6 +2916,7 @@ int main(int argc, char** argv) {
   RUN_TEST(UpgradeFullActionTest);
   RUN_TEST(UpgradeDiscoveryPartsTest);
   RUN_TEST(MoveFullActionTest);
+  RUN_TEST(ReactionTurnAndBonusActionTest);
   RUN_TEST(StrictMainActionFilteringTest);
   RUN_TEST(UpkeepRoundFlowTest);
   RUN_TEST(UpkeepAbandonSectorTest);
