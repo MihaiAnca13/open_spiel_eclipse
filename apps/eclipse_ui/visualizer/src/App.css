@@ -3040,6 +3040,7 @@
 .minor-species-icon {
   border-radius: 3px;
   border: 1px solid #475569;
+  clip-path: inset(0 256px 256px 0);
 }
 
 /* ── Action section dividers ─────────────────────────────────────── */

@@ -317,6 +317,7 @@ export default function ActionPanel({
                             <img
                               src={minorSpeciesImageUrl(msIdx + 1)}
                               alt=""
+                              className="minor-species-icon"
                               style={{
                                 width: 24, height: 24,
                                 objectFit: 'cover',

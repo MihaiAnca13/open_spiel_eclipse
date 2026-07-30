@@ -561,6 +561,43 @@ Player EclipseState::CurrentPlayer() const {
       return eclipse_state_.combat_state.discovery_decision_player;
     }
   }
+
+  // Diplomacy sub-states: return the player who needs to act.
+  if (eclipse_state_.diplomacy_state.phase != DiplomacyState::Phase::inactive) {
+    const auto& ds = eclipse_state_.diplomacy_state;
+    switch (ds.phase) {
+      case DiplomacyState::Phase::choose_accept:
+        // Partner must accept or decline.
+        if (ds.partner_id < eclipse_state_.players.size()) {
+          return ds.partner_id;
+        }
+        break;
+      case DiplomacyState::Phase::choose_rearrange:
+        if (ds.rearrange_side == 0 && ds.player_id < eclipse_state_.players.size()) {
+          return ds.player_id;
+        } else if (ds.rearrange_side == 1 && ds.partner_id < eclipse_state_.players.size()) {
+          return ds.partner_id;
+        }
+        break;
+      case DiplomacyState::Phase::choose_pop_track:
+        if (ds.pop_track_side == 0 && ds.player_id < eclipse_state_.players.size()) {
+          return ds.player_id;
+        } else if (ds.pop_track_side == 1 && ds.partner_id < eclipse_state_.players.size()) {
+          return ds.partner_id;
+        }
+        break;
+      case DiplomacyState::Phase::choose_return_track: {
+        uint8_t pending = pending_return_track_player(eclipse_state_);
+        if (pending < eclipse_state_.players.size()) {
+          return pending;
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
   return eclipse_state_.current_player;
 }
 

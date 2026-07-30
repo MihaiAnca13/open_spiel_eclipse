@@ -2499,6 +2499,30 @@ void DiplomacyDeclineTest() {
                     DiplomacyState::Phase::inactive);
 }
 
+void DiplomacyCurrentPlayerReturnsPartnerOnChooseAcceptTest() {
+  // CurrentPlayer() must return the partner during choose_accept so the
+  // Accept/Decline buttons are enabled for the partner.
+  ::State raw = MakeFourPlayerState();
+  raw.current_player = 0;
+  raw.diplomacy_state.phase = DiplomacyState::Phase::choose_accept;
+  raw.diplomacy_state.player_id = 0;
+  raw.diplomacy_state.partner_id = 1;
+
+  auto game = LoadEclipseGame(4, 7);
+  // RestoreFromSnapshot needs a non-const EclipseState*, so create one.
+  EclipseState* es = dynamic_cast<EclipseState*>(game->NewInitialState().release());
+  SPIEL_CHECK_TRUE(es != nullptr);
+
+  SetupConfig cfg;
+  cfg.players = 4;
+  es->RestoreFromSnapshot(cfg, raw, EclipseState::PendingRandomEvent::none);
+
+  // CurrentPlayer must be the partner (1), not the proposer (0).
+  SPIEL_CHECK_EQ(es->CurrentPlayer(), 1);
+
+  delete es;
+}
+
 // ── Fix #2: Traitor Tile transfer ──────────────────────────────────────────
 
 void DiplomacyTraitorTileTransferTest() {
@@ -2873,10 +2897,11 @@ int main(int argc, char** argv) {
   RUN_TEST(DiplomacyDeclineTest);
   RUN_TEST(DiplomacyTraitorTileTransferTest);
   RUN_TEST(DiplomacyCoLocatedShipsRejectsTest);
+  RUN_TEST(DiplomacyCurrentPlayerReturnsPartnerOnChooseAcceptTest);
   RUN_TEST(WarpedUniverseTest);
   RUN_TEST(WarpedUniverseExploreRotationTest);
   RUN_TEST(SectorCoordMapTest);
 
 #undef RUN_TEST
-  std::cout << "[==========] 74 tests passed." << std::endl;
+  std::cout << "[==========] 75 tests passed." << std::endl;
 }
