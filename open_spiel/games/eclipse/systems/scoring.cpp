@@ -144,9 +144,6 @@ PlayerScoreBreakdown compute_player_score(const ::State& state, uint8_t player_i
                 score.minor_species_vp +=
                     static_cast<int16_t>(player.ambassador_tiles_held) + 1;
                 break;
-            case MinorSpeciesAbility::FLAT_VP:
-                score.minor_species_vp += static_cast<int16_t>(ms.ability_param);
-                break;
             default:
                 // All other tiles grant end_vp flat points.
                 score.minor_species_vp += static_cast<int16_t>(ms.end_vp);
