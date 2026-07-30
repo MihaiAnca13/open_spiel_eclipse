@@ -3,6 +3,7 @@
 #include "open_spiel/games/eclipse/state.h"
 #include "open_spiel/games/eclipse/minor_species.h"
 #include "open_spiel/games/eclipse/systems/actions/bonus.h"
+#include "open_spiel/games/eclipse/systems/actions/diplomacy.h"
 
 namespace open_spiel::eclipse {
 
@@ -24,6 +25,9 @@ namespace open_spiel::eclipse {
         for (uint8_t owned : player.owned_minor_species) {
             if (owned == ms_idx) return false;
         }
+
+        // Must have a free ambassador tile slot (rules: tile placed on Rep Track).
+        if (!has_free_ambassador_slot(player)) return false;
 
         const MinorSpeciesData& data = MINOR_SPECIES_TABLE[ms_idx];
         if (player.resources.gold < data.cost) return false;
@@ -49,6 +53,20 @@ namespace open_spiel::eclipse {
 
         // Pay gold cost.
         player.resources.gold -= data.cost;
+
+        // Find a free ambassador slot and place the tile.
+        uint8_t slot = find_free_ambassador_slot(player);
+        if (slot == 255) return false;
+        ReputationSlot& rs = player.reputation_track[slot];
+        rs.holds_ambassador = true;
+        rs.ambassador_from = 255; // 255 = minor species (not a player)
+        rs.rep_value = ReputationTiles::NONE;
+        rs.pending_track_choice = false;
+
+        // Increment ambassador count (affects scoring, diplomacy capacity).
+        if (player.ambassador_tiles_held < 255) {
+            ++player.ambassador_tiles_held;
+        }
 
         // Add to owned list.
         player.owned_minor_species.push_back(ms_idx);
