@@ -4,6 +4,11 @@ export const SECTOR_ASSETS_BASE = `${API_BASE}/assets/sectors`;
 export const TECH_ASSETS_BASE = `${API_BASE}/assets/tech`;
 export const SHIP_ASSETS_BASE = `${API_BASE}/assets/ships`;
 export const DISCOVERY_ASSETS_BASE = `${API_BASE}/assets/discovery`;
+export const MINOR_SPECIES_ASSETS_BASE = `${API_BASE}/assets/minor_species`;
+
+export function minorSpeciesImageUrl(index: number): string {
+  return `${MINOR_SPECIES_ASSETS_BASE}/minor_species_${index}.png`;
+}
 
 export function techImageUrl(name: string, category: string): string {
   const slug = name

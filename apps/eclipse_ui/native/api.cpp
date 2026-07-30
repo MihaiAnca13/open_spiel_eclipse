@@ -7,6 +7,7 @@
 
 #include "open_spiel/games/eclipse/discovery_tiles.h"
 #include "open_spiel/games/eclipse/eclipse.h"
+#include "open_spiel/games/eclipse/minor_species.h"
 #include "open_spiel/games/eclipse/systems/setup.h"
 #include "open_spiel/games/eclipse/tech.h"
 #include "open_spiel/json/include/nlohmann/json.hpp"
@@ -246,6 +247,19 @@ std::string GetGameMetadataApi() {
     discovery_catalog[std::to_string(id)] = tile_json;
   }
   metadata["discovery_catalog"] = discovery_catalog;
+
+  nlohmann::json minor_species_catalog = nlohmann::json::object();
+  for (size_t i = 0; i < MINOR_SPECIES_COUNT; ++i) {
+    const auto& ms = MINOR_SPECIES_TABLE[i];
+    nlohmann::json ms_json = nlohmann::json::object();
+    ms_json["name"] = ms.name;
+    ms_json["cost"] = ms.cost;
+    ms_json["end_vp"] = ms.end_vp;
+    ms_json["ability"] = static_cast<int>(ms.ability);
+    ms_json["ability_param"] = ms.ability_param;
+    minor_species_catalog[std::to_string(i)] = ms_json;
+  }
+  metadata["minor_species_catalog"] = minor_species_catalog;
 
   nlohmann::json npc_difficulties = nlohmann::json::array();
   npc_difficulties.push_back("Easy");

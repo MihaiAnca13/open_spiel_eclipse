@@ -30,6 +30,7 @@ SECTORS_DIR = Path(__file__).resolve().parent.parent / "data" / "sectors"
 TECH_DIR = Path(__file__).resolve().parent.parent / "data" / "tech"
 SHIPS_DIR = Path(__file__).resolve().parent.parent / "data" / "ships"
 DISCOVERY_DIR = Path(__file__).resolve().parent.parent / "data" / "discovery"
+MINOR_SPECIES_DIR = Path(__file__).resolve().parent.parent / "data" / "minor_species"
 
 
 def _build_sector_manifest() -> dict[str, str]:
@@ -67,6 +68,7 @@ app.mount("/assets/sectors", StaticFiles(directory=str(SECTORS_DIR)), name="sect
 app.mount("/assets/tech", StaticFiles(directory=str(TECH_DIR)), name="tech")
 app.mount("/assets/ships", StaticFiles(directory=str(SHIPS_DIR)), name="ships")
 app.mount("/assets/discovery", StaticFiles(directory=str(DISCOVERY_DIR)), name="discovery")
+app.mount("/assets/minor_species", StaticFiles(directory=str(MINOR_SPECIES_DIR)), name="minor_species")
 
 
 @app.get("/sectors/manifest")

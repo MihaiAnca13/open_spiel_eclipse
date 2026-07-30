@@ -31,6 +31,9 @@ import ColonyShips from './components/ui/ColonyShips';
 import TradePanel from './components/ui/TradePanel';
 import ResearchTracks from './ResearchTracks';
 import ShipLegend from './components/game/ShipLegend';
+import ReputationTrack from './components/ui/ReputationTrack';
+import DiplomacyPanel from './components/overlays/DiplomacyPanel';
+import { minorSpeciesImageUrl } from './types/lobby';
 
 type MainActionPreview = 'research' | 'build' | 'influence' | 'upgrade' | 'move' | 'explore';
 
@@ -408,6 +411,10 @@ function App({
     }
     return actions;
   }, [gameState, mySeatIdx, gameMetadata.tech_catalog]);
+  const diplomacyState = gameState?.diplomacy_state;
+  const minorSpeciesPool = gameState?.minor_species_pool;
+  const minorSpeciesPendingTrack = gameState?.minor_species_pending_track;
+  const isDiplomacyActive = diplomacyState?.phase !== undefined && diplomacyState.phase !== 'inactive';
   const selectedSectorId = exploreState?.selected_sector_id ?? 0;
   const findDiscoveryTileForSector = (sectorId: number): DiscoveryTileDefinition | undefined => {
     if (!gameState || sectorId <= 0) return undefined;
@@ -689,6 +696,40 @@ function App({
           </span>
         </div>
         <PopulationTracks resources={player.resources} playerColor={getPlayerColor(playerId)} />
+        {player.reputation_track && player.reputation_track.length > 0 && (
+          <div className="economy-rep-track">
+            <ReputationTrack
+              track={player.reputation_track}
+              playerColors={gameState!.players.map((_, i) => getPlayerColor(i))}
+              compact
+            />
+            <div className="economy-rep-meta">
+              <span title="Ambassador tiles held">👥 {player.ambassador_tiles_held}</span>
+              {player.traitor_held && <span className="traitor-badge" title="Traitor Tile">👿 -2VP</span>}
+            </div>
+            {player.owned_minor_species && player.owned_minor_species.length > 0 && (
+              <div className="economy-minor-species">
+                {player.owned_minor_species.map((msIdx) => {
+                  const def = gameMetadata.minor_species_catalog?.[String(msIdx)];
+                  return (
+                    <img
+                      key={msIdx}
+                      src={minorSpeciesImageUrl(msIdx + 1)}
+                      alt={def?.name ?? `MS ${msIdx}`}
+                      title={def ? `${def.name} — ${def.ability}` : ''}
+                      className="minor-species-icon"
+                      style={{
+                        width: 20, height: 20,
+                        objectFit: 'cover',
+                        objectPosition: 'top left',
+                      }}
+                    />
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
         <ResearchTracks
           militaryMask={player.researched_techs_military}
           gridMask={player.researched_techs_grid}
@@ -867,7 +908,7 @@ function App({
             )}
 
             {/* Floating action panel — only show when it's my turn */}
-            {isStarted && isMyTurn && currentPhase === 'action' && (
+            {isStarted && isMyTurn && currentPhase === 'action' && !isDiplomacyActive && (
               <div className="action-float">
                 <ActionPanel
                   explore={exploreState}
@@ -913,12 +954,29 @@ function App({
                   selectedMoveUnitIdx={selectedMoveUnitIdx}
                   onSelectMoveUnit={setSelectedMoveUnitIdx}
                   selectedMoveSectorId={selectedMoveSectorId}
+                  gameMetadata={gameMetadata}
+                  minorSpeciesPool={minorSpeciesPool}
+                  minorSpeciesPendingTrack={minorSpeciesPendingTrack}
+                />
+              </div>
+            )}
+
+            {/* Floating diplomacy panel */}
+            {isStarted && isDiplomacyActive && (
+              <div className="action-float">
+                <DiplomacyPanel
+                  diplomacy={diplomacyState}
+                  gameState={gameState!}
+                  legalActions={legalActions}
+                  busy={actionInProgress}
+                  onAction={submitAction}
+                  playerLabel={playerLabel}
                 />
               </div>
             )}
 
             {/* Waiting message */}
-            {isStarted && !isMyTurn && !isTerminal && (
+            {isStarted && !isMyTurn && !isTerminal && !isDiplomacyActive && (
               <div
                 className="action-float"
                 style={{ top: '8px', left: '50%', transform: 'translateX(-50%)', maxWidth: '300px', textAlign: 'center' }}

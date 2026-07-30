@@ -3,14 +3,33 @@
 // `gameState.explore_state`, so the UI never needs to reimplement game rules.
 
 import { ACTION } from './actionTypes';
-import type { InfluenceState, BuildState, UpgradeState, MoveState, Unit, BuildCosts, Player, ShipPartCatalog, DiscoveryTileDefinition } from './types/game';
+import type { InfluenceState, BuildState, UpgradeState, MoveState, Unit, BuildCosts, Player, ShipPartCatalog, DiscoveryTileDefinition, GameMetadata, MinorSpeciesDef } from './types/game';
 import BuildPanel from './components/ui/BuildPanel';
 import MovePanel from './components/ui/MovePanel';
 import UpgradePanel from './components/ui/UpgradePanel';
 import DiscoveryChoice from './components/ui/DiscoveryChoice';
+import { minorSpeciesImageUrl } from './types/lobby';
 
 const RING_NAME: Record<number, string> = { 0: 'Inner (I)', 1: 'Middle (II)', 2: 'Outer (III)' };
 type MainActionPreview = 'research' | 'build' | 'influence' | 'upgrade' | 'move' | 'explore';
+
+const MINOR_SPECIES_ABILITY_TEXT: Record<number, (param: number) => string> = {
+  0: () => '',
+  1: () => '1 VP per Reputation tile at game end',
+  2: (param) => `−${param} Materials for Dreadnoughts`,
+  3: () => '1 VP per Ambassador tile at game end',
+  4: (param) => `−${param} Materials for Orbitals`,
+  5: () => '',
+  6: (param) => `−${param} Materials for Monoliths`,
+  7: () => 'Place 1 Population Cube',
+  8: (param) => `−${param} Science for Research`,
+  9: (param) => `−${param} Materials for Cruisers`,
+};
+
+function minorSpeciesEffectText({ ability, ability_param: abilityParam, end_vp: endVp }: MinorSpeciesDef): string {
+  const abilityText = MINOR_SPECIES_ABILITY_TEXT[ability]?.(abilityParam);
+  return [abilityText, endVp > 0 ? `${endVp} VP at game end` : ''].filter(Boolean).join(' · ');
+}
 
 export interface ExploreState {
   phase: string;
@@ -70,6 +89,9 @@ interface Props {
   selectedMoveUnitIdx: number | null;
   onSelectMoveUnit: (idx: number | null) => void;
   selectedMoveSectorId?: number | null;
+  gameMetadata?: GameMetadata;
+  minorSpeciesPool?: number[];
+  minorSpeciesPendingTrack?: number;
 }
 
 export default function ActionPanel({
@@ -110,6 +132,9 @@ export default function ActionPanel({
   selectedMoveUnitIdx,
   onSelectMoveUnit,
   selectedMoveSectorId,
+  gameMetadata,
+  minorSpeciesPool,
+  minorSpeciesPendingTrack,
 }: Props) {
   const legal = new Set(legalActions);
   const influencePhase = influence?.phase ?? 'inactive';
@@ -238,6 +263,77 @@ export default function ActionPanel({
               <div className="action-row">
                 {renderPreviewButton(ACTION.UPGRADE, '🛠️ Upgrade', hasPassed ? 'secondary' : 'primary', hasPassed)}
               </div>
+
+              {/* Diplomacy propose (free bonus action) */}
+              {(() => {
+                const proposeActions = legalActions.filter(
+                  a => a >= ACTION.DIPLOMACY_PROPOSE_START && a < ACTION.DIPLOMACY_PICK_TRACK_START
+                );
+                if (proposeActions.length === 0) return null;
+                return (
+                  <div className="action-section">
+                    <span className="text-xs text-[#94a3b8]">Diplomacy (free action):</span>
+                    <div className="action-row flex-wrap">
+                      {proposeActions.map(a => {
+                        const encoded = a - ACTION.DIPLOMACY_PROPOSE_START;
+                        const partner = encoded % 6;
+                        return (
+                          <button
+                            key={a}
+                            className="action-btn secondary"
+                            disabled={busy || hasPassed}
+                            onClick={() => onAction(a)}
+                          >
+                            Propose to P{partner + 1}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Minor species formation (free bonus action) */}
+              {(() => {
+                const catalog = gameMetadata?.minor_species_catalog;
+                if (!minorSpeciesPool?.length || !catalog) return null;
+                return (
+                  <div className="action-section">
+                    <span className="text-xs text-[#94a3b8]">Minor Species pool (free action):</span>
+                    <div className="action-row flex-wrap">
+                      {minorSpeciesPool.map(msIdx => {
+                        const actionId = ACTION.MINOR_SPECIES_START + msIdx;
+                        const msDef = catalog[String(msIdx)];
+                        if (!msDef) return null;
+                        const canForm = legal.has(actionId) && !hasPassed;
+                        return (
+                          <button
+                            key={msIdx}
+                            className="action-btn secondary"
+                            disabled={busy || !canForm}
+                            onClick={() => onAction(actionId)}
+                            title={`${msDef.name} — ${minorSpeciesEffectText(msDef)}${canForm ? '' : ' (unavailable)'}`}
+                          >
+                            <img
+                              src={minorSpeciesImageUrl(msIdx + 1)}
+                              alt=""
+                              style={{
+                                width: 24, height: 24,
+                                objectFit: 'cover',
+                                objectPosition: 'top left',
+                                verticalAlign: 'middle',
+                                marginRight: 4,
+                                imageRendering: 'pixelated',
+                              }}
+                            />
+                            {msDef.name} ({msDef.cost}💰) — {minorSpeciesEffectText(msDef)}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })()}
             </>
           )}
         </>
@@ -267,6 +363,20 @@ export default function ActionPanel({
             {renderActionButton(ACTION.CHOOSE_RETURN_TRACK_START + 0, '💰 Money')}
             {renderActionButton(ACTION.CHOOSE_RETURN_TRACK_START + 1, '🔬 Science')}
             {renderActionButton(ACTION.CHOOSE_RETURN_TRACK_START + 2, '⚙️ Materials')}
+          </div>
+        </>
+      )}
+
+      {/* Minor species track pick (PLACE_POP_CUBE pending) */}
+      {minorSpeciesPendingTrack !== undefined && minorSpeciesPendingTrack === player?.id && (
+        <>
+          <span className="text-xs text-[#94a3b8]">
+            Choose a track for the Minor Species population cube:
+          </span>
+          <div className="action-row">
+            {renderActionButton(ACTION.MINOR_SPECIES_TRACK_START + 0, '💰 Money')}
+            {renderActionButton(ACTION.MINOR_SPECIES_TRACK_START + 1, '🔬 Science')}
+            {renderActionButton(ACTION.MINOR_SPECIES_TRACK_START + 2, '⚙️ Materials')}
           </div>
         </>
       )}

@@ -119,11 +119,11 @@ struct SectorDefinition {
 // Index this by sector_id for O(1) lookup
 static const SectorDefinition SECTOR_TABLE[] = {
     { "Galactic Center", 1, SectorType::CENTER, 4, 0b111111, true, true, {{PlanetType::ADV_MATERIALS}, {PlanetType::MATERIALS}, {PlanetType::ADV_SCIENCE}, {PlanetType::SCIENCE}, {PlanetType::ADV_MONEY}, {PlanetType::MONEY}}, 0, false, true, false },
-    { "CASTOR", 101, SectorType::INNER, 2, 0b011111, false, true, {{PlanetType::ADV_MATERIALS}, {PlanetType::MATERIALS}, {PlanetType::MONEY}}, 0, false, false, false },
+    { "CASTOR", 101, SectorType::INNER, 2, 0b011111, false, true, {{PlanetType::ADV_MATERIALS}, {PlanetType::MATERIALS}, {PlanetType::MONEY}}, 1, false, false, false },
     { "Pollux", 102, SectorType::INNER, 2, 0b101101, false, false, {{PlanetType::SCIENCE}, {PlanetType::SCIENCE}}, 0, false, false, false },
     { "Beta Leonis", 103, SectorType::INNER, 2, 0b111011, false, false, {{PlanetType::SCIENCE}, {PlanetType::MONEY}}, 0, false, false, false },
-    { "ARCTURUS", 104, SectorType::INNER, 2, 0b110110, false, true, {{PlanetType::ADV_MONEY}, {PlanetType::MONEY}, {PlanetType::ADV_SCIENCE}, {PlanetType::SCIENCE}}, 0, false, false, false },
-    { "ZETA HERCULIS", 105, SectorType::INNER, 2, 0b110111, false, true, {{PlanetType::MONEY}, {PlanetType::SCIENCE}, {PlanetType::ADV_MATERIALS}}, 0, false, false, false },
+    { "ARCTURUS", 104, SectorType::INNER, 2, 0b110110, false, true, {{PlanetType::ADV_MONEY}, {PlanetType::MONEY}, {PlanetType::ADV_SCIENCE}, {PlanetType::SCIENCE}}, 2, false, false, false },
+    { "ZETA HERCULIS", 105, SectorType::INNER, 2, 0b110111, false, true, {{PlanetType::MONEY}, {PlanetType::SCIENCE}, {PlanetType::ADV_MATERIALS}}, 1, false, false, false },
     { "Capella", 106, SectorType::INNER, 2, 0b111100, false, false, {{PlanetType::SCIENCE}, {PlanetType::MATERIALS}}, 0, false, false, false },
     { "Aldebaran", 107, SectorType::INNER, 3, 0b111101, true, false, {{PlanetType::ADV_SCIENCE}, {PlanetType::MONEY}, {PlanetType::ADV_MATERIALS}}, 0, false, false, false },
     { "Mu Cassiopeiae", 108, SectorType::INNER, 2, 0b110110, false, true, {{PlanetType::ADV_MONEY}, {PlanetType::SCIENCE}, {PlanetType::ANY}}, 1, false, false, false },
@@ -160,7 +160,7 @@ static const SectorDefinition SECTOR_TABLE[] = {
     { "Delta Corvi", 281, SectorType::MIDDLE, 2, 0b101101, false, true, {{PlanetType::SCIENCE}, {PlanetType::MONEY}}, 0, false, false, true },
     { "ZETA DRACONIS", 301, SectorType::OUTER, 2, 0b101100, true, true, {{PlanetType::SCIENCE}, {PlanetType::MONEY}, {PlanetType::ADV_MATERIALS}}, 2, false, false, false },
     { "Gamma Serpentis", 302, SectorType::OUTER, 2, 0b100110, true, true, {{PlanetType::ADV_SCIENCE}, {PlanetType::ADV_MONEY}, {PlanetType::MATERIALS}}, 1, false, false, false },
-    { "ETA CEPHEI", 303, SectorType::OUTER, 2, 0b000101, true, true, {{PlanetType::ADV_SCIENCE}, {PlanetType::ADV_MONEY}, {PlanetType::ANY}}, 0, false, false, false },
+    { "ETA CEPHEI", 303, SectorType::OUTER, 2, 0b000101, true, true, {{PlanetType::ADV_SCIENCE}, {PlanetType::ADV_MONEY}, {PlanetType::ANY}}, 1, false, false, false },
     { "THETA PEGASI", 304, SectorType::OUTER, 2, 0b100100, false, false, {{PlanetType::ADV_MONEY}, {PlanetType::MATERIALS}}, 0, false, false, false },
     { "Lambda Serpentis", 305, SectorType::OUTER, 1, 0b110100, false, true, {{PlanetType::SCIENCE}, {PlanetType::MATERIALS}}, 1, false, false, false },
     { "BETA CENTAURI", 306, SectorType::OUTER, 1, 0b010100, false, false, {{PlanetType::MONEY}, {PlanetType::MATERIALS}}, 0, false, false, false },
