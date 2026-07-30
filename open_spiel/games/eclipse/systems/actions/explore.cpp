@@ -303,17 +303,19 @@ std::vector<uint8_t> legal_explore_rotations(const State& state, uint8_t player_
     struct Neighbour {
         bool anchor = false;
         uint8_t mask = 0;
+        int opposite_edge = 0;
     };
     std::array<Neighbour, 6> neighbours;
     for (uint8_t d = 0; d < 6; ++d) {
-        int nq = es.zone_q + HEX_DIRECTIONS[d].first;
-        int nr = es.zone_r + HEX_DIRECTIONS[d].second;
+        auto [neighbor_coord, opposite_edge] = GetAdjacency(state, HexCoord{es.zone_q, es.zone_r}, d);
+        int nq = neighbor_coord.q;
+        int nr = neighbor_coord.r;
         if (!in_galaxy_bounds(nq, nr)) continue;
         const Sector& nb = state.galaxy.at(nq, nr);
         if (nb.sector_id == 0 || !is_explore_anchor(state, player_id, nb)) continue;
         const SectorDefinition* ndef = get_sector_definition(nb.sector_id);
         if (ndef == nullptr) continue;
-        neighbours[d] = {true, rotate_edge_mask(ndef->wormholes_mask, nb.rotation)};
+        neighbours[d] = {true, rotate_edge_mask(ndef->wormholes_mask, nb.rotation), opposite_edge};
     }
 
     const bool wormhole_generator =
@@ -325,7 +327,7 @@ std::vector<uint8_t> legal_explore_rotations(const State& state, uint8_t player_
         for (uint8_t d = 0; d < 6 && !connects; ++d) {
             if (!neighbours[d].anchor) continue;
             bool my_edge = has_edge(my_mask, d);
-            bool their_edge = has_edge(neighbours[d].mask, (d + 3) % 6);
+            bool their_edge = has_edge(neighbours[d].mask, neighbours[d].opposite_edge);
             connects = wormhole_generator ? (my_edge || their_edge)
                                           : (my_edge && their_edge);
         }
