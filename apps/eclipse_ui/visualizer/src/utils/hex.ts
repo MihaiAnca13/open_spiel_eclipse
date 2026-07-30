@@ -1,5 +1,14 @@
 export const hexSize = 35;
-export const IMAGE_ROTATION_OFFSET = 0;
+// The PNG tile art sits 180 degrees from the backend's rotation=0 wormhole
+// masks: art draws a definition's edge d at direction index d+3 (verified on
+// sectors 303 and 306).
+//
+// Handedness: axialToPixel puts direction index d at screen angle 30 - 60*d
+// (E=+30, NE=-30, NW=-90, W=-150, SW=+150, SE=+90), so advancing an index is
+// counter-clockwise on screen. C++ rotate_edge_mask moves bit d to bit
+// d+rotation, so +rotation is counter-clockwise too, and SVG rotate() is
+// positive-clockwise. Net image angle = 180 - 60 * rotation.
+export const IMAGE_ROTATION_OFFSET = 180;
 export const SQRT3 = Math.sqrt(3);
 
 // Axial (q,r) → pixel for a flat-top hex layout.

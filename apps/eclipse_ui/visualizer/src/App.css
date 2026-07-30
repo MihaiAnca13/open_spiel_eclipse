@@ -2944,3 +2944,111 @@
     min-height: 280px;
   }
 }
+
+/* ── Diplomacy Panel ─────────────────────────────────────────────── */
+.diplomacy-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.diplomacy-content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.diplomacy-info {
+  font-size: 11px;
+  color: #94a3b8;
+  line-height: 1.3;
+}
+
+.diplomacy-buttons {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.diplomacy-buttons .btn {
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: filter 0.15s ease;
+}
+
+.diplomacy-buttons .btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.diplomacy-buttons .btn-primary {
+  background-color: #2563eb;
+  color: #f8fafc;
+}
+
+.diplomacy-buttons .btn-danger {
+  background-color: #7f1d1d;
+  color: #fecaca;
+}
+
+.diplomacy-buttons .btn-secondary {
+  background-color: #1e293b;
+  color: #cbd5e1;
+  border-color: #334155;
+}
+
+.diplomacy-buttons .btn:hover:not(:disabled) {
+  filter: brightness(1.15);
+}
+
+/* ── Reputation Track in economy card ────────────────────────────── */
+.economy-rep-track {
+  border-top: 1px solid #2d313f;
+  padding-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.economy-rep-meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 10px;
+  color: #94a3b8;
+}
+
+.traitor-badge {
+  color: #fca5a5;
+  font-weight: 700;
+  font-size: 9px;
+  background-color: rgba(127, 29, 29, 0.5);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
+.economy-minor-species {
+  display: flex;
+  gap: 3px;
+  flex-wrap: wrap;
+}
+
+.minor-species-icon {
+  border-radius: 3px;
+  border: 1px solid #475569;
+}
+
+/* ── Action section dividers ─────────────────────────────────────── */
+.action-section {
+  border-top: 1px solid #2d313f;
+  padding-top: 6px;
+  margin-top: 4px;
+}
+
+.action-section .flex-wrap {
+  flex-wrap: wrap;
+}

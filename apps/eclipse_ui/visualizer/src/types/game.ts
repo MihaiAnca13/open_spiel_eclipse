@@ -75,6 +75,7 @@ export interface GameMetadata {
   tech_catalog?: Record<string, GameTechDefinition>;
   ship_part_catalog?: ShipPartCatalog;
   discovery_catalog?: DiscoveryCatalog;
+  minor_species_catalog?: Record<string, MinorSpeciesDef>;
   npc_difficulties?: string[];
 }
 
@@ -86,6 +87,32 @@ export interface DiscoveryTileDefinition {
 }
 
 export type DiscoveryCatalog = Record<string, DiscoveryTileDefinition>;
+
+export interface ReputationSlot {
+  kind: 'ambassador_or_rep' | 'ambassador_only' | 'rep_only';
+  holds_ambassador: boolean;
+  rep_value: string;
+  ambassador_from: number;
+  pending_track_choice: boolean;
+}
+
+export interface DiplomacyState {
+  phase: string;
+  player_id: number;
+  partner_id: number;
+  rearrange_side: number;
+  pop_track_side: number;
+  return_side: number;
+  selected_track: number;
+}
+
+export interface MinorSpeciesDef {
+  name: string;
+  cost: number;
+  end_vp: number;
+  ability: number;
+  ability_param: number;
+}
 
 export interface Player {
   id: number;
@@ -102,7 +129,12 @@ export interface Player {
   monoliths: number;
   blueprints: Blueprint[];
   reputation_tiles: string[];
+  reputation_track: ReputationSlot[];
+  ambassador_tiles_held: number;
+  ambassador_tiles_pending_return: number;
+  traitor_held: boolean;
   parts_inventory?: string[];
+  owned_minor_species?: number[];
   trade_rate: number;
   researched_techs: number;
   researched_techs_military: number;
@@ -309,6 +341,9 @@ export interface GameState {
   move_state?: MoveState;
   combat_state?: CombatState;
   upkeep_state?: UpkeepState;
+  diplomacy_state?: DiplomacyState;
+  minor_species_pool?: number[];
+  minor_species_pending_track?: number;
   warped_universe?: boolean;
   layout_kinds?: number[];
   warp_link_dest_cell?: number[];

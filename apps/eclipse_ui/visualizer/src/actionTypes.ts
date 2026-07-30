@@ -55,6 +55,18 @@ export const ACTION = {
   MOVE_WARP_DESTINATION_START: 10168,    // MOVE_WARP_START + 128
   MOVE_CODES_PER_UNIT: 7,
 
+  // Diplomacy action IDs — mirror open_spiel/games/eclipse/eclipse.cc.
+  DIPLOMACY_PROPOSE_START: 11005,
+  DIPLOMACY_PICK_TRACK_START: 11041,
+  DIPLOMACY_RETURN_START: 11047,
+  DIPLOMACY_SWAP_START: 11057,
+  DIPLOMACY_ACCEPT: 11097,
+  DIPLOMACY_DECLINE: 11098,
+  MINOR_SPECIES_START: 11099,
+  MINOR_SPECIES_END: 11108,
+  MINOR_SPECIES_TRACK_START: 11108,
+  MINOR_SPECIES_TRACK_END: 11111,
+
   // Upkeep action IDs — mirror open_spiel/games/eclipse/eclipse.cc:105-106.
   // Colony placement / bankruptcy resolution during upkeep reuse the existing
   // COLONY_SHIP_START, RECLAIM_FROM_CELL_START, TRADE_START and
@@ -75,7 +87,7 @@ export const ACTION = {
   COMBAT_INFLUENCE_NO: 10773,
   COMBAT_DISCOVERY_REWARD: 10774,
   COMBAT_DISCOVERY_VP: 10775,
-  COMBAT_INFLUENCE_TO_CELL_START: 10776, // + galaxy cell index (0..224)
+  COMBAT_INFLUENCE_TO_CELL_START: 10780, // + galaxy cell index (0..224)
 } as const;
 
 // Population track names, indexed by track id (mirrors PopTrack in bonus.h).

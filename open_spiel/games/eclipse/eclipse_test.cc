@@ -13,6 +13,7 @@
 #include "open_spiel/games/eclipse/systems/scoring.h"
 #include "open_spiel/games/eclipse/galaxy.h"
 #include "open_spiel/games/eclipse/warped_universe/adjacency.h"
+#include "open_spiel/games/eclipse/warped_universe/warped_universe.h"
 #include "open_spiel/json/include/nlohmann/json.hpp"
 #include "open_spiel/spiel.h"
 #include "open_spiel/spiel_utils.h"
@@ -2620,6 +2621,92 @@ void WarpedUniverseTest() {
   SPIEL_CHECK_EQ(dest_dir, opposite_edge_B);
 }
 
+void WarpedUniverseExploreRotationTest() {
+  // Setup: 3-player warped universe. Missing positions are 1, 3, 5.
+  // Canonical pairing 0 (steps=0 for pos 1):
+  //   warp cell (0,-1), edgeA=0 -> sector at (1,-1), edgeB=4 -> sector at (-1,0)
+  //   (1,-1) has warp link dir 3 (West) <-> (-1,0) has warp link dir 1 (Northeast)
+  //
+  // We place an anchor at (1,-1) and make (-1,0) the explorable zone.
+  ::State s;
+  s.players = decltype(s.players){};
+  {
+    ::Player p{};
+    p.id = 0;
+    p.species_id = Species::TERRAN_FACTIONS;
+    s.players.push_back(p);
+  }
+  s.warped_universe = true;
+  RebuildWarpLinks(s, 3);
+
+  // Place GCDS at center
+  s.galaxy.at(0, 0) = Sector{
+      .sector_id = 1,
+      .owner_id = 255,
+      .coords = {0, 0},
+      .rotation = 0,
+      .points = 4,
+      .occupied_slots_mask = 0,
+      .discovery_tile_present = true,
+      .discovery_tile = DiscoveryBit::NONE,
+      .orbital_built = false,
+      .monolith_built = false,
+  };
+
+  // Place anchor sector at (1, -1) — player 0 controls it.
+  // Sector 106 (Capella): wormholes 0b111100 (edges 2,3,4,5), rotation 0
+  Sector& anchor = s.galaxy.at(1, -1);
+  anchor.sector_id = 106;
+  anchor.owner_id = 0;
+  anchor.coords = {1, -1};
+  anchor.rotation = 0;
+  anchor.points = 2;
+
+  // Verify warp link from anchor (1,-1) in dir 3 goes to (-1,0)
+  auto [adj_result, adj_dir] = GetAdjacency(s, HexCoord{1, -1}, 3);
+  SPIEL_CHECK_EQ(adj_result.q, -1);
+  SPIEL_CHECK_EQ(adj_result.r, 0);
+  SPIEL_CHECK_EQ(adj_dir, 1);
+
+  // Verify (-1, 0) is explorable (INNER layout, empty)
+  SPIEL_CHECK_TRUE(IsExplorableSlot(s, -1, 0));
+
+  // Stock the sector bag so zone_ring_has_tiles passes
+  s.sector_bag_inner = (1u << 10) - 1;  // all inner sectors available
+
+  // collect_explore_zones should find (-1,0) via the warp link from (1,-1)
+  std::vector<HexCoord> zones = legal_explore_zones(s, 0);
+  bool found_zone = false;
+  for (const HexCoord& z : zones) {
+    if (z.q == -1 && z.r == 0) { found_zone = true; break; }
+  }
+  SPIEL_CHECK_TRUE(found_zone);
+
+  // Set up the explore state with (-1,0) as the zone and a drawn tile.
+  // Drawn tile = sector 106 (Capella, 0b111100) — same as anchor for simplicity.
+  // The zone's edge facing the warp link is direction 1 (Northeast).
+  // Connection requires: my_mask has bit 1 AND anchor_mask has bit 3.
+  //   anchor_mask = rotate(0b111100, 0) = 0b111100, bit 3 = 1 (always true)
+  //   my_mask bits: rot0=0, rot1=bit0=0, rot2=bit1=1, rot3=bit1=1, rot4=bit1=1, rot5=bit1=0
+  // Expected valid rotations: {2, 3, 4, 5} — all rotations where the tile has
+  // a wormhole on edge 1 (the direction toward the warp link).
+  // rotate(0b111100, rot) bits:
+  //   rot0=0b111100 edge1=0, rot1=0b111001 edge1=0
+  //   rot2=0b110011 edge1=1, rot3=0b100111 edge1=1
+  //   rot4=0b001111 edge1=1, rot5=0b011110 edge1=1
+  ExploreState& es = s.explore_state;
+  es.player_id = 0;
+  es.zone_q = -1;
+  es.zone_r = 0;
+  es.selected_sector_id = 106;
+  std::vector<uint8_t> rotations = legal_explore_rotations(s, 0);
+  SPIEL_CHECK_FALSE(rotations.empty());
+  for (uint8_t r : rotations) {
+    SPIEL_CHECK_TRUE(r == 2 || r == 3 || r == 4 || r == 5);
+  }
+  SPIEL_CHECK_EQ(rotations.size(), 4);
+}
+
 void SectorCoordMapTest() {
   std::shared_ptr<const Game> game = LoadEclipseGame(2, 7);
   std::unique_ptr<State> state = game->NewInitialState();
@@ -2738,8 +2825,9 @@ int main(int argc, char** argv) {
   RUN_TEST(DiplomacyTraitorTileTransferTest);
   RUN_TEST(DiplomacyCoLocatedShipsRejectsTest);
   RUN_TEST(WarpedUniverseTest);
+  RUN_TEST(WarpedUniverseExploreRotationTest);
   RUN_TEST(SectorCoordMapTest);
 
 #undef RUN_TEST
-  std::cout << "[==========] 72 tests passed." << std::endl;
+  std::cout << "[==========] 73 tests passed." << std::endl;
 }
