@@ -1533,7 +1533,7 @@ void UpkeepObservationTensorTest() {
   state->ObservationTensor(0, absl::MakeSpan(tensor));
 
   // Fixed layout always uses 5 opponent blocks: Global(45) + B0(135) + B1..B5(125) = 305.
-  constexpr int kUpkeepStart = 305 + 1125 + 40 + 40;  // 1510
+  constexpr int kUpkeepStart = 305 + 1350 + 40 + 40;  // 1735
   SPIEL_CHECK_EQ(tensor[kUpkeepStart + 0], 1.0f);                    // upkeep active
   // Upkeep step is one-hot at F+1+step_value, so choose_return_track (value 4) goes to F+5.
   SPIEL_CHECK_EQ(tensor[kUpkeepStart + 5], 1.0f);                    // step=choose_return_track

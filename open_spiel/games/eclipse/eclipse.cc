@@ -232,8 +232,6 @@ std::string PendingRandomEventToString(
       return "initial_setup";
     case EclipseState::PendingRandomEvent::explore_draw:
       return "explore_draw";
-    case EclipseState::PendingRandomEvent::discovery_draw:
-      return "discovery_draw";
     case EclipseState::PendingRandomEvent::combat_roll:
       return "combat_roll";
     case EclipseState::PendingRandomEvent::reputation_draw:
@@ -562,7 +560,7 @@ int EclipseGame::MaxGameLength() const { return 1000; }
 
 std::vector<int> EclipseGame::ObservationTensorShape() const {
   // Fixed size for max players (6), smaller games zero-pad trailing opponent blocks.
-  constexpr int total = 45 + 135 + 5 * 25 + 1125 + 40 + 40 + 15 + 35;
+  constexpr int total = 45 + 135 + 5 * 25 + 1350 + 40 + 40 + 15 + 35;
   return {total};
 }
 
@@ -1846,17 +1844,16 @@ void EclipseState::ObservationTensor(Player player, absl::Span<float> values) co
   const auto& state = eclipse_state_;
   const auto& me = state.players[player];
 
-  // ── Tensor layout (1600 floats) ──────────────────────────────────────
+  // ── Tensor layout (1785 floats) ──────────────────────────────────────
   //   A: Global state                             45
   //   B0: Self (full per-player)                  135
   //   B1..B5: Opponent blocks (5 × 25)             125
-  //   C: Galaxy (225 cells × 5)                   1125
+  //   C: Galaxy (225 cells × 6)                   1350
   //   D: Tech market                               40
   //   E: Combat state                              40
   //   F: Upkeep state                              15
   //   G: Action sub-states                         35
-  //   Reserved                                      40
-  //   Total                                       1600
+  //   Total                                       1785
 
   int off = 0;
 
@@ -1905,13 +1902,13 @@ void EclipseState::ObservationTensor(Player player, absl::Span<float> values) co
   off = 45 + 135 + 5 * 25;  // A(45) + B0(135) + 5×B(125) = 305
 
   // ══════════════════════════════════════════════════════════════════════
-  // Block C: Galaxy (225 cells × 5 = 1125)
+  // Block C: Galaxy (225 cells × 6 = 1350)
   // ══════════════════════════════════════════════════════════════════════
-  int const C = off; off += 1125;
+  int const C = off; off += 1350;
   for (int q = -GALAXY_RADIUS; q <= GALAXY_RADIUS; ++q) {
     for (int r = -GALAXY_RADIUS; r <= GALAXY_RADIUS; ++r) {
       int cell = hex_to_index(q, r);
-      int base = C + cell * 5;
+      int base = C + cell * 6;
       const Sector& sec = state.galaxy.at(q, r);
       if (sec.sector_id == 0) continue;
 
@@ -1927,15 +1924,16 @@ void EclipseState::ObservationTensor(Player player, absl::Span<float> values) co
       values[base + 2] = static_cast<float>(build_flag) / 3.0f;
 
       // Unit counts (one pass through registry per cell — fine for a 225-cell grid)
-      int friendly = 0, enemy = 0;
+      int friendly = 0, enemy = 0, npc = 0;
       for (const Unit& u : state.unit_registry) {
         if (u.sector_id != sec.sector_id) continue;
-        if (u.player_id == NPC_PLAYER_ID) continue;
+        if (u.player_id == NPC_PLAYER_ID) { ++npc; continue; }
         if (u.player_id == player) ++friendly;
         else if (u.player_id < static_cast<uint8_t>(num_players)) ++enemy;
       }
       write_frac(values, base + 3, static_cast<float>(friendly), 8.0f);
       write_frac(values, base + 4, static_cast<float>(enemy), 8.0f);
+      write_frac(values, base + 5, static_cast<float>(npc), 8.0f);
     }
   }
 
@@ -2075,8 +2073,6 @@ void EclipseState::ResolveChanceEvent(Action action_id) {
     }
     case PendingRandomEvent::none:
       SpielFatalError("no pending random event to resolve");
-    case PendingRandomEvent::discovery_draw:
-      SpielFatalError("pending random event is declared but unimplemented");
   }
 }
 

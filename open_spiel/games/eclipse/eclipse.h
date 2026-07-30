@@ -56,9 +56,8 @@ class EclipseState : public State {
     none = 0,
     initial_setup = 1,
     explore_draw = 2,
-    discovery_draw = 3,
-    combat_roll = 4,
-    reputation_draw = 5,
+    combat_roll = 3,
+    reputation_draw = 4,
   };
 
   explicit EclipseState(std::shared_ptr<const Game> game);
