@@ -27,6 +27,12 @@ static constexpr HexCoord kBalancedPositions[] = {
     { 2,  0}  // Position 5
 };
 
+// The tile art needs two clockwise steps from the wormhole-mask orientation.
+// Opposite positions need a half-turn so their artwork faces the center.
+//   Pos 0 → rot 5   Pos 1 → rot 0   Pos 2 → rot 4
+//   Pos 3 → rot 2   Pos 4 → rot 3   Pos 5 → rot 1
+static constexpr uint8_t kRingIIRotation[] = {5, 0, 4, 2, 3, 1};
+
 std::vector<size_t> PlayerPositionIndices(size_t player_count) {
     if (player_count == 6) return {0, 1, 2, 3, 4, 5};
     if (player_count == 5) return {0, 1, 2, 3, 4};
@@ -238,7 +244,7 @@ void ResolveInitialSetupRandomness(std::mt19937_64& rng,
                 .sector_id = sector_id,
                 .owner_id = 255,
                 .coords = coord,
-                .rotation = 0,
+                .rotation = kRingIIRotation[pos_idx],
                 .points = sector_def ? sector_def->points : static_cast<uint8_t>(2),
                 .occupied_slots_mask = 0,
                 .discovery_tile_present = true,
@@ -457,7 +463,7 @@ void FinalizeGameSetup(State& state,
             .sector_id = start_sector_id,
             .owner_id = player.id,
             .coords = coord,
-            .rotation = 0,
+            .rotation = kRingIIRotation[player_positions[i]],
             .points = sector_def ? sector_def->points : static_cast<uint8_t>(3),
             .occupied_slots_mask = start_mask,
             .discovery_tile_present = false,

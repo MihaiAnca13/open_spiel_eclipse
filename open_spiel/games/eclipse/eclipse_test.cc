@@ -1,7 +1,8 @@
 #include "open_spiel/games/eclipse/eclipse.h"
 
-#include <iostream>
 #include <algorithm>
+#include <array>
+#include <iostream>
 #include <random>
 #include <vector>
 
@@ -191,6 +192,51 @@ void AppConfigSnapshotTest() {
   SPIEL_CHECK_EQ(snapshot.config.rng_seed, 99);
   SPIEL_CHECK_EQ(snapshot.state.players.size(), 3);
   SPIEL_CHECK_FALSE(snapshot.finalized);
+}
+
+void RingIISectorsUseArtworkAlignedRotationTest() {
+  constexpr std::array<HexCoord, 6> kPositions = {
+      HexCoord{2, -2}, HexCoord{0, -2}, HexCoord{-2, 0},
+      HexCoord{-2, 2}, HexCoord{0, 2}, HexCoord{2, 0},
+  };
+  constexpr std::array<uint8_t, 6> kRotations = {5, 0, 4, 2, 3, 1};
+
+  auto assert_rotation = [](const Sector& sector, SectorType type,
+                            uint8_t rotation) {
+    const SectorDefinition* definition = get_sector_definition(sector.sector_id);
+    SPIEL_CHECK_TRUE(definition != nullptr);
+    SPIEL_CHECK_TRUE(definition->type == type);
+    SPIEL_CHECK_EQ(sector.rotation, rotation);
+  };
+
+  SetupConfig setup;
+  setup.players = 6;
+  setup.rng_seed = 23;
+  setup.staged_players.assign(
+      6, StagedPlayerConfig{.species = Species::TERRAN_FACTIONS, .is_ai = false});
+  const SetupSnapshot finalized = FinalizeSetupSnapshot(
+      CreatePreChoiceSnapshot(setup),
+      std::vector<PlayerConfig>(
+          6, PlayerConfig{.species = Species::TERRAN_FACTIONS, .is_ai = false}));
+  for (size_t i = 0; i < kPositions.size(); ++i) {
+    assert_rotation(finalized.state.galaxy.at(kPositions[i].q, kPositions[i].r),
+                    SectorType::STARTING, kRotations[i]);
+  }
+
+  for (uint8_t player_count = 2; player_count <= 5; ++player_count) {
+    setup.players = player_count;
+    setup.staged_players.assign(
+        player_count,
+        StagedPlayerConfig{.species = Species::TERRAN_FACTIONS, .is_ai = false});
+    const SetupSnapshot snapshot = CreatePreChoiceSnapshot(setup);
+    for (size_t i = 0; i < kPositions.size(); ++i) {
+      const Sector& sector = snapshot.state.galaxy.at(kPositions[i].q, kPositions[i].r);
+      const SectorDefinition* definition = get_sector_definition(sector.sector_id);
+      if (definition != nullptr && definition->type == SectorType::GUARDIAN) {
+        assert_rotation(sector, SectorType::GUARDIAN, kRotations[i]);
+      }
+    }
+  }
 }
 
 // Builds a minimal raw State with a single player of the given species.
@@ -2760,6 +2806,7 @@ int main(int argc, char** argv) {
   RUN_TEST(DeterministicReplayTest);
   RUN_TEST(SetupHelperParityTest);
   RUN_TEST(AppConfigSnapshotTest);
+  RUN_TEST(RingIISectorsUseArtworkAlignedRotationTest);
   RUN_TEST(ExplorePureHelpersTest);
   RUN_TEST(ExploreZoneAndConnectionTest);
   RUN_TEST(ExploreExhaustedRingTest);
@@ -2829,5 +2876,5 @@ int main(int argc, char** argv) {
   RUN_TEST(SectorCoordMapTest);
 
 #undef RUN_TEST
-  std::cout << "[==========] 73 tests passed." << std::endl;
+  std::cout << "[==========] 74 tests passed." << std::endl;
 }
