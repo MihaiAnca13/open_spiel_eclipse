@@ -85,6 +85,12 @@ function axialToCell(q: number, r: number) {
   return (q + GALAXY_OFFSET) * GALAXY_MAP_SIZE + (r + GALAXY_OFFSET);
 }
 
+function cellCenter(cell: number) {
+  const { q, r } = cellToAxial(cell);
+  const { cx, cy } = axialToPixel(q, r);
+  return { x: cx, y: cy };
+}
+
 function warpEdgePoint(cell: number, dir: number) {
   const { q, r } = cellToAxial(cell);
   const { cx, cy } = axialToPixel(q, r);
@@ -110,16 +116,17 @@ function warpGateLine(cell: number, dir: number) {
 function warpLinkPath(link: WarpLink) {
   const start = warpEdgePoint(link.fromCell, link.fromDir);
   const end = warpEdgePoint(link.toCell, link.toDir);
-  const midX = (start.x + end.x) / 2;
-  const midY = (start.y + end.y) / 2;
   const dx = end.x - start.x;
   const dy = end.y - start.y;
   const distance = Math.hypot(dx, dy);
   if (distance < 1) return `M ${start.x} ${start.y} L ${end.x} ${end.y}`;
-  const lift = Math.min(75, Math.max(24, distance * 0.18));
-  const nx = -dy / distance;
-  const ny = dx / distance;
-  return `M ${start.x} ${start.y} Q ${midX + nx * lift} ${midY + ny * lift} ${end.x} ${end.y}`;
+  const fromCenter = cellCenter(link.fromCell);
+  const toCenter = cellCenter(link.toCell);
+  const cp = {
+    x: (fromCenter.x + toCenter.x) / 2,
+    y: (fromCenter.y + toCenter.y) / 2,
+  };
+  return `M ${start.x} ${start.y} Q ${cp.x} ${cp.y} ${end.x} ${end.y}`;
 }
 
 function normalizeShipType(type: string) {
@@ -606,54 +613,6 @@ export default function GalaxyMap({
       : null
   ), [exploreState, inSelectDrawnTile, previewingDrawnTile, previewingDrawnTileIndex]);
 
-  const contextualWarpLinks = useMemo(() => {
-    if (warpLinks.length === 0) return [];
-
-    const linksById = new Map<string, WarpLink>();
-    for (const link of warpLinks) linksById.set(link.id, link);
-
-    const targetCells = new Set<number>();
-    for (const zone of legalZones) {
-      targetCells.add(axialToCell(zone.q, zone.r));
-    }
-    for (const cell of influencePlaceCells.keys()) targetCells.add(cell);
-    for (const cell of influenceReclaimCells.keys()) targetCells.add(cell);
-
-    const exactMoveLinkIds = new Set<string>();
-    for (const target of moveDestCells.values()) {
-      if (target.isWarp && target.linkId) exactMoveLinkIds.add(target.linkId);
-    }
-
-    const activeCells = new Set(
-      activeSectors.map(({ sector }) => axialToCell(sector.coords.q, sector.coords.r))
-    );
-
-    const out = new Map<string, WarpLink>();
-    for (const id of exactMoveLinkIds) {
-      const link = linksById.get(id);
-      if (link) out.set(link.id, link);
-    }
-
-    if (inZoneSelect || inInfluencePhase) {
-      for (const link of warpLinks) {
-        const fromTarget = targetCells.has(link.fromCell) && activeCells.has(link.toCell);
-        const toTarget = targetCells.has(link.toCell) && activeCells.has(link.fromCell);
-        if (fromTarget || toTarget) out.set(link.id, link);
-      }
-    }
-
-    return [...out.values()];
-  }, [
-    activeSectors,
-    inInfluencePhase,
-    inZoneSelect,
-    influencePlaceCells,
-    influenceReclaimCells,
-    legalZones,
-    moveDestCells,
-    warpLinks,
-  ]);
-
   const emphasizedWarpLink = useMemo(() => {
     const linkId = hoveredWarpLinkId ?? selectedWarpLinkId;
     return linkId ? warpLinks.find((link) => link.id === linkId) ?? null : null;
@@ -713,14 +672,6 @@ export default function GalaxyMap({
               key={`warp-cell-${cell}`}
               points={getHexPoints(cx, cy, hexSize - 1.5)}
               className="warp-region-cell"
-            />
-          ))}
-
-          {contextualWarpLinks.map((link) => (
-            <path
-              key={`warp-context-${link.id}`}
-              d={warpLinkPath(link)}
-              className="warp-link-path contextual"
             />
           ))}
 
@@ -1044,6 +995,14 @@ export default function GalaxyMap({
           );
         })}
 
+        {warpLinks.map((link) => (
+          <path
+            key={`warp-link-${link.id}`}
+            d={warpLinkPath(link)}
+            className={`warp-link-path ${emphasizedWarpLink?.id === link.id ? 'selected' : ''}`}
+          />
+        ))}
+
         {warpLinks.flatMap((link) => {
           const sourceGate = warpGateLine(link.fromCell, link.fromDir);
           const destGate = warpGateLine(link.toCell, link.toDir);
@@ -1074,13 +1033,6 @@ export default function GalaxyMap({
             />,
           ];
         })}
-
-        {emphasizedWarpLink && (
-          <path
-            d={warpLinkPath(emphasizedWarpLink)}
-            className="warp-link-path selected"
-          />
-        )}
 
         {inRotationPreview && previewZone && currentPreviewRotation !== null && (() => {
           const imgUrl = sectorImageUrl(selectedSectorId);

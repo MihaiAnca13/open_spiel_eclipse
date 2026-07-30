@@ -679,9 +679,6 @@
   stroke-dasharray: 6 5;
   vector-effect: non-scaling-stroke;
   pointer-events: none;
-}
-
-.warp-link-path.contextual {
   opacity: 0.45;
 }
 
