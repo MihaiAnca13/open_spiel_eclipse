@@ -1532,17 +1532,23 @@ void UpkeepObservationTensorTest() {
   std::vector<float> tensor(game->ObservationTensorShape()[0], 0.0f);
   state->ObservationTensor(0, absl::MakeSpan(tensor));
 
-  SPIEL_CHECK_EQ(tensor[64], 1.0f);
-  SPIEL_CHECK_EQ(tensor[65], static_cast<float>(
-                                 static_cast<int>(UpkeepState::Step::choose_return_track)));
-  SPIEL_CHECK_EQ(tensor[66], 1.0f);
-  SPIEL_CHECK_EQ(tensor[67], 1.0f);
-  SPIEL_CHECK_EQ(tensor[68], static_cast<float>(
-                                 static_cast<int>(PlanetType::MONEY)));
-  SPIEL_CHECK_EQ(tensor[69], 1.0f);
-  SPIEL_CHECK_EQ(tensor[70], 1.0f);
-  SPIEL_CHECK_EQ(tensor[71], 2.0f);
-  SPIEL_CHECK_EQ(tensor[72], 3.0f);
+  // Fixed layout always uses 5 opponent blocks: Global(45) + B0(135) + B1..B5(125) = 305.
+  constexpr int kUpkeepStart = 305 + 1125 + 40 + 40;  // 1510
+  SPIEL_CHECK_EQ(tensor[kUpkeepStart + 0], 1.0f);                    // upkeep active
+  // Upkeep step is one-hot at F+1+step_value, so choose_return_track (value 4) goes to F+5.
+  SPIEL_CHECK_EQ(tensor[kUpkeepStart + 5], 1.0f);                    // step=choose_return_track
+  SPIEL_CHECK_EQ(tensor[kUpkeepStart + 4], 0.0f);                    // step slot 3 (bankruptcy) empty
+  // player_id (normalized by / 7)
+  SPIEL_CHECK_FLOAT_EQ(tensor[kUpkeepStart + 6], 1.0f / 7.0f);
+  SPIEL_CHECK_EQ(tensor[kUpkeepStart + 7], 1.0f / 20.0f);  // pending_returns.size()=1
+  // pending_return.type (normalized by / 2)
+  SPIEL_CHECK_FLOAT_EQ(tensor[kUpkeepStart + 8],
+                       static_cast<float>(static_cast<int>(PlanetType::MONEY)) / 2.0f);
+  SPIEL_CHECK_EQ(tensor[kUpkeepStart + 9], 1.0f);  // is_orbital
+  // Graveyard counts (now in B0 self block at +17..19)
+  SPIEL_CHECK_EQ(tensor[45 + 17], 1.0f / 12.0f);   // graveyard[0]=1 / 12
+  SPIEL_CHECK_EQ(tensor[45 + 18], 2.0f / 12.0f);   // graveyard[1]=2 / 12
+  SPIEL_CHECK_EQ(tensor[45 + 19], 3.0f / 12.0f);   // graveyard[2]=3 / 12
 }
 
 // Forces a two-player ship battle, then drives the whole combat phase through
