@@ -1715,7 +1715,8 @@ void write_frac(absl::Span<float> values, int idx, float val, float max_v) {
 
 // Write B0-sub block: Identity (10) + Resources & Tracks (16) + Bonus (18) + Rep Track (15) + Blueprints (32) + Tech Tree (44) = 135.
 void write_self_player_block(absl::Span<float> values, int B,
-                              const ::Player& me, int num_players) {
+                              const ::Player& me, int num_players,
+                              int16_t live_vp) {
   // Identity (10)
   write_one_hot(values, B + 0, static_cast<int>(me.species_id), 7);
   values[B + 7] = me.eliminated ? 1.0f : 0.0f;
@@ -1723,7 +1724,9 @@ void write_self_player_block(absl::Span<float> values, int B,
   // B+9 reserved
 
   // Resources & Tracks (16): B+10..25
-  write_frac(values, B + 10, static_cast<float>(me.score), 200.0f);
+  // B+10: live "current VP if the game ended now" (banked score breakdown),
+  // used for potential-based reward shaping and the agent's own estimate.
+  write_frac(values, B + 10, static_cast<float>(live_vp), 200.0f);
   write_frac(values, B + 11, static_cast<float>(me.resources.gold), 40.0f);
   write_frac(values, B + 12, static_cast<float>(me.resources.science), 40.0f);
   write_frac(values, B + 13, static_cast<float>(me.resources.materials), 40.0f);
@@ -1809,8 +1812,9 @@ void write_self_player_block(absl::Span<float> values, int B,
 
 // Write opponent public-info block (25 floats).
 void write_opponent_block(absl::Span<float> values, int Bn,
-                           const ::Player& op) {
-  write_frac(values, Bn + 0, static_cast<float>(op.score), 200.0f);
+                           const ::Player& op, int16_t live_vp) {
+  // Bn+0: live "current VP if the game ended now" (banked score breakdown).
+  write_frac(values, Bn + 0, static_cast<float>(live_vp), 200.0f);
   values[Bn + 1] = op.has_passed ? 1.0f : 0.0f;
   values[Bn + 2] = op.eliminated ? 1.0f : 0.0f;
   write_one_hot(values, Bn + 3, static_cast<int>(op.species_id), 7);
@@ -1843,6 +1847,13 @@ void EclipseState::ObservationTensor(Player player, absl::Span<float> values) co
   const int num_players = NumPlayers();
   const auto& state = eclipse_state_;
   const auto& me = state.players[player];
+
+  // Live banked VP per seat ("if the game ended now"), computed once per call
+  // and reused across the self block and all opponent blocks.
+  std::array<int16_t, MAX_PLAYERS> live_vp = {0};
+  for (uint8_t p = 0; p < state.players.size() && p < MAX_PLAYERS; ++p) {
+    live_vp[p] = compute_player_score(state, p).total_vp;
+  }
 
   // ── Tensor layout (1785 floats) ──────────────────────────────────────
   //   A: Global state                             45
@@ -1884,7 +1895,7 @@ void EclipseState::ObservationTensor(Player player, absl::Span<float> values) co
   // Block B0: Self (135)
   // ══════════════════════════════════════════════════════════════════════
   int const B0 = off; off += 135;
-  write_self_player_block(values, B0, me, num_players);
+  write_self_player_block(values, B0, me, num_players, live_vp[player]);
 
   // ══════════════════════════════════════════════════════════════════════
   // Block B1..B5: Opponents (5 × 25)
@@ -1895,7 +1906,7 @@ void EclipseState::ObservationTensor(Player player, absl::Span<float> values) co
   for (int other = 0; other < num_players && opp_idx < 5; ++other) {
     if (other == player) continue;
     int const Bn = off; off += 25;
-    write_opponent_block(values, Bn, state.players[other]);
+    write_opponent_block(values, Bn, state.players[other], live_vp[other]);
     ++opp_idx;
   }
   // Advance past remaining unused opponent blocks (fixed offset).

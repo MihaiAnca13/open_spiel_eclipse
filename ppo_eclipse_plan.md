@@ -37,6 +37,17 @@ Investigation of this PPO stack against Eclipse's specific characteristics found
 
 We have no access to human/expert demonstration data for Eclipse, so imitation-learning warm-start (the Cicero/Diplomacy precedent) is **not viable** and is dropped as an option. That makes potential-based reward shaping the primary, load-bearing tool for the sparse-reward/long-horizon credit-assignment problem — this must happen early and cheaply, before committing to Stage 1's full N-player PPO generalization.
 
+### Stage 0.5 execution notes (this session)
+
+- **Φ is already computable exactly from live state**: `compute_player_score(state, pid).total_vp` (open_spiel/games/eclipse/systems/scoring.cpp) is "current VP if the game ended now", species-aware (Planta/Draco/minor-species), computed at any time. The rulebook re-derivation was unnecessary; the scoring code is the oracle.
+- **Unix enabled it for Python cheaply**: `Player.score` was dead (set 0 at setup, never updated), so the observation tensor advertised a constant-0 "score" (a real bug: nets could never see VP). Changed `ObservationTensor` (eclipse.cc) to write every seat's live `total_vp` into the self slot (B0+10) and each opponent slot (Bn+0), one galaxy pass per call, tensor shape unchanged. So both `Φ(s)` and `Φ(s')` for the acting seat are readable from the two consecutive observation tensors (self slot, and the seat's opponent block as seen by the next viewer).
+- **Pilot verdict (16 envs, 64-wide→128-wide MLP, ~82k steps ≈ 400+ episodes, GPU)**, `open_spiel/python/examples/ppo_eclipse.py`:
+  - `--phi=banked` (potential = banked VPs): **no learnable signal**. Mean terminal return stayed 0.00 and 0/200 episodes ever banked VP across two seeds and 40 updates. Because early policies almost never complete a scoring sequence, no trajectory in the batch ever changes `total_vp`, so the shaped reward is silent everywhere → no gradient. Random/naive play degenerates to ~0-VP games (~170 steps, round 9, everyone 0).
+  - `--phi=soft` (banked VP + in-progress presence terms: colony ships, disks on sectors, orbitals/monoliths, ambassadors — all already in the observation, same terms visible in both self and opponent blocks): **model-liveable**. Nonzero-VP episodes emerge (upd35: mean 1.52, 81/200; seed2: 23/200) and mean return climbs steadily.
+  - `--phi=none` (no shaping, pure terminal return): also learnable, seed1 reached 4.59/198/200 but seed2 lagged (0.39/23) — higher variance than soft at this tiny budget.
+  - Robust takeaways: banked-only Φ is a dead end at this scale; both soft-Φ and no-shaping break the degeneracy; this is exactly the "discouraging → revisit Φ" branch the plan anticipated, and it fired productively. Longer runs / better potentials (or a learned potential / value warm-up) are the natural Stage 3 refinements. The dense-but-biassed nature of the hand-rolled soft weights is a known risk (presence-hoarding ≠ VP) and should be re-tuned or replaced before production runs.
+- **Dependency found**: the pilot itself required the Stage 1 core (per-call seat dispatch, vectorized self-play, all-seats terminal closeout); that is now built and tested (see Stage 1), so Stage 0.5's gate and Stage 1's core landed together.
+
 1. **Define the shaping potential Φ(s) using both the rulebook and the existing scoring code**: read `07-eclipse-second-dawn-for-the-galaxy-rulebook.pdf` (repo root) for the actual VP-scoring categories and their relative weight/timing in a real game (reputation tracks, tech, colonization, combat, ambassadors, etc.), cross-referenced against the already-implemented scoring logic (`open_spiel/games/eclipse/systems/scoring.{h,cpp}`) to make sure Φ(s) — "current VP total if the game ended right now" — is actually computable from live game state, not just the rulebook's end-of-game procedure. The goal of this step is specifically to find the *best* definition of Φ, not just *a* workable one — e.g. deciding whether to weight partial/in-progress VP sources (tech not yet scored, board position not yet converted to reputation) versus only counting already-banked VP, since that choice directly determines whether the shaped reward encourages long-term setup or short-term grabs.
 2. Derive `shaped_reward = γ·Φ(s') − Φ(s)` per step — this is provably policy-invariant (doesn't change the optimal policy, unlike an arbitrary bonus), and is the standard fix for the "naive per-move reward → myopic agent" failure mode found in RTS research (rewarding raw ΔVP each move made agents greedy/short-sighted in that study).
 3. **Run a cheap sanity check** before building full self-play: using a small dataset of played-out games (random or heuristic play is fine for this), check whether a value function can learn anything predictive of final VP from partial game states, using only the shaped reward from step 2. This is far cheaper than standing up full N-player self-play (Stage 1) and answers the most important open question early: is this reward signal learnable at all.
@@ -44,17 +55,27 @@ We have no access to human/expert demonstration data for Eclipse, so imitation-l
 
 ## Stage 1 — Generalize `PPO` to N-player shared-policy self-play
 
-This is the core engineering work, analogous in spirit to the earlier AlphaZero N-player generalization:
+**Built and tested in this session.** Summary of what landed (details in the code):
+- `open_spiel/python/pytorch/ppo.py`: `player_id` no longer fixed — `step()` dispatches each env's `current_player` (shared network, one batched forward per row). Per-(env,seat) GAE: advantage chains through a seat's *own* decision values (not cross-seat bootstrapping, which would mix value-to-different-seats). Terminal attribution: the acting seat's payoff lands on its own done row; every other seat is closed out via an independent terminal sample carrying that seat's slot of the terminal returns vector — collected across batches, so a seat whose last decision was in a previous rollout batch is still closed out. `post_step(reward, done, shaped_reward=...)` supports per-step potential-based shaping while keeping terminal payoff attribution intact. A batch-size guard (`batch` kept a whole multiple of `num_minibatches`) avoids single-sample-minibatch NaN in advantage normalization.
+- Tests: `open_spiel/python/pytorch/ppo_selfplay_pytorch_test.py` (colored_trails smoke + per-seat terminal-reward attribution invariant); original single-agent `ppo_pytorch_test.py` still passes (backward compatible). 
+- A/B sanity on colored_trails vs Eclipse deferred; the Eclipse pilot in Stage 0.5 exercises the same code path.
+- **Known caveat (documented in plan reasoning):** the speedup of `SyncVectorEnv.step()` (sequential Python CPU-side env stepping) has not been re-measured at high num_envs for Eclipse yet — fine for Stage 2/3 pilot scale.
 
-1. Refactor `PPO` so `player_id` is passed per-call (to `get_action_and_value`/`step`) rather than fixed at construction, so one shared network can act for whichever seat is currently to move.
-2. Vectorized self-play loop: each step, read each env's `current_player` (via `time_step.observations["current_player"]`, the standard idiom), gather that seat's observation + legal-action mask across all `num_envs` into one batch, run **one** shared-network forward pass (preserves GPU batching regardless of which seats are acting in which envs that step), apply each env's chosen action.
-3. Rollout-buffer/reward bookkeeping: track each (env, seat)'s last pending transition; when an env's episode terminates, close out **all** seats' final transitions using their own slot of that env's terminal returns vector (generalizing the existing `for agent in agents: agent.step(time_step)` idiom to one shared agent visited once per seat per terminal env).
-4. Value/advantage estimation stays a plain scalar — simpler than AlphaZero needed, since the critic only ever estimates "value to the seat currently acting, from their own observation," queried once per decision. No per-player value vector required.
-5. Tests: unit tests verifying reward-attribution correctness (construct a small synthetic multi-env, multi-seat scenario and confirm every seat is correctly closed out at termination, not just the last mover), plus an end-to-end self-play smoke test on `colored_trails` (already validated earlier as a fast, general-sum, N-player, terminal-reward-model game) before trying Eclipse.
+The original Stage 1 checklist, all done:
+- [x] `player_id` passed per-call (`get_action_and_value`/`step`) so one shared network acts for whichever seat is to move.
+- [x] Vectorized self-play loop: read each env's `current_player`, gather that seat's obs + mask across all `num_envs` into one batch, one shared-network forward pass (GPU batching preserved regardless of which seats act), apply per-env actions.
+- [x] Rollout/reward bookkeeping: (env, seat) pending transitions; at terminal, close out **all** seats with their own slot of the terminal returns vector (surviving batch boundaries via the independent-sample path).
+- [x] Value/advantage = plain scalar "value to the seat currently acting", per-seat GAE subsequences; no per-player value vector.
+- [x] Tests: synthetic multi-env multi-seat attribution invariant + colored_trails self-play smoke test; single-agent regression still green.
 
 ## Stage 2 — Eclipse-specific wiring
 
-New example script (e.g. `open_spiel/python/examples/ppo_eclipse.py`, mirroring `alpha_zero_eclipse.py`'s pattern) with Eclipse-appropriate `num_envs`, network width, and other settings. Action masking already handles ~11K actions correctly; the actor network's final layer computing logits over the full action space every step is a fixed, known compute/memory cost worth noting but not optimizing yet.
+**Built as part of the Stage 0.5 pilot** — `open_spiel/python/examples/ppo_eclipse.py`:
+- Shared-policy self-play loop over `num_envs` Eclipse games (`ObservationType.OBSERVATION`, obs 1785, ~11K actions, `CategoricalMasked` over the full action space).
+- Configurable potential: `--phi=banked|soft|none` with soft-Φ weights (colony ships / disks on sectors / structures / ambassadors). `--shaping` toggles it entirely.
+- Shapes from the observation "score" slots: `Φ(s)` from the acting seat's self slot, `Φ(s')` from that seat's opponent block as seen by the next viewer in the following obs — no extra C++↔Python traffic; terminal transition unshaped (true payoff).
+- Eval-style logging: per-update steps, episode count, mean terminal return, nonzero-VP episode count.
+- Caveat: the ~11K-logit actor head makes the learn step heavy on CPU; GPU (`--cuda`) is the intended path. Env stepping (`SyncVectorEnv`) remains sequential per env — fine at pilot num_envs, worth re-measuring (Stage 0 item) before scaling.
 
 ## Stage 3 — Hyperparameter search & pilot runs
 
@@ -66,16 +87,16 @@ If pure-PPO play quality falls short after real tuning, consider wrapping the tr
 
 ## Verification per stage
 
-- **Stage 0**: written summary of measured numbers (CPU vs GPU batched-forward latency at several `num_envs`, env-stepping-alone throughput).
-- **Stage 0.5**: the chosen Φ(s) definition (documented, with rulebook/code justification) and a written verdict — is the resulting shaped reward signal learnable at all from partial Eclipse states — before investing in Stage 1.
-- **Stage 1**: unit tests for reward-attribution correctness and all-seats-closed-out-at-terminal; smoke test on `colored_trails`.
-- **Stage 2**: Eclipse plumbing smoke test (short run, verify no crashes, correct shapes, masking works over the full ~11K actions).
-- **Stage 3**: pilot-run diagnostics compared across hyperparameter sweeps.
+- **Stage 0**: written summary of measured numbers (**deferred**; env stepping sanity-run informally, GPU forward not yet benchmarked at scale).
+- **Stage 0.5**: **done** — chosen Φ(s) documented above with code justification and the pilot verdict (banked-only: not learnable; soft/none: learnable; recorded in the Stage 0.5 notes).
+- **Stage 1**: **done** — attribution unit test + colored_trails smoke test added and green; single-agent regression green.
+- **Stage 2**: **done (smoke)** — ppo_eclipse.py runs end-to-end on GPU; shapes/masking correct over the full ~11K actions; used for the Stage 0.5 pilots.
+- **Stage 3**: pilot-run diagnostics compared across hyperparameter sweeps — underway (banked/soft/none A/B above is a first pass).
 
 ### Critical files
-- Modify: `open_spiel/python/pytorch/ppo.py` (core N-player generalization).
+- Modified: `open_spiel/python/pytorch/ppo.py` (N-player self-play generalization, per-seat GAE + terminal closeout + shaped reward hook), `open_spiel/games/eclipse/eclipse.cc` (write live per-seat `total_vp` into the observation score slots).
 - Reference only, no modification expected: `open_spiel/python/rl_environment.py`, `open_spiel/python/vector_env.py` (both already correctly handle chance nodes, per-player observations, and per-player rewards), `open_spiel/python/examples/independent_tabular_qlearning.py` and `dqn_breakthrough_pytorch.py` (turn-dispatch idiom precedent), `open_spiel/python/algorithms/alpha_zero/alpha_zero.py` (one-shared-model-dispatched-by-seat precedent).
-- New: `open_spiel/python/examples/ppo_eclipse.py`, new unit tests (extend `open_spiel/python/pytorch/ppo_pytorch_test.py` or add a new test file) covering the N-player reward-attribution logic.
+- New: `open_spiel/python/examples/ppo_eclipse.py`, `open_spiel/python/pytorch/ppo_selfplay_pytorch_test.py`.
 
 Stages 2-4 should be refined once Stage 0/1 are actually built and measured — this is a living plan, not a locked spec.
 

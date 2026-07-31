@@ -18,7 +18,20 @@ Note: code adapted (with permission) from
 https://github.com/vwxyzjn/cleanrl/blob/master/cleanrl/ppo.py and
 https://github.com/vwxyzjn/ppo-implementation-details/blob/main/ppo_atari.py.
 
-Currently only supports the single-agent case.
+Supports both the original single-agent case (a fixed ``player_id``) and
+N-player general-sum self-play with a single shared network dispatched by seat:
+
+* ``step`` gathers, per environment, the observations of whichever seat is
+  currently to move (``observations["current_player"]``) when ``num_players > 1``.
+* Per-seat terminal reward attribution: when an environment reaches a terminal
+  state, the acting seat's payoff is stored on its own final transition, and
+  every other seat is closed out with an independent terminal sample carrying
+  that seat's slot of the terminal returns vector (collected across batches, so
+  seats that last acted in a previous rollout batch are still closed out
+  correctly).
+* The shaped-reward variant of ``post_step`` (``shaped_reward`` argument) lets
+  callers add per-step potential-based shaping (``gamma * phi(s') - phi(s)``) to
+  the acting seat's transition while leaving terminal payoff attribution intact.
 """
 
 import time
@@ -163,6 +176,10 @@ class PPO(nn.Module):
   open_spiel/python/vector_env.py). In practice, this tends to improve PPO's
   performance. The number of parallel environments is controlled by the
   num_envs argument.
+
+  When ``num_players > 1`` the agent acts as a single shared policy for all
+  seats (self-play): ``step`` dispatches each environment's current player and
+  terminal rewards are attributed per seat (see module docstring).
   """
 
   def __init__(
@@ -196,6 +213,7 @@ class PPO(nn.Module):
     self.num_actions = num_actions
     self.num_players = num_players
     self.player_id = player_id
+    self.selfplay = num_players > 1
     self.device = device
 
     # Training settings
@@ -203,7 +221,6 @@ class PPO(nn.Module):
     self.steps_per_batch = steps_per_batch
     self.batch_size = self.num_envs * self.steps_per_batch
     self.num_minibatches = num_minibatches
-    self.minibatch_size = self.batch_size // self.num_minibatches
     self.update_epochs = update_epochs
     self.learning_rate = learning_rate
 
@@ -241,6 +258,16 @@ class PPO(nn.Module):
     self.dones = torch.zeros((self.steps_per_batch, self.num_envs)).to(device)
     self.values = torch.zeros((self.steps_per_batch, self.num_envs)).to(device)
 
+    # Self-play bookkeeping: which seat acted on each (step, env), the last
+    # decision per (env, seat) so seats unaffected by the final move can still
+    # be closed out with their slot of the terminal rewards, and independent
+    # terminal closeout samples collected during the batch.
+    self.players = torch.full((self.steps_per_batch, self.num_envs),
+                              self.player_id,
+                              dtype=torch.long).to(device)
+    self._extra_samples = []
+    self._last_decision = [{} for _ in range(self.num_envs)]
+
     # Initialize counters
     self.cur_batch_idx = 0
     self.total_steps_done = 0
@@ -253,17 +280,33 @@ class PPO(nn.Module):
   def get_action_and_value(self, x, legal_actions_mask=None, action=None):
     return self.network.get_action_and_value(x, legal_actions_mask, action)
 
+  def _current_seats(self, time_step):
+    """Returns the acting seat for each environment in this time step."""
+    if self.selfplay:
+      return [
+          int(ts.observations["current_player"]) for ts in time_step
+      ]
+    return [self.player_id for _ in time_step]
+
+  def _gather_obs(self, time_step, seats):
+    return torch.Tensor(
+        np.array([
+            np.reshape(ts.observations["info_state"][seats[i]], self.input_shape)
+            for i, ts in enumerate(time_step)
+        ])).to(self.device)
+
+  def _gather_legal_actions_mask(self, time_step, seats):
+    return legal_actions_to_mask([
+        ts.observations["legal_actions"][seats[i]]
+        for i, ts in enumerate(time_step)
+    ], self.num_actions).to(self.device)
+
   def step(self, time_step, is_evaluation=False):
+    seats = self._current_seats(time_step)
     if is_evaluation:
       with torch.no_grad():
-        legal_actions_mask = legal_actions_to_mask([
-            ts.observations["legal_actions"][self.player_id] for ts in time_step
-        ], self.num_actions).to(self.device)
-        obs = torch.Tensor(
-            np.array([
-                np.reshape(ts.observations["info_state"][self.player_id],
-                           self.input_shape) for ts in time_step
-            ])).to(self.device)
+        legal_actions_mask = self._gather_legal_actions_mask(time_step, seats)
+        obs = self._gather_obs(time_step, seats)
         action, _, _, value, probs = self.get_action_and_value(
             obs, legal_actions_mask=legal_actions_mask)
         return [
@@ -273,23 +316,29 @@ class PPO(nn.Module):
     else:
       with torch.no_grad():
         # act
-        obs = torch.Tensor(
-            np.array([
-                np.reshape(ts.observations["info_state"][self.player_id],
-                           self.input_shape) for ts in time_step
-            ])).to(self.device)
-        legal_actions_mask = legal_actions_to_mask([
-            ts.observations["legal_actions"][self.player_id] for ts in time_step
-        ], self.num_actions).to(self.device)
+        obs = self._gather_obs(time_step, seats)
+        legal_actions_mask = self._gather_legal_actions_mask(time_step, seats)
         action, logprob, _, value, probs = self.get_action_and_value(
             obs, legal_actions_mask=legal_actions_mask)
 
         # store
-        self.legal_actions_mask[self.cur_batch_idx] = legal_actions_mask
-        self.obs[self.cur_batch_idx] = obs
-        self.actions[self.cur_batch_idx] = action
-        self.logprobs[self.cur_batch_idx] = logprob
-        self.values[self.cur_batch_idx] = value.flatten()
+        row = self.cur_batch_idx
+        self.players[row] = torch.tensor(seats, dtype=torch.long).to(
+            self.device)
+        self.legal_actions_mask[row] = legal_actions_mask
+        self.obs[row] = obs
+        self.actions[row] = action
+        self.logprobs[row] = logprob
+        self.values[row] = value.flatten()
+
+        if self.selfplay:
+          obs_cpu = obs.detach().cpu().numpy()
+          mask_cpu = legal_actions_mask.detach().cpu().numpy()
+          for i, s in enumerate(seats):
+            self._last_decision[i][s] = (obs_cpu[i].copy(), mask_cpu[i].copy(),
+                                         int(action[i].item()),
+                                         float(logprob[i].item()),
+                                         float(value[i].item()))
 
         agent_output = [
             StepOutput(action=a.item(), probs=p)
@@ -297,45 +346,118 @@ class PPO(nn.Module):
         ]
         return agent_output
 
-  def post_step(self, reward, done):
-    self.rewards[self.cur_batch_idx] = torch.tensor(reward).to(
-        self.device).view(-1)
-    self.dones[self.cur_batch_idx] = torch.tensor(done).to(self.device).view(-1)
+  def post_step(self, reward, done, shaped_reward=None):
+    """Stores rewards/dones for the action taken at the current batch step.
+
+    Args:
+      reward: list (one entry per environment) of per-player reward vectors, as
+        returned by ``SyncVectorEnv.step`` (``ts.rewards``).
+      done: list of booleans, one per environment.
+      shaped_reward: optional list of floats, one per environment, holding the
+        potential-based shaping delta for the acting seat's transition this
+        step. Shaping is skipped for terminal transitions (the true payoff is
+        used instead), which keeps the shaped reward telescope consistent.
+    """
+    row = self.cur_batch_idx
+    if self.selfplay:
+      seats = self.players[row].tolist()
+      for i in range(self.num_envs):
+        rvec = torch.tensor(reward[i], dtype=torch.float).to(self.device)
+        seat = seats[i]
+        is_done = bool(done[i])
+        shaped = 0.0 if shaped_reward is None else shaped_reward[i]
+        self.rewards[row, i] = rvec[seat].item() + (0.0 if is_done else shaped)
+        self.dones[row, i] = 1.0 if is_done else 0.0
+        if is_done:
+          for s in range(self.num_players):
+            if s == seat:
+              continue
+            pair = self._last_decision[i][s]
+            if pair is None:
+              continue
+            obs_, mask_, action_, logprob_, value_ = pair
+            # Independent closed-out sample: target = seat's terminal payoff.
+            self._extra_samples.append(
+                (i, s, obs_, mask_, int(action_), logprob_, value_,
+                 rvec[s].item()))
+          self._last_decision[i].clear()
+    else:
+      self.rewards[row] = torch.tensor(reward).to(self.device).view(-1)
+      self.dones[row] = torch.tensor(done).to(self.device).view(-1)
 
     self.total_steps_done += self.num_envs
     self.cur_batch_idx += 1
 
+  def _compute_returns(self, next_value_per_env):
+    """Computes returns (and GAE advantages) for every stored transition.
+
+    For the single-agent case this is the standard fixed-timeline GAE. For
+    self-play, advantage estimation is done per (env, seat) subsequence, so a
+    seat's bootstrapping chains only through that seat's own decision values
+    (different seats observe different views and have different objectives).
+    The only cross-seat approximation is the final-row bootstrap at the batch
+    boundary when a seat has not terminated by the end of the batch.
+    """
+    returns = torch.zeros_like(self.rewards).to(self.device)
+    if not self.selfplay:
+      with torch.no_grad():
+        next_value = next_value_per_env.reshape(1, -1)
+        if self.gae:
+          advantages = torch.zeros_like(self.rewards).to(self.device)
+          lastgaelam = 0
+          for t in reversed(range(self.steps_per_batch)):
+            nextvalues = next_value if t == self.steps_per_batch - 1 else self.values[
+                t + 1]
+            nextnonterminal = 1.0 - self.dones[t]
+            delta = self.rewards[
+                t] + self.gamma * nextvalues * nextnonterminal - self.values[t]
+            advantages[
+                t] = lastgaelam = delta + self.gamma * self.gae_lambda * nextnonterminal * lastgaelam
+          returns = advantages + self.values
+        else:
+          for t in reversed(range(self.steps_per_batch)):
+            next_return = next_value if t == self.steps_per_batch - 1 else returns[
+                t + 1]
+            nextnonterminal = 1.0 - self.dones[t]
+            returns[t] = self.rewards[
+                t] + self.gamma * nextnonterminal * next_return
+      return returns
+    # self-play: per (env, seat) subsequence GAE.
+    advantages = torch.zeros_like(self.rewards).to(self.device)
+    with torch.no_grad():
+      for i in range(self.num_envs):
+        next_value = next_value_per_env[i]
+        for s in range(self.num_players):
+          rows = (self.players[:, i] == s).nonzero(as_tuple=True)[0]
+          if len(rows) == 0:
+            continue
+          lastgaelam = 0.0
+          for k in reversed(range(len(rows))):
+            idx = int(rows[k])
+            if k == len(rows) - 1:
+              nextvalues = next_value
+            else:
+              nextvalues = self.values[int(rows[k + 1]), i]
+            nextnonterminal = 1.0 - self.dones[idx, i]
+            delta = (
+                self.rewards[idx, i] + self.gamma * nextvalues * nextnonterminal -
+                self.values[idx, i])
+            lastgaelam = (
+                delta + self.gamma * self.gae_lambda * nextnonterminal *
+                lastgaelam)
+            advantages[idx, i] = lastgaelam
+            returns[idx, i] = lastgaelam + self.values[idx, i]
+    return returns
+
   def learn(self, time_step):
-    next_obs = torch.Tensor(
-        np.array([
-            np.reshape(ts.observations["info_state"][self.player_id],
-                       self.input_shape) for ts in time_step
-        ])).to(self.device)
+    seats = self._current_seats(time_step)
+    next_obs = self._gather_obs(time_step, seats)
 
     # bootstrap value if not done
     with torch.no_grad():
-      next_value = self.get_value(next_obs).reshape(1, -1)
-      if self.gae:
-        advantages = torch.zeros_like(self.rewards).to(self.device)
-        lastgaelam = 0
-        for t in reversed(range(self.steps_per_batch)):
-          nextvalues = next_value if t == self.steps_per_batch - 1 else self.values[
-              t + 1]
-          nextnonterminal = 1.0 - self.dones[t]
-          delta = self.rewards[
-              t] + self.gamma * nextvalues * nextnonterminal - self.values[t]
-          advantages[
-              t] = lastgaelam = delta + self.gamma * self.gae_lambda * nextnonterminal * lastgaelam
-        returns = advantages + self.values
-      else:
-        returns = torch.zeros_like(self.rewards).to(self.device)
-        for t in reversed(range(self.steps_per_batch)):
-          next_return = next_value if t == self.steps_per_batch - 1 else returns[
-              t + 1]
-          nextnonterminal = 1.0 - self.dones[t]
-          returns[
-              t] = self.rewards[t] + self.gamma * nextnonterminal * next_return
-        advantages = returns - self.values
+      next_value_per_env = self.get_value(next_obs).reshape(-1)
+
+    returns = self._compute_returns(next_value_per_env)
 
     # flatten the batch
     b_legal_actions_mask = self.legal_actions_mask.reshape(
@@ -343,17 +465,58 @@ class PPO(nn.Module):
     b_obs = self.obs.reshape((-1,) + self.input_shape)
     b_logprobs = self.logprobs.reshape(-1)
     b_actions = self.actions.reshape(-1)
-    b_advantages = advantages.reshape(-1)
+    b_advantages = (returns - self.values).reshape(-1)
     b_returns = returns.reshape(-1)
     b_values = self.values.reshape(-1)
 
+    # Append independent terminal-closeout samples (self-play only). Each is a
+    # done transition: returns target is that seat's terminal payoff directly,
+    # with no bootstrapping.
+    n_extra = len(self._extra_samples)
+    if n_extra:
+      ex_obs = torch.Tensor(np.array([e[2] for e in self._extra_samples])
+                           ).to(self.device)
+      ex_mask = torch.BoolTensor(
+          np.array([e[3] for e in self._extra_samples])).to(self.device)
+      ex_actions = torch.tensor([e[4]
+                                 for e in self._extra_samples]).to(self.device)
+      ex_logprobs = torch.tensor([e[5]
+                                  for e in self._extra_samples]).to(self.device)
+      ex_values = torch.tensor([e[6]
+                                for e in self._extra_samples]).to(self.device)
+      ex_targets = torch.tensor([e[7]
+                                 for e in self._extra_samples]).to(self.device)
+      b_obs = torch.cat([b_obs, ex_obs])
+      b_legal_actions_mask = torch.cat([b_legal_actions_mask, ex_mask])
+      b_actions = torch.cat([b_actions, ex_actions])
+      b_logprobs = torch.cat([b_logprobs, ex_logprobs])
+      b_values = torch.cat([b_values, ex_values])
+      b_returns = torch.cat([b_returns, ex_targets])
+      b_advantages = torch.cat([b_advantages, ex_targets - ex_values])
+    self._extra_samples = []
+
+    # Keep the batch a whole number of minibatches: with a trailing remainder
+    # the final minibatch can be a single sample, whose std() is NaN and
+    # poisons advantage normalization. The dropped tail is only ever a small
+    # number of terminal closeout samples.
+    batch_size = (len(b_obs) // self.num_minibatches) * self.num_minibatches
+    if batch_size != len(b_obs):
+      b_obs = b_obs[:batch_size]
+      b_legal_actions_mask = b_legal_actions_mask[:batch_size]
+      b_actions = b_actions[:batch_size]
+      b_logprobs = b_logprobs[:batch_size]
+      b_values = b_values[:batch_size]
+      b_returns = b_returns[:batch_size]
+      b_advantages = b_advantages[:batch_size]
+    minibatch_size = max(1, batch_size // self.num_minibatches)
+
     # Optimizing the policy and value network
-    b_inds = np.arange(self.batch_size)
+    b_inds = np.arange(batch_size)
     clipfracs = []
     for _ in range(self.update_epochs):
       np.random.shuffle(b_inds)
-      for start in range(0, self.batch_size, self.minibatch_size):
-        end = start + self.minibatch_size
+      for start in range(0, batch_size, minibatch_size):
+        end = start + minibatch_size
         mb_inds = b_inds[start:end]
 
         _, newlogprob, entropy, newvalue, _ = self.get_action_and_value(
