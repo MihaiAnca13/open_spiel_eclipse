@@ -12,7 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Starting point for playing with the AlphaZero algorithm."""
+"""Starting point for training AlphaZero on Eclipse (4-player, general-sum).
+
+Eclipse's observation is a large flat feature vector (not spatial), so this
+uses the "mlp" model and wider/deeper networks than the tic_tac_toe-flavored
+`alpha_zero.py` example, along with larger simulation/replay-buffer settings
+suited to Eclipse's much longer games and larger action space.
+"""
 
 from absl import app
 from absl import flags
@@ -23,23 +29,19 @@ from open_spiel.python.utils import spawn
 
 flags.DEFINE_enum(
     "nn_api",
-    "linen",
+    "nnx",
     ["linen", "nnx"],
     "What type of flax api should be used for training?.                 "
     " Currently, linen and nnx are supported",
 )
 
-## TIC-TAC-TOE CONFIG
-# Notably, the model quickly converges to the draw.
-# For more control, revisit the main driver script.
-
-flags.DEFINE_string("game", "tic_tac_toe", "Name of the game.")
+flags.DEFINE_string("game", "eclipse(players=4)", "Name of the game.")
 flags.DEFINE_float("uct_c", 1.41, "UCT's exploration constant.")
-flags.DEFINE_integer("max_simulations", 40, "How many simulations to run.")
-flags.DEFINE_integer("train_batch_size", 2**7, "Batch size for learning.")
+flags.DEFINE_integer("max_simulations", 100, "How many simulations to run.")
+flags.DEFINE_integer("train_batch_size", 2**8, "Batch size for learning.")
 flags.DEFINE_integer(
     "replay_buffer_size",
-    2**13,
+    2**17,
     "How many states to store in the replay buffer.",
 )
 flags.DEFINE_integer(
@@ -57,17 +59,21 @@ flags.DEFINE_float("policy_alpha", 1.0, "What dirichlet noise alpha to use.")
 flags.DEFINE_float("temperature", 1, "Temperature for final move selection.")
 flags.DEFINE_integer(
     "temperature_drop",
-    2,  # Less than AZ due to short games.
+    30,
     "Drop the temperature to 0 after this many moves.",
 )
 flags.DEFINE_enum(
     "nn_model",
-    "resnet",
+    "mlp",
     utils.api_selector(utils.AVIALABLE_APIS[0]).Model.valid_model_types,
-    "What type of model should be used?.",
+    (
+        "What type of model should be used?. Eclipse's observation is a flat"
+        " feature vector, so 'mlp' is the correct choice, not the spatial"
+        " conv2d/resnet models."
+    ),
 )
-flags.DEFINE_integer("nn_width", 2**8, "How wide should the network be.")
-flags.DEFINE_integer("nn_depth", 2, "How deep should the network be.")
+flags.DEFINE_integer("nn_width", 2**10, "How wide should the network be.")
+flags.DEFINE_integer("nn_depth", 4, "How deep should the network be.")
 flags.DEFINE_string("path", None, "Where to save checkpoints.")
 flags.DEFINE_integer("checkpoint_freq", 25, "Save a checkpoint every N steps.")
 flags.DEFINE_integer("actors", 2, "How many actors to run.")
@@ -85,7 +91,7 @@ flags.DEFINE_integer(
         "running mcts with up to 1000 times more simulations."
     ),
 )
-flags.DEFINE_integer("max_steps", 26, "How many learn steps before exiting.")
+flags.DEFINE_integer("max_steps", 0, "How many learn steps before exiting.")
 flags.DEFINE_bool("quiet", True, "Don't show the moves as they're played.")
 flags.DEFINE_bool("verbose", False, "Show the MCTS stats of possible moves.")
 

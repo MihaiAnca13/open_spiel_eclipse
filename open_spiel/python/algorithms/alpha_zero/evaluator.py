@@ -20,6 +20,7 @@ import jax
 import numpy as np
 
 from open_spiel.python.algorithms import mcts
+from open_spiel.python.algorithms.alpha_zero import utils
 import pyspiel
 from open_spiel.python.utils import lru_cache
 
@@ -33,8 +34,8 @@ class AlphaZeroEvaluator(mcts.Evaluator):
       self, game: pyspiel.Game, model: Any, cache_size: int = 2**16
   ) -> None:
     """An AlphaZero MCTS Evaluator."""
-    if game.num_players() != 2:
-      raise ValueError("Game must be for two players.")
+    if game.num_players() < 2:
+      raise ValueError("Game must have at least two players.")
     game_type = game.get_type()
     if game_type.reward_model != pyspiel.GameType.RewardModel.TERMINAL:
       raise ValueError("Game must have terminal rewards.")
@@ -43,6 +44,8 @@ class AlphaZeroEvaluator(mcts.Evaluator):
 
     self._model = model  # nn.cached_partial?
     self._cache = lru_cache.LRUCache(cache_size)
+    self._min_utility = game.min_utility()
+    self._max_utility = game.max_utility()
 
   def cache_info(self) -> lru_cache.CacheInfo:
     return self._cache.info()
@@ -67,9 +70,11 @@ class AlphaZeroEvaluator(mcts.Evaluator):
     return value, policy
 
   def evaluate(self, state: pyspiel.State) -> np.ndarray:
-    """Returns a value for the given state."""
+    """Returns a per-player value vector for the given state, in raw game units."""
     value, _ = self._inference(state)
-    return np.array([value, -value])
+    return np.asarray(
+        utils.denormalize_value(value, self._min_utility, self._max_utility)
+    )
 
   def prior(self, state: pyspiel.State) -> list[tuple[int, float]]:
     if state.is_chance_node():

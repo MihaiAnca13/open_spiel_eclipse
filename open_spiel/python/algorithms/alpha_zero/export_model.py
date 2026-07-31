@@ -89,6 +89,7 @@ def build_model() -> nnx.Module | linen.Module:
       config.get("weight_decay", FLAGS.weight_decay),
       config.get("learning_rate", FLAGS.learning_rate),
       config.get("path", FLAGS.path),
+      num_players=config.get("num_players", game.num_players()),
   )
 
   if FLAGS.checkpoint_step is not None:

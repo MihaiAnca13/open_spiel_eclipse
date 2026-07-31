@@ -31,7 +31,7 @@ solved = {}
 def solve_game(state):
   state_str = str(state)
   if state_str in solved:
-    return solved[state_str].value
+    return solved[state_str].value[0]
   if state.is_terminal():
     return state.returns()[0]
 
@@ -45,16 +45,19 @@ def solve_game(state):
   best_actions = np.where((values == value) & act_mask)
   policy = np.zeros_like(act_mask)
   policy[best_actions[0][0]] = 1  # Choose the first for a deterministic policy.
+  # tic_tac_toe is 2-player zero-sum, so player 1's value is just -value.
   solved[state_str] = utils.TrainInput(
       observation=jnp.asarray(obs, dtype=jnp.float32),
       legals_mask=jnp.asarray(act_mask, dtype=jnp.bool),
       policy=jnp.asarray(policy, dtype=jnp.float32),
-      value=jnp.asarray(value, dtype=jnp.float32),
+      value=jnp.asarray([value, -value], dtype=jnp.float32),
   )
   return value
 
 
-def build_model(game: Any, api_version: str, model_type: str):
+def build_model(
+    game: Any, api_version: str, model_type: str, num_players: int = None
+):
   return utils.api_selector(api_version).Model.build_model(
       model_type,
       game.observation_tensor_shape(),
@@ -64,6 +67,9 @@ def build_model(game: Any, api_version: str, model_type: str):
       weight_decay=1e-4,
       learning_rate=0.01,
       path=None,
+      num_players=(
+          game.num_players() if num_players is None else num_players
+      ),
   )
 
 
@@ -81,6 +87,7 @@ class ModelTest(parameterized.TestCase):
     print("Num variables:", model.num_trainable_variables)
     model.print_trainable_variables()
 
+    num_players = game.num_players()
     train_inputs = []
     state = game.new_initial_state()
     while not state.is_terminal():
@@ -94,13 +101,13 @@ class ModelTest(parameterized.TestCase):
               observation=jnp.asarray(obs),
               legals_mask=jnp.asarray(act_mask),
               policy=jnp.asarray(policy),
-              value=jnp.asarray(1),
+              value=jnp.full((num_players,), 1.0),
           )
       )
       state.apply_action(action)
       value, policy = model.inference(obs, act_mask)
       self.assertLen(policy, game.num_distinct_actions())
-      self.assertEqual(value.ndim, 0)  # value is a scalar
+      self.assertEqual(value.shape, (num_players,))  # per-player value vector
 
     losses = []
     policy_loss_goal = 0.05
@@ -176,6 +183,7 @@ class ModelTest(parameterized.TestCase):
           "output_size": game.num_distinct_actions(),
           "nn_width": 32,
           "nn_depth": 2,
+          "num_players": game.num_players(),
       }
       apply_fn, variables = utils.nnx_to_linen(
           model._model, game.observation_tensor_shape(), **config
@@ -196,7 +204,23 @@ class ModelTest(parameterized.TestCase):
       state.apply_action(action)
       value, policy = model.inference(obs, act_mask)
       self.assertLen(policy, game.num_distinct_actions())
-      self.assertEqual(value.ndim, 0)
+      self.assertEqual(value.shape, (game.num_players(),))
+
+  @parameterized.parameters(
+      itertools.product(utils.AVIALABLE_APIS, [2, 3, 4])
+  )
+  def test_value_head_shape_for_num_players(
+      self, api_version: str, num_players: int
+  ):
+    """The value head's output size must track num_players, not the game."""
+    game = pyspiel.load_game("tic_tac_toe")
+    model = build_model(game, api_version, "mlp", num_players=num_players)
+    state = game.new_initial_state()
+    obs = state.observation_tensor()
+    act_mask = state.legal_actions_mask()
+    value, policy = model.inference(obs, act_mask)
+    self.assertEqual(value.shape, (num_players,))
+    self.assertLen(policy, game.num_distinct_actions())
 
 
 if __name__ == "__main__":

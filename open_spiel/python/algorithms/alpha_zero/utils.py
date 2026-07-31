@@ -80,9 +80,25 @@ def flatten(x: chex.Array) -> chex.Array:
   return x.reshape(-1)
 
 
+def normalize_value(returns, min_utility, max_utility):
+  """Maps raw per-player returns into [-1, 1] for tanh value-head targets."""
+  span = max_utility - min_utility
+  return 2.0 * (returns - min_utility) / span - 1.0
+
+
+def denormalize_value(values, min_utility, max_utility):
+  """Inverse of normalize_value; maps tanh outputs back to raw game units."""
+  span = max_utility - min_utility
+  return (values + 1.0) * span / 2.0 + min_utility
+
+
 @chex.dataclass(frozen=True)
 class TrainInput:
-  """Inputs of the model: o_t, mask_t, π(a_t|o_t), v_t."""
+  """Inputs of the model: o_t, mask_t, π(a_t|o_t), v_t.
+
+  `value` holds the normalized per-player return vector, shape
+  (num_players,), not a scalar.
+  """
 
   observation: chex.Array
   legals_mask: chex.Array

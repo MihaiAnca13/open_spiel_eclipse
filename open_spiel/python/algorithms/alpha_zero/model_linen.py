@@ -141,6 +141,7 @@ class ValueHead(nn.Module):
   """A value head for the AlphaZero model."""
   model_type: str
   nn_width: int
+  num_players: int
   activation: Optional[str] = "relu"
 
   @nn.compact
@@ -152,7 +153,7 @@ class ValueHead(nn.Module):
       x = utils.flatten(x)
 
     x = MLPBlock(self.nn_width, self.activation)(x)
-    values = MLPBlock(1, "tanh")(x)
+    values = MLPBlock(self.num_players, "tanh")(x)
     return values
 
 
@@ -193,6 +194,7 @@ class AlphaZeroModel(nn.Module):
   output_size: int
   nn_width: int
   nn_depth: int
+  num_players: int
   activation: Optional[str] = "relu"
 
   @nn.compact
@@ -232,11 +234,13 @@ class AlphaZeroModel(nn.Module):
         nn_width=self.nn_width,
         output_size=self.output_size,
     )(x, training)
-    value_out = ValueHead(model_type=self.model_type, nn_width=self.nn_width)(
-        x, training
-    )
+    value_out = ValueHead(
+        model_type=self.model_type,
+        nn_width=self.nn_width,
+        num_players=self.num_players,
+    )(x, training)
 
-    return policy_logits, value_out.squeeze(-1)
+    return policy_logits, value_out
 
 
 class TrainState(training.train_state.TrainState):
@@ -286,6 +290,7 @@ class Model:
       weight_decay: float,
       learning_rate: float,
       path: str,
+      num_players: int,
       seed: int = 0,
       decouple_weight_decay: bool = False,
   ) -> "Model":
@@ -311,6 +316,7 @@ class Model:
         output_size=output_size,
         nn_width=nn_width,
         nn_depth=nn_depth,
+        num_players=num_players,
     )
 
     def mask_only_biases(params):
@@ -370,6 +376,9 @@ class Model:
           policy_loss = optax.softmax_cross_entropy(
               policy_logits, policy_targets
           )
+          # value_preds/value_targets are (num_players,) per example; the
+          # outer .mean() below reduces over both the vmapped batch axis and
+          # the per-player axis.
           value_loss = optax.l2_loss(value_preds, value_targets)
 
           return (policy_loss, value_loss), new_model_state["batch_stats"]

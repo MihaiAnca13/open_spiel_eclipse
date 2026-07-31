@@ -41,7 +41,7 @@ import sys
 import tempfile
 import time
 import traceback
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import chex
 import jax.numpy as jnp
@@ -134,6 +134,7 @@ class Config:
   nn_depth: int
   observation_shape: chex.Shape
   output_size: int
+  num_players: int
   verbose: bool
   quiet: bool
 
@@ -150,6 +151,7 @@ def _init_model_from_config(config: Config):
       config.weight_decay,
       config.learning_rate,
       config.path,
+      num_players=config.num_players,
       decouple_weight_decay=config.decouple_weight_decay,
   )
 
@@ -208,7 +210,7 @@ def _play_game(
     logger: Any,
     game_num: int,
     game: Any,
-    bots: tuple[mcts.MCTSBot, mcts.MCTSBot],
+    bots: Sequence[mcts.MCTSBot],
     temperature: float,
     temperature_drop: int,
 ) -> Trajectory:
@@ -306,8 +308,8 @@ def actor(
   logger.print("Initializing bots")
   az_evaluator = evaluator_lib.AlphaZeroEvaluator(game, model)
   bots = [
-      _init_bot(config, game, az_evaluator, False),
-      _init_bot(config, game, az_evaluator, False),
+      _init_bot(config, game, az_evaluator, False)
+      for _ in range(game.num_players())
   ]
   for game_num in itertools.count(1):
     if not update_checkpoint(logger, queue, model, az_evaluator):
@@ -337,27 +339,25 @@ def evaluator(
   az_evaluator = evaluator_lib.AlphaZeroEvaluator(game, model)
   random_evaluator = mcts.RandomRolloutEvaluator()
 
+  num_players = game.num_players()
   for game_num in itertools.count():
     if not update_checkpoint(logger, queue, model, az_evaluator):
       return
 
-    az_player = game_num % 2
-    difficulty = (game_num // 2) % config.eval_levels
+    az_player = game_num % num_players
+    difficulty = (game_num // num_players) % config.eval_levels
     max_simulations = int(config.max_simulations * (10 ** (difficulty / 2)))
-    bots = [
-        _init_bot(config, game, az_evaluator, True),
-        mcts.MCTSBot(
-            game,
-            config.uct_c,
-            max_simulations,
-            random_evaluator,
-            solve=True,
-            verbose=config.verbose,
-            dont_return_chance_node=True,
-        ),
-    ]
-    if az_player == 1:
-      bots = list(reversed(bots))
+    az_bot = _init_bot(config, game, az_evaluator, True)
+    random_bot = mcts.MCTSBot(
+        game,
+        config.uct_c,
+        max_simulations,
+        random_evaluator,
+        solve=True,
+        verbose=config.verbose,
+        dont_return_chance_node=True,
+    )
+    bots = [az_bot if i == az_player else random_bot for i in range(num_players)]
 
     trajectory = _play_game(
         logger, game_num, game, bots, temperature=1, temperature_drop=0
@@ -365,11 +365,34 @@ def evaluator(
     results.append(jnp.asarray(trajectory.returns[az_player]))
     queue.put((difficulty, jnp.asarray(trajectory.returns[az_player])))
 
+    opponent_avg = np.mean(
+        [r for i, r in enumerate(trajectory.returns) if i != az_player]
+    )
     logger.print(
-        f"AZ: {trajectory.returns[az_player]},      MCTS:"
-        f" {trajectory.returns[1 - az_player]},      AZ avg/{len(results)}:"
+        f"AZ: {trajectory.returns[az_player]},      MCTS avg:"
+        f" {opponent_avg},      AZ avg/{len(results)}:"
         f" {jnp.mean(results.data):.3f}"
     )
+
+
+def build_value_target(returns, min_utility, max_utility):
+  """Normalizes a trajectory's raw per-player returns into [-1, 1]."""
+  return np.asarray(
+      utils.normalize_value(np.asarray(returns), min_utility, max_utility),
+      dtype=np.float32,
+  )
+
+
+def winner_bucket(returns, num_players):
+  """Maps a trajectory's returns to the winner's player index.
+
+  Returns `num_players` (the "draw" bucket) when more than one player ties
+  for the best return.
+  """
+  returns = np.asarray(returns)
+  best = returns.max()
+  winners = np.flatnonzero(np.isclose(returns, best))
+  return int(winners[0]) if len(winners) == 1 else num_players
 
 
 @watcher
@@ -405,7 +428,8 @@ def learner(
   value_predictions = [stats.BasicStats() for _ in range(stage_count)]
   game_lengths = stats.BasicStats()
   game_lengths_hist = stats.HistogramNumbered(game.max_game_length() + 1)
-  outcomes = stats.HistogramNamed(["Player1", "Player2", "Draw"])
+  # Bucket i is a win for player i; the last bucket is a tie/draw.
+  outcomes = stats.HistogramNumbered(game.num_players() + 1)
   # evaluation is yet on cpu
   evals = [
       buffer_lib.Buffer(config.evaluation_window, force_cpu=True)
@@ -439,15 +463,12 @@ def learner(
       game_lengths.add(len(trajectory.states))
       game_lengths_hist.add(len(trajectory.states))
 
-      # we learn from perspective of only the first player,
-      # rather than rotating
-      game_outcome = trajectory.returns[0]
-      if game_outcome > 0:
-        outcomes.add(0)
-      elif game_outcome < 0:
-        outcomes.add(1)
-      else:
-        outcomes.add(2)
+      # Every state targets the full, normalized per-player outcome vector
+      # for its trajectory, not just the first player's perspective.
+      value_target = build_value_target(
+          trajectory.returns, game.min_utility(), game.max_utility()
+      )
+      outcomes.add(winner_bucket(trajectory.returns, game.num_players()))
 
       for s in trajectory.states:
         replay_buffer.append(
@@ -455,7 +476,7 @@ def learner(
                 observation=jnp.asarray(s.observation, dtype=jnp.float32),
                 legals_mask=jnp.asarray(s.legals_mask, dtype=jnp.bool),
                 policy=jnp.asarray(s.policy, dtype=jnp.float32),
-                value=jnp.asarray(game_outcome, dtype=jnp.float32),
+                value=jnp.asarray(value_target, dtype=jnp.float32),
             )
         )
 
@@ -588,11 +609,12 @@ def alpha_zero(config: Config) -> None:
   config = config.replace(
       observation_shape=game.observation_tensor_shape(),
       output_size=game.num_distinct_actions(),
+      num_players=game.num_players(),
   )
 
   print("Starting game", config.game)
-  if game.num_players() != 2:
-    sys.exit("AlphaZero can only handle 2-player games.")
+  if game.num_players() < 2:
+    sys.exit("AlphaZero needs at least two players.")
   game_type = game.get_type()
   if game_type.reward_model != pyspiel.GameType.RewardModel.TERMINAL:
     raise ValueError("Game must have terminal rewards.")

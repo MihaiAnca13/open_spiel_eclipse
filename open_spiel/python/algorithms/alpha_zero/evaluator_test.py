@@ -33,6 +33,7 @@ def build_model(api_version: str, game):
       weight_decay=1e-4,
       learning_rate=0.01,
       path=None,
+      num_players=game.num_players(),
   )
 
 
@@ -55,12 +56,12 @@ class EvaluatorTest(parameterized.TestCase):
             observation=jnp.asarray(obs),
             legals_mask=jnp.asarray(act_mask),
             policy=jnp.asarray(policy),
-            value=jnp.asarray(1),
+            value=jnp.asarray([1.0, -1.0]),
         )
     ]
 
     value = evaluator.evaluate(state)
-    self.assertEqual(value[0], -value[1])
+    self.assertLen(value, 2)
     value = value[0]
 
     value2 = evaluator.evaluate(state)[0]
@@ -118,6 +119,46 @@ class EvaluatorTest(parameterized.TestCase):
         game, 1.0, 20, evaluator, solve=False, dirichlet_noise=(0.25, 1.0)
     )
     root = bot.mcts_search(game.new_initial_state())
+    self.assertEqual(root.explore_count, 20)
+
+  @parameterized.parameters(utils.AVIALABLE_APIS)
+  def test_works_with_mcts_n_player_general_sum(
+      self, api_version: str
+  ) -> None:
+    # colored_trails: 3-player, general-sum, sequential, imperfect
+    # information, with an observation tensor -- a stand-in for Eclipse's
+    # shape of game (N>2, general-sum) but much smaller/faster.
+    game = pyspiel.load_game("colored_trails")
+    model = build_model(api_version, game)
+    evaluator = evaluator_lib.AlphaZeroEvaluator(game, model)
+
+    state = game.new_initial_state()
+    while state.is_chance_node():
+      outcomes = state.chance_outcomes()
+      state.apply_action(outcomes[0][0])
+    value = evaluator.evaluate(state)
+    self.assertEqual(value.shape, (3,))
+    # Values should be denormalized into the game's raw utility range.
+    self.assertTrue((value >= game.min_utility()).all())
+    self.assertTrue((value <= game.max_utility()).all())
+
+    bot = mcts.MCTSBot(
+        game,
+        1.0,
+        20,
+        evaluator,
+        solve=False,
+        dirichlet_noise=(0.25, 1.0),
+        dont_return_chance_node=True,
+    )
+    # mcts_search must be called from a decision state, not a chance state
+    # (mirrors how alpha_zero.py's _play_game rolls chance nodes forward
+    # itself before ever calling mcts_search).
+    decision_state = game.new_initial_state()
+    while decision_state.is_chance_node():
+      outcomes = decision_state.chance_outcomes()
+      decision_state.apply_action(outcomes[0][0])
+    root = bot.mcts_search(decision_state)
     self.assertEqual(root.explore_count, 20)
 
 

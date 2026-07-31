@@ -216,6 +216,7 @@ class ValueHead(nn.Module):
       model_type: str,
       activation: str,
       seed: int,
+      num_players: int,
   ) -> None:
     *space_features, in_features = input_shape
 
@@ -228,7 +229,7 @@ class ValueHead(nn.Module):
           MLPBlock(np.prod(space_features) * 1, nn_width, activation, seed),
       )
 
-    self.value_head = MLPBlock(nn_width, 1, "tanh", seed)
+    self.value_head = MLPBlock(nn_width, num_players, "tanh", seed)
 
   def __call__(self, x: chex.Array) -> chex.Array:
     y = self.torso(x)
@@ -275,6 +276,7 @@ class AlphaZeroModel(nn.Module):
       output_size: int,
       nn_width: int,
       nn_depth: int,
+      num_players: int,
       activation: Optional[str] = "relu",
       seed: Optional[int] = 0,
   ) -> None:
@@ -286,6 +288,7 @@ class AlphaZeroModel(nn.Module):
       output_size (int): action space spec
       nn_width (int): hidden layers dimensionality
       nn_depth (int): number of hidden layers
+      num_players (int): number of players; sizes the value head output
       activation (str): an activation for the neural networks. Defaults to
         "relu"
       seed (int): random seed for the network
@@ -340,7 +343,12 @@ class AlphaZeroModel(nn.Module):
         seed,
     )
     self.value_head = ValueHead(
-        (*input_shape[:-1], nn_width), nn_width, model_type, activation, seed
+        (*input_shape[:-1], nn_width),
+        nn_width,
+        model_type,
+        activation,
+        seed,
+        num_players,
     )
 
   def __call__(self, observations: chex.Array) -> tuple[chex.Array, chex.Array]:
@@ -348,7 +356,7 @@ class AlphaZeroModel(nn.Module):
     policy_logits = self.policy_head(x)
     value_out = self.value_head(x)
 
-    return policy_logits, value_out.squeeze(-1)
+    return policy_logits, value_out
 
 
 # modified train state
@@ -401,6 +409,7 @@ class Model:
       weight_decay: float,
       learning_rate: float,
       path: str,
+      num_players: int,
       seed: int = 0,
       decouple_weight_decay: bool = False,
   ) -> "Model":
@@ -426,6 +435,7 @@ class Model:
         output_size=output_size,
         nn_width=nn_width,
         nn_depth=nn_depth,
+        num_players=num_players,
         seed=seed,
     )
 
@@ -481,6 +491,8 @@ class Model:
         policy_loss = optax.softmax_cross_entropy(
             policy_logits, policy_targets
         ).mean()
+        # value_preds/value_targets are (batch, num_players); mean() reduces
+        # over both the batch and the per-player axes.
         value_loss = optax.l2_loss(value_preds, value_targets).mean()
 
         l2_reg_loss = (
