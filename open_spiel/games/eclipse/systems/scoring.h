@@ -49,6 +49,12 @@ namespace open_spiel {
         // Computes absolute total and itemized breakdown values for a specific player
         PlayerScoreBreakdown compute_player_score(const ::State& state, uint8_t player_id);
 
+        // Computes all live players' scores in one pass (one unit-registry walk
+        // and one galaxy scan shared across seats) instead of re-scanning per
+        // player. Used by the observation tensor, which needs every seat's live
+        // VP every decision.
+        std::array<PlayerScoreBreakdown, MAX_PLAYERS> compute_all_player_scores(const ::State& state);
+
         // Populates raw utility vector for Open Spiel interface (State::Returns())
         std::array<double, MAX_PLAYERS> evaluate_final_returns(const ::State& state);
 

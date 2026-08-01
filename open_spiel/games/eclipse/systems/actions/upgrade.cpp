@@ -69,11 +69,16 @@ namespace open_spiel::eclipse
                 if (drive_count == 0) return false; // Thwarting engine-less mobile layouts
             }
 
-            // Removing a part (e.g. an energy source) must keep the grid energy-positive
-            Blueprint removal_bp = current_bp;
-            removal_bp.slots[slot_idx] = ShipPartId::NONE;
-            removal_bp.recompute();
-            return removal_bp.total_stats.energy_net >= 0;
+            // Removing a part (e.g. an energy source) must keep the grid energy-positive.
+            // Blueprint::total_stats is freshly recomputed after every mutation, and all
+            // stats are linear sums, so the post-removal energy is the delta of the
+            // removed part (no Blueprint copy + full recompute needed).
+            const ShipPartId removed_id = current_bp.slots[slot_idx];
+            if (removed_id == ShipPartId::NONE) return false; // no-op, guarded above
+            const ShipPart& removed_part = SHIP_PART_TABLE[static_cast<size_t>(removed_id) - 1];
+            const int32_t new_energy =
+                current_bp.total_stats.energy_net - removed_part.net_energy;
+            return new_energy >= 0;
         }
 
         // Table index verification bounds guard
@@ -115,17 +120,28 @@ namespace open_spiel::eclipse
             }
         }
 
-        // Financial & Energy Simulation Balance check via localized mutation footprinting
-        // Emulate grid changes using a hypothetical balance sheet pass
-        Blueprint test_bp = current_bp;
-        test_bp.slots[slot_idx] = part_id;
-        test_bp.recompute();
+        // Financial & Energy Simulation Balance check via localized delta math:
+        // Blueprint::total_stats is freshly recomputed after every mutation and all
+        // stats are linear sums, so the candidate grid equals the current totals
+        // adjusted by the slot swap (no Blueprint copy + full recompute needed).
+        const ShipPartId current_id = current_bp.slots[slot_idx];
+        int8_t old_energy = 0;
+        int8_t old_movement = 0;
+        if (current_id != ShipPartId::NONE) {
+            const ShipPart& old_part = SHIP_PART_TABLE[static_cast<size_t>(current_id) - 1];
+            old_energy = old_part.net_energy;
+            old_movement = old_part.added_movement;
+        }
+        const int32_t new_energy =
+            current_bp.total_stats.energy_net - old_energy + targeted_part.net_energy;
+        const int32_t new_movement =
+            current_bp.total_stats.movement - old_movement + targeted_part.added_movement;
 
         // Prevent layout changes that plunge ship electrical networks into energy deficits
-        if (test_bp.total_stats.energy_net < 0) return false;
+        if (new_energy < 0) return false;
 
         // Check layout rules: Mobile units must preserve layout integrity via 1 core propulsion unit minimum
-        if (ship_type != ShipType::STARBASE && test_bp.total_stats.movement == 0)
+        if (ship_type != ShipType::STARBASE && new_movement == 0)
         {
             return false;
         }

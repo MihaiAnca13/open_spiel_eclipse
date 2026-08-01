@@ -1863,10 +1863,12 @@ void EclipseState::ObservationTensor(Player player, absl::Span<float> values) co
   const auto& me = state.players[player];
 
   // Live banked VP per seat ("if the game ended now"), computed once per call
-  // and reused across the self block and all opponent blocks.
+  // and reused across the self block and all opponent blocks. compute_all now
+  // walks the unit registry + galaxy once for every seat instead of per seat.
   std::array<int16_t, MAX_PLAYERS> live_vp = {0};
+  const auto live_scores = open_spiel::eclipse::compute_all_player_scores(state);
   for (uint8_t p = 0; p < state.players.size() && p < MAX_PLAYERS; ++p) {
-    live_vp[p] = compute_player_score(state, p).total_vp;
+    live_vp[p] = live_scores[p].total_vp;
   }
 
   // ── Tensor layout (1785 floats) ──────────────────────────────────────
