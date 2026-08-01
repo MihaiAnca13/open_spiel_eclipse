@@ -46,6 +46,11 @@ from open_spiel.python.pytorch.ppo import layer_init
 from open_spiel.python.vector_env import SyncVectorEnv
 
 try:
+  from open_spiel.python.async_vector_env import AsyncVectorEnv
+except ImportError:
+  AsyncVectorEnv = None
+
+try:
   from torch.utils.tensorboard import SummaryWriter
 except ImportError:
   SummaryWriter = None
@@ -76,6 +81,14 @@ flags.DEFINE_integer("num_envs", 8, "Number of parallel game environments.")
 flags.DEFINE_integer("num_steps", 128, "Rollout steps per update per env.")
 flags.DEFINE_integer("total_timesteps", 100_000, "Total environment steps.")
 flags.DEFINE_integer("eval_every", 10, "Log every N updates.")
+
+flags.DEFINE_integer(
+    "num_workers", 0,
+    "Async process-pool workers for the vector env (0 = sync). When >0 the "
+    "envs run in a fork pool with shared-memory buffers and the array-native "
+    "PPO path (step_np/post_step_np/learn_np) is used, so no per-env "
+    "TimeStep/StepOutput objects are built. Recommended 8-16 with >= 512 "
+    "envs.")
 
 flags.DEFINE_bool("shaping", True,
                   "Potential-based shaping from the obs 'score' slot.")
@@ -246,6 +259,26 @@ def potential_opponent(obs_viewer, block):
   return 0.0
 
 
+def _log_update(agent, episode_returns, recent_returns, writer, update, eval_every=None):
+  n_completed = sum(len(r) for r in episode_returns.values())
+  recent = recent_returns[-200:]
+  nonzero = sum(1 for r in recent if r > 0.5)
+  summary = ""
+  if recent:
+    summary = (f"  mean_term_return={np.mean(recent):.2f}  "
+               f"nonzero_episodes={nonzero}/{len(recent)}")
+  print(f"[update {update}] steps={agent.total_steps_done}"
+        f"  total_episodes={n_completed}{summary}")
+  if writer is not None:
+    writer.add_scalar("charts/num_episodes", n_completed,
+                      agent.total_steps_done)
+    if recent:
+      writer.add_scalar("charts/mean_episode_return", np.mean(recent),
+                        agent.total_steps_done)
+      writer.add_scalar("charts/nonzero_episodes", nonzero,
+                        agent.total_steps_done)
+
+
 def main(_):
   random.seed(FLAGS.seed)
   np.random.seed(FLAGS.seed)
@@ -270,7 +303,7 @@ def main(_):
   )
 
   game = pyspiel.load_game(FLAGS.game)
-  envs = SyncVectorEnv([
+  envs_list = [
       rl_environment.Environment(
           game=pyspiel.load_game(FLAGS.game),
           chance_event_sampler=rl_environment.ChanceEventSampler(
@@ -278,8 +311,19 @@ def main(_):
           observation_type=rl_environment.ObservationType.OBSERVATION,
           observations_as_numpy=True)
       for i in range(FLAGS.num_envs)
-  ])
-  game = envs.envs[0]._game  # pylint: disable=protected-access
+  ]
+  use_async = FLAGS.num_workers > 0 and AsyncVectorEnv is not None
+  if use_async:
+    envs = AsyncVectorEnv(
+        envs_list,
+        num_workers=FLAGS.num_workers,
+        sampler_seeds=[FLAGS.seed + i for i in range(FLAGS.num_envs)],
+        game_str=FLAGS.game,
+    )
+    game = envs_list[0]._game  # pylint: disable=protected-access
+  else:
+    envs = SyncVectorEnv(envs_list)
+    game = envs.envs[0]._game  # pylint: disable=protected-access
   input_shape = tuple(game.observation_tensor_shape())
   num_players = game.num_players()
 
@@ -315,63 +359,82 @@ def main(_):
   episode_returns = {i: [] for i in range(FLAGS.num_envs)}
   recent_returns = []
 
-  time_step = envs.reset(players="current")
-  for update in range(num_updates):
-    for step in range(FLAGS.num_steps):
-      agent_output = agent.step(time_step)
-      # phi(s) for the acting seat from its own obs (this row).
-      # Uses the CPU numpy obs batch already gathered by agent.step (no second
-      # GPU->CPU round trip).
-      obs_batch = agent.last_obs_batch
-      phi_prev = np.fromiter(
-          (potential_self(obs_batch[i]) for i in range(FLAGS.num_envs)),
-          dtype=np.float64, count=FLAGS.num_envs)
+  if use_async:
+    _ = envs.reset(players="current")
+    step_arrays = envs.reset_np()
+    for update in range(num_updates):
+      for step in range(FLAGS.num_steps):
+        acts = agent.step_np(step_arrays)
+        obs_batch = agent.last_obs_batch
+        phi_prev = np.fromiter(
+            (potential_self(obs_batch[i]) for i in range(FLAGS.num_envs)),
+            dtype=np.float64, count=FLAGS.num_envs)
+        step_arrays = envs.step_np(acts, reset_if_done=True)
+        shaped = np.zeros(FLAGS.num_envs)
+        if FLAGS.shaping:
+          seats = agent.last_seats
+          new_seats = step_arrays.seats
+          for i in range(FLAGS.num_envs):
+            if step_arrays.dones[i]:
+              continue
+            viewer = int(new_seats[i])
+            seat = seats[i]
+            k = opponent_block_index(seat, viewer)
+            phi_next = potential_opponent(step_arrays.obs[i], OPP_BASE + k * 25)
+            shaped[i] = FLAGS.gamma * phi_next - phi_prev[i]
+        agent.post_step_np(step_arrays.rewards, step_arrays.dones,
+                           shaped_reward=shaped)
+        for i in range(FLAGS.num_envs):
+          if step_arrays.dones[i]:
+            ret = float(step_arrays.rewards[i][0])
+            episode_returns[i].append(ret)
+            recent_returns.append(ret)
+      agent.learn_np(step_arrays.obs, step_arrays.seats)
+      if update % FLAGS.eval_every == 0:
+        _log_update(agent, episode_returns, recent_returns, writer, update)
+    envs.close()
+  else:
+    time_step = envs.reset(players="current")
+    for update in range(num_updates):
+      for step in range(FLAGS.num_steps):
+        agent_output = agent.step(time_step)
+        # phi(s) for the acting seat from its own obs (this row).
+        # Uses the CPU numpy obs batch already gathered by agent.step (no
+        # second GPU->CPU round trip).
+        obs_batch = agent.last_obs_batch
+        phi_prev = np.fromiter(
+            (potential_self(obs_batch[i]) for i in range(FLAGS.num_envs)),
+            dtype=np.float64, count=FLAGS.num_envs)
 
-      time_step, reward, done, unreset = envs.step(
-          agent_output, reset_if_done=True, players="current")
+        time_step, reward, done, unreset = envs.step(
+            agent_output, reset_if_done=True, players="current")
 
-      shaped = np.zeros(FLAGS.num_envs)
-      if FLAGS.shaping:
-        seats = agent.last_seats
-        for i, ts in enumerate(time_step):
-          if done[i]:
-            continue
-          viewer = ts.observations["current_player"]
-          seat = seats[i]
-          k = opponent_block_index(seat, viewer)
-          phi_next = potential_opponent(
-              ts.observations["info_state"][viewer], OPP_BASE + k * 25)
-          shaped[i] = FLAGS.gamma * phi_next - phi_prev[i]
+        shaped = np.zeros(FLAGS.num_envs)
+        if FLAGS.shaping:
+          seats = agent.last_seats
+          for i, ts in enumerate(time_step):
+            if done[i]:
+              continue
+            viewer = ts.observations["current_player"]
+            seat = seats[i]
+            k = opponent_block_index(seat, viewer)
+            phi_next = potential_opponent(
+                ts.observations["info_state"][viewer], OPP_BASE + k * 25)
+            shaped[i] = FLAGS.gamma * phi_next - phi_prev[i]
 
-      agent.post_step(reward, done, shaped_reward=shaped.tolist())
+        agent.post_step(reward, done, shaped_reward=shaped.tolist())
 
-      # Episode return logging.
-      for i, ts in enumerate(unreset):
-        if ts.last():
-          ret = float(ts.rewards[0])
-          episode_returns[i].append(ret)
-          recent_returns.append(ret)
+        # Episode return logging.
+        for i, ts in enumerate(unreset):
+          if ts.last():
+            ret = float(ts.rewards[0])
+            episode_returns[i].append(ret)
+            recent_returns.append(ret)
 
-    agent.learn(time_step)
+      agent.learn(time_step)
 
-    if update % FLAGS.eval_every == 0:
-      n_completed = sum(len(r) for r in episode_returns.values())
-      recent = recent_returns[-200:]
-      nonzero = sum(1 for r in recent if r > 0.5)
-      summary = ""
-      if recent:
-        summary = (f"  mean_term_return={np.mean(recent):.2f}  "
-                   f"nonzero_episodes={nonzero}/{len(recent)}")
-      print(f"[update {update}] steps={agent.total_steps_done}"
-            f"  total_episodes={n_completed}{summary}")
-      if writer is not None:
-        writer.add_scalar("charts/num_episodes", n_completed,
-                          agent.total_steps_done)
-        if recent:
-          writer.add_scalar("charts/mean_episode_return", np.mean(recent),
-                            agent.total_steps_done)
-          writer.add_scalar("charts/nonzero_episodes", nonzero,
-                            agent.total_steps_done)
+      if update % FLAGS.eval_every == 0:
+        _log_update(agent, episode_returns, recent_returns, writer, update)
 
   writer.close()
   print("pilot done")
