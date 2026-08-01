@@ -270,7 +270,28 @@ namespace open_spiel::eclipse
         return true;
     }
 
-    bool can_influence_to_sector(const ::State& state, uint8_t player_id, uint8_t galaxy_cell_idx)
+    InfluenceShipMap BuildInfluenceShipMap(const ::State& state, uint8_t player_id)
+    {
+        InfluenceShipMap m;
+        for (const Unit& unit : state.unit_registry) {
+            if (unit.sector_id >= 512) continue;
+            if (unit.player_id == player_id) {
+                m.own_ships.set(unit.sector_id);
+            } else if (unit.player_id == NPC_PLAYER_ID) {
+                if (unit.type == ShipType::ANCIENT) {
+                    m.ancient_ships.set(unit.sector_id);
+                } else {
+                    m.other_npc_ships.set(unit.sector_id);
+                }
+            } else {
+                m.enemy_ships.set(unit.sector_id);
+            }
+        }
+        return m;
+    }
+
+    bool can_influence_to_sector(const ::State& state, uint8_t player_id, uint8_t galaxy_cell_idx,
+                                 const InfluenceShipMap* map)
     {
         if (player_id >= state.players.size()) return false;
         const ::Player& player = state.players[player_id];
@@ -283,48 +304,32 @@ namespace open_spiel::eclipse
         // Sector must be an explored tile and completely unowned/vacant
         if (sector.sector_id == 0 || sector.owner_id != 255) return false;
 
+        InfluenceShipMap local;
+        const InfluenceShipMap* m = map;
+        if (m == nullptr) {
+            local = BuildInfluenceShipMap(state, player_id);
+            m = &local;
+        }
+
         // Ensure that if the sector contains NPCs, we follow proper rules:
         // - GCDS/Guardians block influence for everyone.
         // - Ancients block influence for non-Draco players.
-        bool has_ancients = false;
-        bool has_other_npc = false;
-        for (const Unit& unit : state.unit_registry) {
-            if (unit.sector_id == sector.sector_id && unit.player_id == NPC_PLAYER_ID) {
-                if (unit.type == ShipType::ANCIENT) {
-                    has_ancients = true;
-                } else {
-                    has_other_npc = true;
-                }
-            }
-        }
+        const bool has_ancients = m->ancient_ships.test(sector.sector_id);
+        const bool has_other_npc = m->other_npc_ships.test(sector.sector_id);
         const bool is_draco = (player.species_id == Species::DESCENDANTS_OF_DRACO);
         if (has_other_npc || (has_ancients && !is_draco)) {
             return false;
         }
 
-        // Build bitsets for O(1) ship presence checks (matches explore.cpp pattern)
-        constexpr int max_sector_id = 512;
-        std::bitset<max_sector_id> own_ships;
-        std::bitset<max_sector_id> enemy_ships;
-        for (const Unit& unit : state.unit_registry) {
-            if (unit.sector_id < max_sector_id) {
-                if (unit.player_id == player_id) {
-                    own_ships.set(unit.sector_id);
-                } else if (unit.player_id != NPC_PLAYER_ID) {
-                    enemy_ships.set(unit.sector_id);
-                }
-            }
-        }
-
         // Condition A: Vacant, no opponent ships, has wormhole connection to control/ship anchor
-        if (!enemy_ships_present(enemy_ships, sector.sector_id) &&
+        if (!m->enemy_ships.test(sector.sector_id) &&
             has_influence_wormhole_access(state, player_id, coord.q, coord.r))
         {
             return true;
         }
 
         // Condition B: Uncontrolled sector where ONLY you have a ship present
-        if (only_own_ships_present(own_ships, enemy_ships, sector.sector_id))
+        if (only_own_ships_present(m->own_ships, m->enemy_ships, sector.sector_id))
         {
             return true;
         }

@@ -282,9 +282,15 @@ bool HasLegalResearchChoice(const ::State& state, uint8_t player_id) {
 
 bool HasLegalBuildChoice(const ::State& state, uint8_t player_id) {
   if (player_id >= state.players.size()) return false;
+  // Build the unit-supply counts and the player's owned-cell list once, then
+  // probe only those cells (most of the 225-hex grid is not ours).
+  const PlayerUnitCounts counts = BuildUnitCounts(state, player_id);
+  const std::vector<uint8_t> owned = PlayerOwnedBuildCells(state, player_id);
+  if (owned.empty()) return false;
   for (int t = 0; t < BUILD_TYPE_COUNT; ++t) {
-    for (int cell = 0; cell < GALAXY_CELL_COUNT; ++cell) {
-      if (can_build(state, player_id, static_cast<BuildType>(t), static_cast<uint8_t>(cell))) {
+    const BuildType type = static_cast<BuildType>(t);
+    for (uint8_t cell : owned) {
+      if (can_build(state, player_id, type, cell, &counts)) {
         return true;
       }
     }
@@ -294,8 +300,11 @@ bool HasLegalBuildChoice(const ::State& state, uint8_t player_id) {
 
 bool HasLegalInfluenceChoice(const ::State& state, uint8_t player_id) {
   if (player_id >= state.players.size()) return false;
+  // Build the ship-presence bitsets once; per-cell checks are then O(1)
+  // instead of each re-scanning the unit registry.
+  const InfluenceShipMap ship_map = BuildInfluenceShipMap(state, player_id);
   for (int cell = 0; cell < GALAXY_CELL_COUNT; ++cell) {
-    if (can_influence_to_sector(state, player_id, static_cast<uint8_t>(cell)) ||
+    if (can_influence_to_sector(state, player_id, static_cast<uint8_t>(cell), &ship_map) ||
         can_reclaim_from_sector(state, player_id, static_cast<uint8_t>(cell))) {
       return true;
     }
@@ -305,8 +314,10 @@ bool HasLegalInfluenceChoice(const ::State& state, uint8_t player_id) {
 
 bool HasLegalUpgradeChoice(const ::State& state, uint8_t player_id) {
   if (player_id >= state.players.size()) return false;
-  constexpr size_t total_parts = sizeof(SHIP_PART_TABLE) / sizeof(SHIP_PART_TABLE[0]);
   const ::Player& player = state.players[player_id];
+  // Only probe parts the player can legally place anywhere (tech owned, or
+  // discovery part in inventory) instead of all of SHIP_PART_TABLE.
+  const std::vector<ShipPartId> parts = PlaceablePartIds(state, player_id);
 
   for (int ship = 0; ship < UPGRADE_SHIP_COUNT; ++ship) {
     const Blueprint& bp = player.blueprints[ship];
@@ -316,8 +327,8 @@ bool HasLegalUpgradeChoice(const ::State& state, uint8_t player_id) {
       if (can_upgrade(state, player_id, ship_type, static_cast<uint8_t>(slot), ShipPartId::NONE)) {
         return true;
       }
-      for (size_t part_idx = 1; part_idx < total_parts && part_idx < static_cast<size_t>(UPGRADE_PART_COUNT); ++part_idx) {
-        if (can_upgrade(state, player_id, ship_type, static_cast<uint8_t>(slot), static_cast<ShipPartId>(part_idx))) {
+      for (ShipPartId part_id : parts) {
+        if (can_upgrade(state, player_id, ship_type, static_cast<uint8_t>(slot), part_id)) {
           return true;
         }
       }
@@ -1002,8 +1013,9 @@ std::vector<Action> EclipseState::InfluenceLegalActions() const {
 
   if (is.phase == ::InfluenceState::Phase::choose_influence) {
     // 1. Placement of influence disc (influence to cell)
+    const InfluenceShipMap ship_map = BuildInfluenceShipMap(s, is.player_id);
     for (int cell = 0; cell < GALAXY_CELL_COUNT; ++cell) {
-      if (can_influence_to_sector(s, is.player_id, static_cast<uint8_t>(cell))) {
+      if (can_influence_to_sector(s, is.player_id, static_cast<uint8_t>(cell), &ship_map)) {
         actions.push_back(action_influence_to_cell_start + cell);
       }
     }
@@ -1032,10 +1044,12 @@ std::vector<Action> EclipseState::BuildLegalActions() const {
   std::vector<Action> actions;
 
   if (bs.phase == ::BuildState::Phase::choose_build) {
+    const PlayerUnitCounts counts = BuildUnitCounts(s, bs.player_id);
+    const std::vector<uint8_t> owned = PlayerOwnedBuildCells(s, bs.player_id);
     for (int t = 0; t < BUILD_TYPE_COUNT; ++t) {
-      BuildType type = static_cast<BuildType>(t);
-      for (int cell = 0; cell < GALAXY_CELL_COUNT; ++cell) {
-        if (can_build(s, bs.player_id, type, static_cast<uint8_t>(cell))) {
+      const BuildType type = static_cast<BuildType>(t);
+      for (uint8_t cell : owned) {
+        if (can_build(s, bs.player_id, type, cell, &counts)) {
           actions.push_back(action_build_choice_start + t * GALAXY_CELL_COUNT + cell);
         }
       }
@@ -1054,7 +1068,8 @@ std::vector<Action> EclipseState::UpgradeLegalActions() const {
 
   if (us.phase == ::UpgradeState::Phase::choose_upgrade) {
     const ::Player& player = s.players[us.player_id];
-    constexpr size_t total_parts = sizeof(SHIP_PART_TABLE) / sizeof(SHIP_PART_TABLE[0]);
+    // Only probe parts the player can place anywhere.
+    const std::vector<ShipPartId> parts = PlaceablePartIds(s, us.player_id);
 
     // 4 ship types (INTERCEPTOR=0, CRUISER=1, DREADNOUGHT=2, STARBASE=3)
     for (int ship = 0; ship < UPGRADE_SHIP_COUNT; ++ship) {
@@ -1073,11 +1088,10 @@ std::vector<Action> EclipseState::UpgradeLegalActions() const {
           actions.push_back(action);
         }
 
-        // Check all ship parts (skip NONE, already handled)
-        for (size_t part_idx = 1; part_idx < total_parts && part_idx < static_cast<size_t>(UPGRADE_PART_COUNT); ++part_idx) {
-          ShipPartId part_id = static_cast<ShipPartId>(part_idx);
+        // Check all placeable ship parts (skip NONE, already handled)
+        for (ShipPartId part_id : parts) {
           if (can_upgrade(s, us.player_id, ship_type, static_cast<uint8_t>(slot), part_id)) {
-            Action action = action_upgrade_choice_start + ship * UPGRADE_SLOTS_PER_SHIP * UPGRADE_PART_COUNT + slot * UPGRADE_PART_COUNT + static_cast<int>(part_idx);
+            Action action = action_upgrade_choice_start + ship * UPGRADE_SLOTS_PER_SHIP * UPGRADE_PART_COUNT + slot * UPGRADE_PART_COUNT + static_cast<int>(part_id);
             if (action == action_upgrade_stop) {
               continue;
             }

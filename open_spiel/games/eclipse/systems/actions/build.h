@@ -48,8 +48,34 @@ namespace open_spiel::eclipse
     // Returns the material cost for the specific construct adjusted for species rules.
     uint8_t calculate_build_cost(const ::Player& player, BuildType type);
 
+    // Cached per-player ship counts and owned-sector list so legal-action scans
+    // avoid re-walking the unit registry / full galaxy grid on every cell.
+    struct PlayerUnitCounts
+    {
+        uint8_t interceptor = 0;
+        uint8_t cruiser = 0;
+        uint8_t dreadnought = 0;
+        uint8_t starbase = 0;
+
+        uint8_t of(BuildType type) const
+        {
+            switch (type)
+            {
+            case BuildType::INTERCEPTOR: return interceptor;
+            case BuildType::CRUISER:     return cruiser;
+            case BuildType::DREADNOUGHT: return dreadnought;
+            case BuildType::STARBASE:    return starbase;
+            default:                     return 0;
+            }
+        }
+    };
+
+    PlayerUnitCounts BuildUnitCounts(const ::State& state, uint8_t player_id);
+    std::vector<uint8_t> PlayerOwnedBuildCells(const ::State& state, uint8_t player_id);
+
     // Validates whether a player can execute a specific build action at a target galaxy cell hex.
-    bool can_build(const ::State& state, uint8_t player_id, BuildType type, uint8_t galaxy_cell_idx);
+    bool can_build(const ::State& state, uint8_t player_id, BuildType type, uint8_t galaxy_cell_idx,
+                   const PlayerUnitCounts* counts = nullptr);
 
     // Executes a single build validation and processing phase.
     // Deducts materials, updates structure flags or spawns ship units into the registry,

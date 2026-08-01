@@ -133,6 +133,32 @@ namespace open_spiel::eclipse
         return true;
     }
 
+    std::vector<ShipPartId> PlaceablePartIds(const ::State& state, uint8_t player_id)
+    {
+        std::vector<ShipPartId> out;
+        if (player_id >= state.players.size()) return out;
+        const ::Player& player = state.players[player_id];
+        constexpr size_t total_parts = sizeof(SHIP_PART_TABLE) / sizeof(SHIP_PART_TABLE[0]);
+        for (size_t i = 1; i < total_parts; ++i) {
+            const ShipPart& part = SHIP_PART_TABLE[i - 1];
+            const ShipPartId pid = static_cast<ShipPartId>(i);
+            if (!part.is_discovery) {
+                if (part.required_tech.tech == TechBit::NONE ||
+                    player.has_tech(part.required_tech.tech)) {
+                    out.push_back(pid);
+                }
+            } else {
+                for (size_t k = 0; k < player.parts_inventory.size(); ++k) {
+                    if (player.parts_inventory[k] == pid) {
+                        out.push_back(pid);
+                        break;
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
     bool execute_upgrade(::State& state, const uint8_t player_id, const ShipType ship_type, const uint8_t slot_idx, const ShipPartId part_id, bool is_free_immediate)
     {
         if (!can_upgrade(state, player_id, ship_type, slot_idx, part_id, is_free_immediate)) return false;

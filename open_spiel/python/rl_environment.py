@@ -228,6 +228,15 @@ class Environment(object):
     self._state = None
     self._should_reset = True
 
+    # Cache game-type facts once. pybind returns GameType by value (deep-copies
+    # the parameter map) and num_players() crosses the C++ boundary, so doing
+    # these per-step in the hot loop (see is_turn_based / num_actions_per_step)
+    # is expensive. Resolve once here.
+    self._dynamics = self._game.get_type().dynamics
+    self._is_turn_based = (
+        self._dynamics == pyspiel.GameType.Dynamics.SEQUENTIAL or
+        self._dynamics == pyspiel.GameType.Dynamics.MEAN_FIELD)
+
     # Discount returned at non-initial steps.
     self._discounts = [discount] * self._num_players
 
@@ -551,19 +560,16 @@ class Environment(object):
 
   @property
   def num_players(self):
-    return self._game.num_players()
+    return self._num_players
 
   @property
   def num_actions_per_step(self):
-    return 1 if self.is_turn_based else self.num_players
+    return 1 if self._is_turn_based else self._num_players
 
   # New RL calls for more advanced use cases (e.g. search + RL).
   @property
   def is_turn_based(self):
-    return ((self._game.get_type().dynamics
-             == pyspiel.GameType.Dynamics.SEQUENTIAL) or
-            (self._game.get_type().dynamics
-             == pyspiel.GameType.Dynamics.MEAN_FIELD))
+    return self._is_turn_based
 
   @property
   def max_game_length(self):

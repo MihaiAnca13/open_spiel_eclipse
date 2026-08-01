@@ -38,6 +38,11 @@ namespace open_spiel::eclipse
     // Validates whether a player can assign a specific part to a target slot index on a ship blueprint type.
     bool can_upgrade(const ::State& state, uint8_t player_id, ShipType ship_type, uint8_t slot_idx, ShipPartId part_id, bool is_free_immediate = false);
 
+    // Returns the part ids the player can place at all (tech owned, or discovery
+    // part in inventory). Legal-action scans can then iterate only these instead
+    // of every part in SHIP_PART_TABLE on each candidate ship/slot.
+    std::vector<ShipPartId> PlaceablePartIds(const ::State& state, uint8_t player_id);
+
     // Executes a single component modification activation pass over a ship blueprint.
     bool execute_upgrade(::State& state, uint8_t player_id, ShipType ship_type, uint8_t slot_idx, ShipPartId part_id, bool is_free_immediate = false);
 

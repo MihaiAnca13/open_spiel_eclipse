@@ -5,6 +5,7 @@
 #ifndef ECLIPSE_INFLUENCE_H
 #define ECLIPSE_INFLUENCE_H
 
+#include <bitset>
 #include <cstdint>
 #include <vector>
 #include <nlohmann/json.hpp>
@@ -53,8 +54,20 @@ namespace open_spiel::eclipse
                         std::vector<PendingReturn>* pending_returns);
 
     // Validates whether a player can move an influence disc to a target cell
-    // or reclaim a disc back to their track.
-    bool can_influence_to_sector(const ::State& state, uint8_t player_id, uint8_t galaxy_cell_idx);
+    // or reclaim a disc back to their track. `map` (optional) is a prebuilt
+    // ship-presence map; building it once per legal-action scan lets the 225
+    // per-cell checks stay O(1) instead of re-scanning the unit registry.
+    struct InfluenceShipMap
+    {
+        std::bitset<512> own_ships;
+        std::bitset<512> enemy_ships;
+        std::bitset<512> ancient_ships;
+        std::bitset<512> other_npc_ships;
+    };
+
+    InfluenceShipMap BuildInfluenceShipMap(const ::State& state, uint8_t player_id);
+    bool can_influence_to_sector(const ::State& state, uint8_t player_id, uint8_t galaxy_cell_idx,
+                                 const InfluenceShipMap* map = nullptr);
     bool can_reclaim_from_sector(const ::State& state, uint8_t player_id, uint8_t galaxy_cell_idx);
 
     // Executes placement of an influence disc from the player's track onto a sector.

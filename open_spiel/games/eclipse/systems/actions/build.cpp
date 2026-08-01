@@ -18,35 +18,46 @@ namespace open_spiel::eclipse
     namespace
     {
         // Checks whether the player has any components remaining in their finite component pool supply.
-        bool has_available_miniatures(const ::State& state, const uint8_t player_id, const BuildType type)
+        bool has_available_miniatures(const ::State& state, const uint8_t player_id, const BuildType type,
+                                      const PlayerUnitCounts* counts)
         {
-            // Count active units of this type on the board currently in registry
-            int active_count = 0;
-            ShipType target_ship_type;
             int max_supply = 0;
 
             switch (type)
             {
             case BuildType::INTERCEPTOR:
-                target_ship_type = ShipType::INTERCEPTOR;
                 max_supply = 8;
                 break;
             case BuildType::CRUISER:
-                target_ship_type = ShipType::CRUISER;
                 max_supply = 4;
                 break;
             case BuildType::DREADNOUGHT:
-                target_ship_type = ShipType::DREADNOUGHT;
                 max_supply = 2;
                 break;
             case BuildType::STARBASE:
-                target_ship_type = ShipType::STARBASE;
                 max_supply = 4;
                 break;
             case BuildType::ORBITAL:
             case BuildType::MONOLITH:
                 return true;
                 // Infrastructure tracking is bounded per sector (max 1 each), pieces are unlimited or handled contextually
+            }
+
+            // Use the precomputed per-player count when available to avoid re-walking
+            // the whole unit registry once per candidate cell.
+            if (counts != nullptr) {
+                return counts->of(type) < max_supply;
+            }
+
+            int active_count = 0;
+            ShipType target_ship_type;
+            switch (type)
+            {
+            case BuildType::INTERCEPTOR: target_ship_type = ShipType::INTERCEPTOR; break;
+            case BuildType::CRUISER:     target_ship_type = ShipType::CRUISER; break;
+            case BuildType::DREADNOUGHT: target_ship_type = ShipType::DREADNOUGHT; break;
+            case BuildType::STARBASE:    target_ship_type = ShipType::STARBASE; break;
+            default:                     return true;
             }
 
             for (const auto& unit : state.unit_registry)
@@ -127,7 +138,8 @@ namespace open_spiel::eclipse
         return cost > 0 ? static_cast<uint8_t>(cost) : 1;
     }
 
-    bool can_build(const ::State& state, const uint8_t player_id, const BuildType type, const uint8_t galaxy_cell_idx)
+    bool can_build(const ::State& state, const uint8_t player_id, const BuildType type, const uint8_t galaxy_cell_idx,
+                   const PlayerUnitCounts* counts)
     {
         if (player_id >= state.players.size()) return false;
         const Player& player = state.players[player_id];
@@ -158,13 +170,41 @@ namespace open_spiel::eclipse
         }
 
         // Physical unit plastic piece limitation checks
-        if (!has_available_miniatures(state, player_id, type)) return false;
+        if (!has_available_miniatures(state, player_id, type, counts)) return false;
 
         // Financial checking (Materials inventory pool)
         uint8_t cost = calculate_build_cost(player, type);
         if (player.resources.materials < cost) return false;
 
         return true;
+    }
+
+    PlayerUnitCounts BuildUnitCounts(const ::State& state, uint8_t player_id)
+    {
+        PlayerUnitCounts counts;
+        for (const auto& unit : state.unit_registry) {
+            if (unit.player_id != player_id) continue;
+            switch (unit.type) {
+            case ShipType::INTERCEPTOR: counts.interceptor++; break;
+            case ShipType::CRUISER:     counts.cruiser++; break;
+            case ShipType::DREADNOUGHT: counts.dreadnought++; break;
+            case ShipType::STARBASE:    counts.starbase++; break;
+            default: break;
+            }
+        }
+        return counts;
+    }
+
+    std::vector<uint8_t> PlayerOwnedBuildCells(const ::State& state, uint8_t player_id)
+    {
+        std::vector<uint8_t> owned;
+        for (int cell = 0; cell < GALAXY_CELL_COUNT; ++cell) {
+            const HexCoord coord = index_to_hex(cell);
+            if (state.galaxy.at(coord.q, coord.r).owner_id == player_id) {
+                owned.push_back(static_cast<uint8_t>(cell));
+            }
+        }
+        return owned;
     }
 
     bool execute_build(::State& state, uint8_t player_id, BuildType type, uint8_t galaxy_cell_idx)
