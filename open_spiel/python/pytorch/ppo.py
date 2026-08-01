@@ -148,7 +148,7 @@ class PPOAtariAgent(nn.Module):
         hidden), probs.probs
 
 
-def legal_actions_to_mask(legal_actions_list, num_actions):
+def legal_actions_to_mask(legal_actions_list, num_actions, device="cpu"):
   """Converts a list of legal actions to a mask.
 
   The mask has size num actions with a 1 in a legal positions.
@@ -156,15 +156,26 @@ def legal_actions_to_mask(legal_actions_list, num_actions):
   Args:
     legal_actions_list: the list of legal actions
     num_actions: number of actions (width of mask)
+    device: device to build the mask on.
 
   Returns:
     legal actions mask.
   """
-  legal_actions_mask = torch.zeros((len(legal_actions_list), num_actions),
-                                   dtype=torch.bool)
+  mask = torch.zeros((len(legal_actions_list), num_actions),
+                     dtype=torch.bool, device=device)
+  row_ids = []
+  actions = []
   for i, legal_actions in enumerate(legal_actions_list):
-    legal_actions_mask[i, legal_actions] = 1
-  return legal_actions_mask
+    if not legal_actions:
+      continue
+    n = len(legal_actions)
+    actions.extend(legal_actions)
+    row_ids.extend([i] * n)
+  if row_ids:
+    rows = torch.tensor(row_ids, dtype=torch.long, device=device)
+    cols = torch.tensor(actions, dtype=torch.long, device=device)
+    mask[rows, cols] = True
+  return mask
 
 
 class PPO(nn.Module):
@@ -265,8 +276,15 @@ class PPO(nn.Module):
     self.players = torch.full((self.steps_per_batch, self.num_envs),
                               self.player_id,
                               dtype=torch.long).to(device)
+    self.players_cpu = torch.full((self.steps_per_batch, self.num_envs),
+                                  self.player_id, dtype=torch.long)
     self._extra_samples = []
     self._last_decision = [{} for _ in range(self.num_envs)]
+
+    # CPU views of the most recent step (avoid re-syncing from GPU in the
+    # shaping / logging loop).
+    self.last_obs_batch = None
+    self.last_seats = None
 
     # Initialize counters
     self.cur_batch_idx = 0
@@ -288,36 +306,50 @@ class PPO(nn.Module):
       ]
     return [self.player_id for _ in time_step]
 
-  def _gather_obs(self, time_step, seats):
-    return torch.Tensor(
-        np.array([
-            np.reshape(ts.observations["info_state"][seats[i]], self.input_shape)
+  def _obs_cpu(self, time_step, seats):
+    """Batched CPU numpy observations for the acting seats."""
+    return np.asarray(
+        [
+            np.asarray(ts.observations["info_state"][seats[i]],
+                       dtype=np.float32)
             for i, ts in enumerate(time_step)
-        ])).to(self.device)
+        ],
+        dtype=np.float32,
+    )
+
+  def _gather_obs(self, time_step, seats):
+    return torch.from_numpy(self._obs_cpu(time_step, seats)).to(self.device)
 
   def _gather_legal_actions_mask(self, time_step, seats):
     return legal_actions_to_mask([
         ts.observations["legal_actions"][seats[i]]
         for i, ts in enumerate(time_step)
-    ], self.num_actions).to(self.device)
+    ], self.num_actions, device=self.device)
 
   def step(self, time_step, is_evaluation=False):
     seats = self._current_seats(time_step)
+    legal_actions_mask_cpu = legal_actions_to_mask([
+        ts.observations["legal_actions"][seats[i]]
+        for i, ts in enumerate(time_step)
+    ], self.num_actions)
+    legal_actions_mask = legal_actions_mask_cpu.to(self.device)
+    obs_cpu = self._obs_cpu(time_step, seats)
+    self.last_obs_batch = obs_cpu
+    self.last_seats = list(seats)
     if is_evaluation:
       with torch.no_grad():
-        legal_actions_mask = self._gather_legal_actions_mask(time_step, seats)
-        obs = self._gather_obs(time_step, seats)
+        obs = torch.from_numpy(obs_cpu).to(self.device)
         action, _, _, value, probs = self.get_action_and_value(
             obs, legal_actions_mask=legal_actions_mask)
+        action_list = action.detach().cpu().tolist()
         return [
-            StepOutput(action=a.item(), probs=p)
-            for (a, p) in zip(action, probs)
+            StepOutput(action=a, probs=p)
+            for (a, p) in zip(action_list, probs)
         ]
     else:
       with torch.no_grad():
         # act
-        obs = self._gather_obs(time_step, seats)
-        legal_actions_mask = self._gather_legal_actions_mask(time_step, seats)
+        obs = torch.from_numpy(obs_cpu).to(self.device)
         action, logprob, _, value, probs = self.get_action_and_value(
             obs, legal_actions_mask=legal_actions_mask)
 
@@ -325,6 +357,7 @@ class PPO(nn.Module):
         row = self.cur_batch_idx
         self.players[row] = torch.tensor(seats, dtype=torch.long).to(
             self.device)
+        self.players_cpu[row] = torch.tensor(seats, dtype=torch.long)
         self.legal_actions_mask[row] = legal_actions_mask
         self.obs[row] = obs
         self.actions[row] = action
@@ -332,17 +365,21 @@ class PPO(nn.Module):
         self.values[row] = value.flatten()
 
         if self.selfplay:
-          obs_cpu = obs.detach().cpu().numpy()
-          mask_cpu = legal_actions_mask.detach().cpu().numpy()
+          mask_cpu = legal_actions_mask_cpu.numpy()
+          action_np = action.detach().cpu().numpy()
+          logprob_np = logprob.detach().cpu().numpy()
+          value_np = value.detach().cpu().numpy().ravel()
           for i, s in enumerate(seats):
-            self._last_decision[i][s] = (obs_cpu[i].copy(), mask_cpu[i].copy(),
-                                         int(action[i].item()),
-                                         float(logprob[i].item()),
-                                         float(value[i].item()))
+            self._last_decision[i][s] = (
+                obs_cpu[i].copy(), mask_cpu[i].copy(), int(action_np[i]),
+                float(logprob_np[i]), float(value_np[i]))
+          action_view = action_np
+        else:
+          action_view = action.detach().cpu().tolist()
 
         agent_output = [
-            StepOutput(action=a.item(), probs=p)
-            for (a, p) in zip(action, probs)
+            StepOutput(action=int(a), probs=p)
+            for (a, p) in zip(action_view, probs)
         ]
         return agent_output
 
@@ -360,14 +397,16 @@ class PPO(nn.Module):
     """
     row = self.cur_batch_idx
     if self.selfplay:
-      seats = self.players[row].tolist()
+      seats = self.players_cpu[row].tolist()
+      rew_row = np.empty(self.num_envs, dtype=np.float32)
+      done_row = np.empty(self.num_envs, dtype=np.float32)
       for i in range(self.num_envs):
-        rvec = torch.tensor(reward[i], dtype=torch.float).to(self.device)
+        rvec = reward[i]
         seat = seats[i]
         is_done = bool(done[i])
         shaped = 0.0 if shaped_reward is None else shaped_reward[i]
-        self.rewards[row, i] = rvec[seat].item() + (0.0 if is_done else shaped)
-        self.dones[row, i] = 1.0 if is_done else 0.0
+        rew_row[i] = rvec[seat] + (0.0 if is_done else shaped)
+        done_row[i] = 1.0 if is_done else 0.0
         if is_done:
           for s in range(self.num_players):
             if s == seat:
@@ -379,8 +418,10 @@ class PPO(nn.Module):
             # Independent closed-out sample: target = seat's terminal payoff.
             self._extra_samples.append(
                 (i, s, obs_, mask_, int(action_), logprob_, value_,
-                 rvec[s].item()))
+                 float(rvec[s])))
           self._last_decision[i].clear()
+      self.rewards[row] = torch.from_numpy(rew_row).to(self.device)
+      self.dones[row] = torch.from_numpy(done_row).to(self.device)
     else:
       self.rewards[row] = torch.tensor(reward).to(self.device).view(-1)
       self.dones[row] = torch.tensor(done).to(self.device).view(-1)
@@ -423,31 +464,36 @@ class PPO(nn.Module):
                 t] + self.gamma * nextnonterminal * next_return
       return returns
     # self-play: per (env, seat) subsequence GAE.
-    advantages = torch.zeros_like(self.rewards).to(self.device)
-    with torch.no_grad():
-      for i in range(self.num_envs):
-        next_value = next_value_per_env[i]
-        for s in range(self.num_players):
-          rows = (self.players[:, i] == s).nonzero(as_tuple=True)[0]
-          if len(rows) == 0:
-            continue
-          lastgaelam = 0.0
-          for k in reversed(range(len(rows))):
-            idx = int(rows[k])
-            if k == len(rows) - 1:
-              nextvalues = next_value
-            else:
-              nextvalues = self.values[int(rows[k + 1]), i]
-            nextnonterminal = 1.0 - self.dones[idx, i]
-            delta = (
-                self.rewards[idx, i] + self.gamma * nextvalues * nextnonterminal -
-                self.values[idx, i])
-            lastgaelam = (
-                delta + self.gamma * self.gae_lambda * nextnonterminal *
-                lastgaelam)
-            advantages[idx, i] = lastgaelam
-            returns[idx, i] = lastgaelam + self.values[idx, i]
-    return returns
+    # Computed on CPU numpy: the per-(env,seat) chains are scalar-linked, so the
+    # original pure-torch version issued ~1 tiny GPU kernel per (row, ops);
+    # numpy scalar ops are several orders of magnitude cheaper here.
+    players_np = self.players.cpu().numpy()
+    rewards_np = self.rewards.cpu().numpy()
+    dones_np = self.dones.cpu().numpy()
+    values_np = self.values.cpu().numpy()
+    nv = next_value_per_env.cpu().numpy()
+    rets = np.zeros_like(rewards_np)
+    for i in range(self.num_envs):
+      for s in range(self.num_players):
+        rows = np.flatnonzero(players_np[:, i] == s)
+        if rows.size == 0:
+          continue
+        lastgaelam = 0.0
+        for k in range(rows.size - 1, -1, -1):
+          idx = int(rows[k])
+          if k == rows.size - 1:
+            nextvalues = nv[i]
+          else:
+            nextvalues = values_np[int(rows[k + 1]), i]
+          nextnonterminal = 1.0 - dones_np[idx, i]
+          delta = (
+              rewards_np[idx, i] +
+              self.gamma * nextvalues * nextnonterminal - values_np[idx, i])
+          lastgaelam = (
+              delta + self.gamma * self.gae_lambda * nextnonterminal *
+              lastgaelam)
+          rets[idx, i] = lastgaelam + values_np[idx, i]
+    return torch.from_numpy(rets).to(self.device)
 
   def learn(self, time_step):
     seats = self._current_seats(time_step)

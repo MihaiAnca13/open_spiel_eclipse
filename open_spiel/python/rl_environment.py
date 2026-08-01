@@ -167,6 +167,7 @@ class Environment(object):
                mfg_distribution=None,
                mfg_population=None,
                enable_legality_check=False,
+               observations_as_numpy=False,
                **kwargs):
     """Constructor.
 
@@ -183,6 +184,12 @@ class Environment(object):
         game.
       mfg_population: The Mean Field Game population to consider.
       enable_legality_check: Check the legality of the move before stepping.
+      observations_as_numpy: if True (OBSERVATION type only), observation
+        tensors are written in place into a reusable numpy buffer (zero Python
+        list boxing / numpy conversion) via `State.observation_tensor_into`.
+        The returned `info_state` entries are views into that buffer and are
+        overwritten on every step, so callers must copy before retaining them.
+        Default False (behaviour identical to upstream).
       **kwargs: dict, additional settings passed to the Open Spiel game.
 
     Raises:
@@ -239,6 +246,11 @@ class Environment(object):
       if not self._game.get_type().provides_information_state_tensor:
         raise ValueError(f"information_state_tensor not supported by {game}")
     self._use_observation = (observation_type == ObservationType.OBSERVATION)
+    self._observations_as_numpy = observations_as_numpy and self._use_observation
+    self._obs_buffer = None
+    if observations_as_numpy and not self._use_observation:
+      raise ValueError("observations_as_numpy is only supported with "
+                       "observation_type=OBSERVATION")
 
     if self._game.get_type().dynamics == pyspiel.GameType.Dynamics.MEAN_FIELD:
       if mfg_distribution is None:
@@ -258,8 +270,51 @@ class Environment(object):
   def seed(self, seed=None):
     self._chance_event_sampler.seed(seed)
 
-  def get_time_step(self):
+  def _resolve_players(self, players):
+    """Returns the seat indices whose obs/legal actions should be computed.
+
+    Args:
+      players: None (all seats), the string 'current' (only the acting seat,
+        or all seats when at a terminal state where current_player() is
+        terminal), or an iterable of seat indices.
+
+    Returns:
+      A list of player indices.
+    """
+    if players is None:
+      return list(range(self.num_players))
+    if players == "current":
+      cur = self._state.current_player()
+      if cur < 0 or cur >= self.num_players:
+        return list(range(self.num_players))
+      return [int(cur)]
+    return list(players)
+
+  def _ensure_obs_buffer(self):
+    if self._obs_buffer is None:
+      size = 1
+      for s in self._game.observation_tensor_shape():
+        size *= s
+      self._obs_buffer = np.zeros((self.num_players, size), dtype=np.float32)
+
+  def _get_obs_row(self, player_id):
+    """Player `player_id`'s observation (numpy row when numpy mode is on)."""
+    if self._observations_as_numpy:
+      self._ensure_obs_buffer()
+      self._state.observation_tensor_into(player_id,
+                                          self._obs_buffer[player_id])
+      return self._obs_buffer[player_id]
+    return (self._state.observation_tensor(player_id)
+            if self._use_observation
+            else self._state.information_state_tensor(player_id))
+
+  def get_time_step(self, players=None):
     """Returns a `TimeStep` without updating the environment.
+
+    Args:
+      players: which seats to compute observations + legal actions for (see
+        `_resolve_players`). Rewards/discounts are always computed for all
+        players. Uncomputed observation/legal-action entries are left as None.
 
     Returns:
       A `TimeStep` namedtuple containing:
@@ -272,23 +327,24 @@ class Environment(object):
         step_type: A `StepType` value.
     """
     observations = {
-        "info_state": [],
-        "legal_actions": [],
+        "info_state": [None] * self.num_players,
+        "legal_actions": [None] * self.num_players,
         "current_player": [],
         "serialized_state": []
     }
     rewards = []
+    to_compute = self._resolve_players(players)
     step_type = StepType.LAST if self._state.is_terminal() else StepType.MID
     self._should_reset = step_type == StepType.LAST
 
     cur_rewards = self._state.rewards()
     for player_id in range(self.num_players):
       rewards.append(cur_rewards[player_id])
-      observations["info_state"].append(
-          self._state.observation_tensor(player_id) if self._use_observation
-          else self._state.information_state_tensor(player_id))
-
-      observations["legal_actions"].append(self._state.legal_actions(player_id))
+      if player_id not in to_compute:
+        continue
+      observations["info_state"][player_id] = self._get_obs_row(player_id)
+      observations["legal_actions"][player_id] = self._state.legal_actions(
+          player_id)
     observations["current_player"] = self._state.current_player()
     discounts = self._discounts
     if step_type == StepType.LAST:
@@ -334,20 +390,14 @@ class Environment(object):
               f"Legal actions are: {legal_actions}"
           )
 
-  def step(self, actions):
+  def step(self, actions, players=None):
     """Updates the environment according to `actions` and returns a `TimeStep`.
-
-    If the environment returned a `TimeStep` with `StepType.LAST` at the
-    previous step, this call to `step` will start a new sequence and `actions`
-    will be ignored.
-
-    This method will also start a new sequence if called after the environment
-    has been constructed and `reset` has not been called. Again, in this case
-    `actions` will be ignored.
 
     Args:
       actions: a list containing one action per player, following specifications
         defined in `action_spec()`.
+      players: which seats to compute observations + legal actions for (see
+        `get_time_step`).
 
     Returns:
       A `TimeStep` namedtuple containing:
@@ -370,7 +420,7 @@ class Environment(object):
           "actions (one per player)."
       )
     if self._should_reset:
-      return self.reset()
+      return self.reset(players=players)
 
     if self._enable_legality_check:
       self._check_legality(actions)
@@ -381,10 +431,14 @@ class Environment(object):
       self._state.apply_actions(actions)
     self._sample_external_events()
 
-    return self.get_time_step()
+    return self.get_time_step(players=players)
 
-  def reset(self):
+  def reset(self, players=None):
     """Starts a new sequence and returns the first `TimeStep` of this sequence.
+
+    Args:
+      players: which seats to compute observations + legal actions for (see
+        `get_time_step`).
 
     Returns:
       A `TimeStep` namedtuple containing:
@@ -405,17 +459,19 @@ class Environment(object):
       self._state = self._game.new_initial_state()
     self._sample_external_events()
 
+    to_compute = self._resolve_players(players)
     observations = {
-        "info_state": [],
-        "legal_actions": [],
+        "info_state": [None] * self.num_players,
+        "legal_actions": [None] * self.num_players,
         "current_player": [],
         "serialized_state": []
     }
     for player_id in range(self.num_players):
-      observations["info_state"].append(
-          self._state.observation_tensor(player_id) if self._use_observation
-          else self._state.information_state_tensor(player_id))
-      observations["legal_actions"].append(self._state.legal_actions(player_id))
+      if player_id not in to_compute:
+        continue
+      observations["info_state"][player_id] = self._get_obs_row(player_id)
+      observations["legal_actions"][player_id] = self._state.legal_actions(
+          player_id)
     observations["current_player"] = self._state.current_player()
 
     if self._include_full_state:

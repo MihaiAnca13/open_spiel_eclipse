@@ -181,46 +181,67 @@ def phi_from_obs_slot(obs_full, slot):
   return float(obs_full[slot]) * SCORE_DIVISOR
 
 
+# Lazy caches: the phi functions run once per (env, observed state) in the hot
+# loop; absl FLAGS lookups (2.5M+ calls in profiling) are replaced by plain
+# locals resolved after flag parsing.
+_PHI_WEIGHTS = None
+_PHI_VARS = None
+
+
+def _phi_cached():
+  """Returns (mode, weights) resolved once from FLAGS."""
+  global _PHI_WEIGHTS, _PHI_VARS
+  if _PHI_VARS is None:
+    _PHI_WEIGHTS = (FLAGS.phi_w_colony, FLAGS.phi_w_disk,
+                    FLAGS.phi_w_structure, FLAGS.phi_w_ambassador)
+    _PHI_VARS = (FLAGS.phi, FLAGS.gamma)
+  return _PHI_VARS[0], _PHI_WEIGHTS, _PHI_VARS[1]
+
+
 def phi_soft_self(obs):
   """Soft potential read from a seat's own (self) observation block."""
+  _, (w_colony, w_disk, w_struct, w_amb), _ = _phi_cached()
   base = phi_from_obs_slot(obs, SCORE_SELF_SLOT)
   colony = float(obs[45 + 21]) * 12.0
   disks = float(obs[45 + 22]) * 16.0
   orbitals = float(obs[45 + 27]) * 10.0
   monoliths = float(obs[45 + 28]) * 6.0
   amb = float(obs[45 + 29]) * 3.0
-  return base + (FLAGS.phi_w_colony * colony + FLAGS.phi_w_disk * disks +
-                 FLAGS.phi_w_structure * (orbitals + monoliths) +
-                 FLAGS.phi_w_ambassador * amb)
+  return base + (w_colony * colony + w_disk * disks +
+                 w_struct * (orbitals + monoliths) +
+                 w_amb * amb)
 
 
 def phi_soft_opponent(obs_viewer, block):
   """Soft potential for a seat read from another seat's observation block."""
+  _, (w_colony, w_disk, w_struct, w_amb), _ = _phi_cached()
   base = phi_from_obs_slot(obs_viewer, block)
   colony = float(obs_viewer[block + 12]) * 12.0
   disks = float(obs_viewer[block + 13]) * 16.0
   orbitals = float(obs_viewer[block + 14]) * 10.0
   monoliths = float(obs_viewer[block + 15]) * 6.0
   amb = float(obs_viewer[block + 11]) * 3.0
-  return base + (FLAGS.phi_w_colony * colony + FLAGS.phi_w_disk * disks +
-                 FLAGS.phi_w_structure * (orbitals + monoliths) +
-                 FLAGS.phi_w_ambassador * amb)
+  return base + (w_colony * colony + w_disk * disks +
+                 w_struct * (orbitals + monoliths) +
+                 w_amb * amb)
 
 
 def potential_self(obs):
   """Potential of the acting seat from its own observation."""
-  if FLAGS.phi == "banked":
+  mode, _, _ = _phi_cached()
+  if mode == "banked":
     return phi_from_obs_slot(obs, SCORE_SELF_SLOT)
-  if FLAGS.phi == "soft":
+  if mode == "soft":
     return phi_soft_self(obs)
   return 0.0
 
 
 def potential_opponent(obs_viewer, block):
   """Potential of a non-acting seat read from the viewer's observation."""
-  if FLAGS.phi == "banked":
+  mode, _, _ = _phi_cached()
+  if mode == "banked":
     return phi_from_obs_slot(obs_viewer, block)
-  if FLAGS.phi == "soft":
+  if mode == "soft":
     return phi_soft_opponent(obs_viewer, block)
   return 0.0
 
@@ -254,7 +275,8 @@ def main(_):
           game=pyspiel.load_game(FLAGS.game),
           chance_event_sampler=rl_environment.ChanceEventSampler(
               seed=FLAGS.seed + i),
-          observation_type=rl_environment.ObservationType.OBSERVATION)
+          observation_type=rl_environment.ObservationType.OBSERVATION,
+          observations_as_numpy=True)
       for i in range(FLAGS.num_envs)
   ])
   game = envs.envs[0]._game  # pylint: disable=protected-access
@@ -293,26 +315,29 @@ def main(_):
   episode_returns = {i: [] for i in range(FLAGS.num_envs)}
   recent_returns = []
 
-  time_step = envs.reset()
+  time_step = envs.reset(players="current")
   for update in range(num_updates):
     for step in range(FLAGS.num_steps):
       agent_output = agent.step(time_step)
-      row = agent.cur_batch_idx
       # phi(s) for the acting seat from its own obs (this row).
-      obs_batch = agent.obs[row].view(FLAGS.num_envs, -1).cpu().numpy()
-      phi_prev = np.array(
-          [potential_self(obs_batch[i]) for i in range(FLAGS.num_envs)])
+      # Uses the CPU numpy obs batch already gathered by agent.step (no second
+      # GPU->CPU round trip).
+      obs_batch = agent.last_obs_batch
+      phi_prev = np.fromiter(
+          (potential_self(obs_batch[i]) for i in range(FLAGS.num_envs)),
+          dtype=np.float64, count=FLAGS.num_envs)
 
       time_step, reward, done, unreset = envs.step(
-          agent_output, reset_if_done=True)
+          agent_output, reset_if_done=True, players="current")
 
       shaped = np.zeros(FLAGS.num_envs)
       if FLAGS.shaping:
+        seats = agent.last_seats
         for i, ts in enumerate(time_step):
           if done[i]:
             continue
           viewer = ts.observations["current_player"]
-          seat = int(agent.players[row, i])
+          seat = seats[i]
           k = opponent_block_index(seat, viewer)
           phi_next = potential_opponent(
               ts.observations["info_state"][viewer], OPP_BASE + k * 25)

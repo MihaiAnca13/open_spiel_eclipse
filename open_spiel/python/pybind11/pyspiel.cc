@@ -423,6 +423,20 @@ PYBIND11_MODULE(pyspiel, m) {
            (std::vector<float>(State::*)(int) const) & State::ObservationTensor)
       .def("observation_tensor",
            (std::vector<float>(State::*)() const) & State::ObservationTensor)
+      .def("observation_tensor_into",
+           [](State& self, int player, py::array_t<float> buffer) {
+             py::buffer_info info = buffer.request();
+             const int size = self.GetGame()->ObservationTensorSize();
+             if (static_cast<int>(info.size) < size) {
+               throw py::value_error("observation_tensor_into: buffer too "
+                                     "small for this game's observation");
+             }
+             self.ObservationTensor(
+                 player, absl::Span<float>(static_cast<float*>(info.ptr),
+                                           static_cast<size_t>(size)));
+             return buffer;
+           },
+           py::arg("player"), py::arg("buffer"))
       .def("to_observation_struct",
            (std::unique_ptr<ObservationStruct>(State::*)(Player) const) &
                State::ToObservationStruct,

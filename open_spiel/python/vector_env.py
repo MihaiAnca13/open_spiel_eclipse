@@ -37,13 +37,16 @@ class SyncVectorEnv(object):
   def num_players(self):
     return self.envs[0].num_players
 
-  def step(self, step_outputs, reset_if_done=False):
+  def step(self, step_outputs, reset_if_done=False, players=None):
     """Apply one step.
 
     Args:
       step_outputs: the step outputs
       reset_if_done: if True, automatically reset the environment
           when the epsiode ends
+      players: which seats to compute obs + legal actions for. None (all
+        seats), the string 'current' (only acting seat, for every env), or a
+        per-env list where each element is None / 'current' / seat list.
 
     Returns:
       time_steps: the time steps,
@@ -51,8 +54,14 @@ class SyncVectorEnv(object):
       done: done flag
       unreset_time_steps: unreset time steps
     """
+    def _players_for(i):
+      if isinstance(players, list) and players:
+        p = players[i] if i < len(players) else None
+        return None if p is None else p
+      return players
+
     time_steps = [
-        self.envs[i].step([step_outputs[i].action])
+        self.envs[i].step([step_outputs[i].action], players=_players_for(i))
         for i in range(len(self.envs))
     ]
     reward = [step.rewards for step in time_steps]
@@ -62,17 +71,23 @@ class SyncVectorEnv(object):
                                      # information from them
 
     if reset_if_done:
-      time_steps = self.reset(envs_to_reset=done)
+      time_steps = self.reset(envs_to_reset=done, players=players)
 
     return time_steps, reward, done, unreset_time_steps
 
-  def reset(self, envs_to_reset=None):
+  def reset(self, envs_to_reset=None, players=None):
     if envs_to_reset is None:
       envs_to_reset = [True for _ in range(len(self.envs))]
 
+    def _players_for(i):
+      if isinstance(players, list) and players:
+        p = players[i] if i < len(players) else None
+        return None if p is None else p
+      return players
+
     time_steps = [
-        self.envs[i].reset()
-        if envs_to_reset[i] else self.envs[i].get_time_step()
+        self.envs[i].reset(players=_players_for(i))
+        if envs_to_reset[i] else self.envs[i].get_time_step(players=_players_for(i))
         for i in range(len(self.envs))
     ]
     return time_steps
