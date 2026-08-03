@@ -180,6 +180,12 @@ flags.DEFINE_bool(
     "exploiters sampled into mixed lineups (requires --roster_dir).")
 flags.DEFINE_string("roster_dir", "runs/roster",
                     "Directory backing the policy roster (checkpoints + JSON).")
+flags.DEFINE_string(
+    "resume", None,
+    "Seed the network from a saved checkpoint before training. Accepts a "
+    "roster policy id (e.g. 'main' or 'snap_u100', loaded from --roster_dir "
+    "if --league/--exploit_victim is on) or an explicit .pt path. Lets an "
+    "interrupted/extended run continue from where it left off.")
 flags.DEFINE_integer("snapshot_every", 25,
                      "Snapshot the main policy into the roster every N updates.")
 flags.DEFINE_float("selfplay_fraction", 0.5,
@@ -697,6 +703,28 @@ def main(_):
           -1, 1) / 200.0),
       aux_coef=FLAGS.aux_coef,
   )
+
+  # Device + resume telemetry before any training starts.
+  _emit(f"device={device}  game={FLAGS.game}  num_envs={FLAGS.num_envs}"
+        f"  num_workers={FLAGS.num_workers}")
+  if FLAGS.resume:
+    agent_fn_r = make_agent_fn(FLAGS.nn_width, FLAGS.nn_depth)
+    resume_src = FLAGS.resume
+    sd = None
+    if FLAGS.league or FLAGS.exploit_victim:
+      roster_r = PolicyRoster(FLAGS.roster_dir)
+      net_r = roster_r.load_net(resume_src, agent_fn_r, game.num_distinct_actions(),
+                                input_shape, device)
+      if net_r is not None:
+        sd = net_r.state_dict()
+    if sd is None and os.path.exists(resume_src):
+      sd = torch.load(resume_src, map_location=device, weights_only=True)
+    if sd is None:
+      raise ValueError(
+          f"--resume={resume_src}: not a roster id in {FLAGS.roster_dir} and "
+          f"not an existing .pt path")
+    agent.network.load_state_dict(sd)
+    _emit(f"resumed network weights from {resume_src}")
 
   batch_size = FLAGS.num_envs * FLAGS.num_steps
   num_updates = FLAGS.total_timesteps // batch_size
