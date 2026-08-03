@@ -46,6 +46,25 @@ from open_spiel.python.rl_agent import StepOutput
 
 INVALID_ACTION_PENALTY = -1e6
 
+# Rank-to-utility table used in win-value mode: the value/return of finishing
+# at each placement (1st..4th). Optimizing this (rather than raw VP) is the
+# 4-player general-sum objective: "finish first", not "maximize score".
+DEFAULT_RANK_UTILITY = (1.0, 0.5, 0.0, -0.5)
+
+
+def rank_of(per_agent_vp, seat):
+  """Placement (1-based) of `seat` given a per-agent final VP vector.
+
+  Ties share the best placement: rank = 1 + (# agents strictly above `seat`).
+  """
+  return 1 + sum(1 for v in per_agent_vp if v > per_agent_vp[seat])
+
+
+def rank_utility(per_agent_vp, seat, utility_table=DEFAULT_RANK_UTILITY):
+  """Utility of `seat`'s placement, given by ``utility_table`` indexed by rank."""
+  idx = min(rank_of(per_agent_vp, seat) - 1, len(utility_table) - 1)
+  return utility_table[idx]
+
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
   torch.nn.init.orthogonal_(layer.weight, std)
@@ -217,6 +236,10 @@ class PPO(nn.Module):
       device="cpu",
       writer=None,  # Tensorboard SummaryWriter
       agent_fn=PPOAtariAgent,
+      value_mode="vp",
+      aux_tasks=None,
+      aux_target_fn=None,
+      aux_coef=0.1,
   ):
     super().__init__()
 
@@ -246,6 +269,19 @@ class PPO(nn.Module):
     self.value_coef = value_coef
     self.max_grad_norm = max_grad_norm
     self.target_kl = target_kl
+
+    # Value / auxiliary-head options.
+    #   value_mode == "vp"  : value predicts the agent's final raw payoff (the
+    #     original behaviour, backward compatible).
+    #   value_mode == "win" : terminal targets are rank-utilities (1st/2nd/...)
+    #     so the value (and the shaped-reward scale) optimizes "finish first"
+    #     rather than raw score. rank_utility() converts a per-agent terminal
+    #     payoff vector into each seat's target.
+    self.value_mode = value_mode
+    self.aux_tasks = list(aux_tasks) if aux_tasks else None
+    self.num_aux = len(self.aux_tasks) if self.aux_tasks else 0
+    self.aux_target_fn = aux_target_fn
+    self.aux_coef = aux_coef
 
     # Logging
     self.writer = writer
@@ -281,6 +317,33 @@ class PPO(nn.Module):
     self._extra_samples = []
     self._last_decision = [{} for _ in range(self.num_envs)]
 
+    # Auxiliary-head buffers (self-play/win mode only): per (step, env) target
+    # vectors and availability masks for the aux tasks. Targets are back-filled
+    # for every row of a seat the moment its episode closes (rows are
+    # overwritten each batch, so rows 0..current-row of a seat all get the
+    # same terminal-derived target).
+    if self.num_aux:
+      self.aux_targets = torch.zeros(
+          (self.steps_per_batch, self.num_envs, self.num_aux),
+          dtype=torch.float32).to(device)
+      self.aux_mask = torch.zeros(
+          (self.steps_per_batch, self.num_envs, self.num_aux),
+          dtype=torch.float32).to(device)
+    else:
+      self.aux_targets = None
+      self.aux_mask = None
+
+    # League (population self-play) state. When enabled, the acting policy per
+    # (env, seat) comes from ``lineup`` and ``networks``; only ``train_pid``'s
+    # rows receive gradients (other policies generate actions but their
+    # transitions are filtered out of the loss).
+    self.league = False
+    self.networks = None
+    self.lineup = None  # (num_envs, num_players) policy ids, or None.
+    self.train_pid = None
+    self.trainable = torch.zeros(
+        (self.steps_per_batch, self.num_envs), dtype=torch.bool).to(device)
+
     # Sparse legal-action storage for the batch: per-row packed column indices
     # (tiny vs. the dense (S, N, num_actions) mask, and the basis of the
     # sparse learn path).
@@ -297,6 +360,38 @@ class PPO(nn.Module):
     self.total_steps_done = 0
     self.updates_done = 0
     self.start_time = time.time()
+
+  def setup_league(self, networks, lineup, train_pid):
+    """Enables population self-play.
+
+    Args:
+      networks: dict policy_id -> nn.Module acting as that policy. ``train_pid``
+        must be present and is the module that owns ``self.network``.
+      lineup: (num_envs, num_players) int/str array of policy ids, per env per
+        seat.
+      train_pid: policy id of the trainable network (only its rows get
+        gradients).
+    """
+    if train_pid not in networks:
+      raise ValueError(f"train_pid {train_pid} not in networks: "
+                       f"{list(networks)}")
+    self.networks = networks
+    self.lineup = np.asarray(lineup)
+    if self.lineup.shape != (self.num_envs, self.num_players):
+      raise ValueError(
+          f"lineup must be ({self.num_envs},{self.num_players}), got "
+          f"{self.lineup.shape}")
+    self.train_pid = train_pid
+    if self.networks[train_pid] is not self.network:
+      raise ValueError("networks[train_pid] must be self.network (the module "
+                       "PPO owns and optimizes)")
+    self.league = True
+
+  def _acts_trainable(self, env_idx, seat):
+    """True when (env, seat) is driven by the trainable policy (league)."""
+    if not self.league:
+      return True
+    return self.lineup[env_idx, seat] == self.train_pid
 
   def get_value(self, x):
     return self.network.get_value(x)
@@ -351,6 +446,39 @@ class PPO(nn.Module):
         for i, ts in enumerate(time_step)
     ], self.num_actions, device=self.device)
 
+  def _act_batch(self, obs, legal_actions_mask, seats):
+    """One batched forward over ``obs``, routing rows by acting policy.
+
+    In league mode each (env, seat) is driven by the policy in ``lineup``, so
+    rows are grouped by policy id and forwarded through that policy's network
+    (main stays ``self.network``). Non-league is the single (shared) network.
+    """
+    if not self.league:
+      return self.get_action_and_value(
+          obs, legal_actions_mask=legal_actions_mask)
+    pids = np.asarray([
+        self.lineup[i, int(seats[i])] for i in range(obs.shape[0])])
+    action = torch.empty(obs.shape[0], dtype=torch.long, device=self.device)
+    logprob = torch.empty(obs.shape[0], device=self.device)
+    value = torch.empty(obs.shape[0], device=self.device)
+    probs = torch.empty((obs.shape[0], self.num_actions),
+                        device=self.device)
+    entropy = torch.empty(obs.shape[0], device=self.device)
+    for pid in np.unique(pids):
+      idx = np.flatnonzero(pids == pid)
+      net = self.networks.get(pid)
+      if net is None:
+        raise ValueError(f"league lineup references unknown policy {pid}")
+      a, lp, ent, v, pr = net.get_action_and_value(
+          obs[idx], legal_actions_mask=legal_actions_mask[idx])
+      i_t = torch.from_numpy(idx.astype(np.int64)).to(self.device)
+      action[i_t] = a
+      logprob[i_t] = lp
+      value[i_t] = v
+      probs[i_t] = pr
+      entropy[i_t] = ent
+    return action, logprob, entropy, value, probs
+
   def step(self, time_step, is_evaluation=False):
     seats = self._current_seats(time_step)
     legal_actions_mask_cpu = legal_actions_to_mask([
@@ -375,14 +503,17 @@ class PPO(nn.Module):
       with torch.no_grad():
         # act
         obs = torch.from_numpy(obs_cpu).to(self.device)
-        action, logprob, _, value, probs = self.get_action_and_value(
-            obs, legal_actions_mask=legal_actions_mask)
+        action, logprob, _, value, probs = self._act_batch(
+            obs, legal_actions_mask, seats)
 
         # store
         row = self.cur_batch_idx
         self.players[row] = torch.tensor(seats, dtype=torch.long).to(
             self.device)
         self.players_cpu[row] = torch.tensor(seats, dtype=torch.long)
+        self.trainable[row] = torch.tensor(
+            [self._acts_trainable(i, seats[i]) for i in range(self.num_envs)],
+            dtype=torch.bool).to(self.device)
         self.legal_actions_mask[row] = legal_actions_mask
         self.obs[row] = obs
         self.actions[row] = action
@@ -404,6 +535,8 @@ class PPO(nn.Module):
           logprob_np = logprob.detach().cpu().numpy()
           value_np = value.detach().cpu().numpy().ravel()
           for i, s in enumerate(seats):
+            if not self._acts_trainable(i, s):
+              continue
             self._last_decision[i][s] = (
                 obs_cpu[i].copy(), mask_cpu[i].copy(), int(action_np[i]),
                 float(logprob_np[i]), float(value_np[i]))
@@ -456,13 +589,16 @@ class PPO(nn.Module):
       obs = torch.from_numpy(obs_cpu).to(self.device)
       legal_actions_mask = self._build_mask(
           self.num_envs, mask_rows, mask_cols)
-      action, logprob, _, value, probs = self.get_action_and_value(
-          obs, legal_actions_mask=legal_actions_mask)
+      action, logprob, _, value, probs = self._act_batch(
+          obs, legal_actions_mask, seats)
 
       row = self.cur_batch_idx
       self.players[row] = torch.from_numpy(
           seats.astype(np.int64)).to(self.device)
       self.players_cpu[row] = torch.from_numpy(seats.astype(np.int64))
+      self.trainable[row] = torch.tensor(
+          [self._acts_trainable(i, int(s)) for i, s in enumerate(seats)],
+          dtype=torch.bool).to(self.device)
       self.legal_actions_mask[row] = legal_actions_mask
       self.obs[row] = obs
       self.actions[row] = action
@@ -482,6 +618,8 @@ class PPO(nn.Module):
         offsets = np.zeros(self.num_envs, dtype=np.int64)
         np.cumsum(lens[:-1], out=offsets[1:])
         for i, s in enumerate(seats):
+          if not self._acts_trainable(i, int(s)):
+            continue
           n = lens[i]
           mrow = np.zeros(self.num_actions, dtype=bool)
           if n:
@@ -492,6 +630,65 @@ class PPO(nn.Module):
         return np.asarray(action_np, dtype=np.int32)
 
       return action.detach().cpu().numpy().astype(np.int32)
+
+  def _terminal_target(self, per_agent_reward, seat):
+    """Scalar terminal target for `seat` given the per-agent payoff vector."""
+    if self.value_mode == "win":
+      return rank_utility(per_agent_reward, seat)
+    return per_agent_reward[seat]
+
+  def _aux_targets_for(self, per_agent_reward):
+    """Per-seat aux-target matrix (num_players, num_aux), or None.
+
+    Uses ``aux_target_fn`` if supplied, else defaults to the raw per-agent
+    payoff (one-column aux = predict a seat's final payoff).
+    """
+    if not self.num_aux:
+      return None
+    if self.aux_target_fn is None:
+      arr = np.asarray(per_agent_reward, dtype=np.float32)
+      if arr.ndim == 1:
+        arr = arr.reshape(-1, 1)
+    else:
+      arr = np.asarray(self.aux_target_fn(per_agent_reward), dtype=np.float32)
+    try:
+      return arr.reshape(self.num_players, self.num_aux)
+    except ValueError:
+      return None
+
+  def _backfill_aux(self, env_idx, row, per_agent_reward):
+    """Fills aux targets for every stored row (<=row) of each seat in `env_idx`.
+
+    Terminal payoff fixes the final target for all seats of a finished episode,
+    so every row of a seat in this batch (which came from the same episode)
+    inherits that seat's terminal-derived aux target.
+    """
+    if not self.num_aux:
+      return
+    tgt = self._aux_targets_for(per_agent_reward)
+    if tgt is None:
+      return
+    players_col = self.players_cpu[:row + 1, env_idx]
+    for s in range(self.num_players):
+      if not self._acts_trainable(env_idx, s):
+        continue
+      rows_s = np.flatnonzero(players_col == s)
+      if rows_s.size == 0:
+        continue
+      rows_t = torch.from_numpy(rows_s.astype(np.int64)).to(self.device)
+      target_t = torch.from_numpy(tgt[s]).to(self.device)
+      self.aux_targets[rows_t, env_idx, :] = target_t
+      self.aux_mask[rows_t, env_idx, :] = 1.0
+
+  def _extras_aux(self, per_agent_reward, seat):
+    """(aux_target, aux_mask) 1-D tensors for one extra sample's seat."""
+    if not self.num_aux:
+      return None, None
+    tgt = self._aux_targets_for(per_agent_reward)
+    if tgt is None:
+      return None, None
+    return (torch.from_numpy(tgt[seat]).to(self.device),
+            torch.ones((self.num_aux,), dtype=torch.float32).to(self.device))
 
   def post_step(self, reward, done, shaped_reward=None):
     """Stores rewards/dones for the action taken at the current batch step.
@@ -515,20 +712,23 @@ class PPO(nn.Module):
         seat = seats[i]
         is_done = bool(done[i])
         shaped = 0.0 if shaped_reward is None else shaped_reward[i]
-        rew_row[i] = rvec[seat] + (0.0 if is_done else shaped)
+        rew_row[i] = (self._terminal_target(rvec, seat) if is_done else
+                      rvec[seat] + shaped)
         done_row[i] = 1.0 if is_done else 0.0
         if is_done:
+          self._backfill_aux(i, row, rvec)
           for s in range(self.num_players):
             if s == seat:
               continue
-            pair = self._last_decision[i][s]
+            pair = self._last_decision[i].get(s)
             if pair is None:
               continue
             obs_, mask_, action_, logprob_, value_ = pair
             # Independent closed-out sample: target = seat's terminal payoff.
+            ex_aux, ex_aux_mask = self._extras_aux(rvec, s)
             self._extra_samples.append(
                 (i, s, obs_, mask_, int(action_), logprob_, value_,
-                 float(rvec[s])))
+                 self._terminal_target(rvec, s), ex_aux, ex_aux_mask))
           self._last_decision[i].clear()
       self.rewards[row] = torch.from_numpy(rew_row).to(self.device)
       self.dones[row] = torch.from_numpy(done_row).to(self.device)
@@ -560,19 +760,22 @@ class PPO(nn.Module):
         rvec = reward[i]
         seat = seats[i]
         is_done = bool(done[i])
-        rew_row[i] = rvec[seat] + (0.0 if is_done else shaped[i])
+        rew_row[i] = (self._terminal_target(rvec, seat) if is_done else
+                      rvec[seat] + shaped[i])
         done_row[i] = 1.0 if is_done else 0.0
         if is_done:
+          self._backfill_aux(i, row, rvec)
           for s in range(self.num_players):
             if s == seat:
               continue
-            pair = self._last_decision[i][s]
+            pair = self._last_decision[i].get(s)
             if pair is None:
               continue
             obs_, mask_, action_, logprob_, value_ = pair
+            ex_aux, ex_aux_mask = self._extras_aux(rvec, s)
             self._extra_samples.append(
                 (i, s, obs_, mask_, int(action_), logprob_, value_,
-                 float(rvec[s])))
+                 self._terminal_target(rvec, s), ex_aux, ex_aux_mask))
           self._last_decision[i].clear()
       self.rewards[row] = torch.from_numpy(rew_row).to(self.device)
       self.dones[row] = torch.from_numpy(done_row).to(self.device)
@@ -680,15 +883,22 @@ class PPO(nn.Module):
             and isinstance(net.actor[-1], nn.Linear)
             and net.actor[-1].out_features == self.num_actions)
 
-  def _pack_legal_batch(self, n_extra):
+  def _pack_legal_batch(self, n_extra, remap=None, extra_base=None):
     """Builds (rows, cols, counts) over the whole flattened batch.
 
     rows: (M,) int64 global sample index of each legal entry (sample index =
-      step * num_envs + env).
+      step * num_envs + env, or the filtered index when ``remap`` is given).
     cols: (M,) int64 legal action id.
     counts: (B_total,) int64 legal count per sample.
     Extras (terminal closeouts) are appended at the end, their cols derived
     from the stored dense mask.
+
+    Args:
+      remap: optional (steps * num_envs,) int64 array mapping old global
+        sample index to the filtered index, with -1 for dropped (non-trainable
+        league) samples.
+      extra_base: sample index where extras begin (defaults to
+        steps * num_envs; in league w/ remap this is the filtered row count).
     """
     rows_all = []
     cols_all = []
@@ -698,19 +908,31 @@ class PPO(nn.Module):
       cc = self.legal_cols_packed[r]
       if rr is None or cc is None or rr.size == 0:
         continue
-      rows_all.append(r * num_envs + rr)
-      cols_all.append(cc)
+      old = r * num_envs + rr
+      if remap is not None:
+        new = remap[old]
+        keep_idx = new >= 0
+        if not np.any(keep_idx):
+          continue
+        rows_all.append(new[keep_idx])
+        cols_all.append(cc[keep_idx])
+      else:
+        rows_all.append(old)
+        cols_all.append(cc)
+    if extra_base is None:
+      extra_base = self.steps_per_batch * num_envs
     for k, e in enumerate(self._extra_samples):
       cols_all.append(np.nonzero(e[3])[0].astype(np.int64))
-      rows_all.append(np.full(len(cols_all[-1]), self.steps_per_batch *
-                              num_envs + k, dtype=np.int64))
+      rows_all.append(
+          np.full(len(cols_all[-1]), extra_base + k, dtype=np.int64))
     if rows_all:
       rows = np.concatenate(rows_all)
       cols = np.concatenate(cols_all)
     else:
       rows = np.zeros(0, dtype=np.int64)
       cols = np.zeros(0, dtype=np.int64)
-    total = self.steps_per_batch * num_envs + n_extra
+    total = (extra_base if remap is not None else
+             self.steps_per_batch * num_envs) + n_extra
     counts = np.bincount(rows, minlength=total)
     return rows, cols, counts
 
@@ -755,6 +977,18 @@ class PPO(nn.Module):
     logprob = logit_a - lse
     return logprob, entropy
 
+  def _value_from_features(self, features):
+    """Scalar value from shared features (sparse-path value computation).
+
+    Networks may implement ``value_from_features`` (e.g. Eclipse's rank-head
+    win value); otherwise the dense path's critic tail is applied to the
+    features and squeezed to a scalar.
+    """
+    net = self.network
+    if hasattr(net, "value_from_features"):
+      return net.value_from_features(features)
+    return net.critic[-1](features).view(-1)
+
   def _learn_core(self, next_obs):
     # bootstrap value if not done
     with torch.no_grad():
@@ -772,18 +1006,14 @@ class PPO(nn.Module):
     b_returns = returns.reshape(-1)
     b_values = self.values.reshape(-1)
 
-    use_sparse = self._sparse_supported()
+    if self.num_aux:
+      b_aux = self.aux_targets.reshape(-1, self.num_aux)
+      b_aux_mask = self.aux_mask.reshape(-1, self.num_aux)
+    else:
+      b_aux = None
+      b_aux_mask = None
 
-    # Packed legal structures for the sparse learn path (built regardless of
-    # extras; n_extra appended at the end of the batch below).
-    sparse_rows = None
-    if use_sparse:
-      n_extra0 = len(self._extra_samples)
-      sparse_rows, sparse_cols, sparse_counts = self._pack_legal_batch(
-          n_extra0)
-      total_n = self.steps_per_batch * self.num_envs + n_extra0
-      sparse_offsets = np.zeros(total_n + 1, dtype=np.int64)
-      np.cumsum(sparse_counts, out=sparse_offsets[1:])
+    use_sparse = self._sparse_supported()
 
     # Append independent terminal-closeout samples (self-play only). Each is a
     # done transition: returns target is that seat's terminal payoff directly,
@@ -809,15 +1039,54 @@ class PPO(nn.Module):
       b_values = torch.cat([b_values, ex_values])
       b_returns = torch.cat([b_returns, ex_targets])
       b_advantages = torch.cat([b_advantages, ex_targets - ex_values])
+      if self.num_aux:
+        ex_aux = torch.stack([e[8] for e in self._extra_samples])
+        ex_aux_mask = torch.stack([e[9] for e in self._extra_samples])
+        b_aux = torch.cat([b_aux, ex_aux])
+        b_aux_mask = torch.cat([b_aux_mask, ex_aux_mask])
+
+    # League: drop transitions generated by non-trainable (opponent) policies
+    # before any loss math. Only ``train_pid`` rows keep gradients; the packed
+    # legal structures are remapped to the filtered sample indices (extras are
+    # already trainable-only, so they pass through at the tail).
+    remap = None
+    extra_base = self.steps_per_batch * self.num_envs
+    if self.league:
+      keep_train = self.trainable.reshape(-1)
+      keep = torch.cat([
+          keep_train,
+          torch.ones(n_extra, dtype=torch.bool, device=self.device)
+      ])
+      keep_np = keep.cpu().numpy()
+      # Only main-region rows get remapped into the filtered index space; a
+      # non-trainable (opponent) row is dropped (remap -1). Extras are already
+      # trainable-only and are appended after all main rows.
+      nb_main = int(keep_train.cpu().numpy().sum())
+      b_obs = b_obs[keep]
+      b_legal_actions_mask = b_legal_actions_mask[keep]
+      b_actions = b_actions[keep]
+      b_logprobs = b_logprobs[keep]
+      b_values = b_values[keep]
+      b_returns = b_returns[keep]
+      b_advantages = b_advantages[keep]
+      if self.num_aux:
+        b_aux = b_aux[keep]
+        b_aux_mask = b_aux_mask[keep]
       if use_sparse:
-        # Packed (rows, cols, counts) including the extra samples' legal cols.
-        sparse_rows, sparse_cols, sparse_counts = self._pack_legal_batch(
-            n_extra)
-        total_n = self.steps_per_batch * self.num_envs + n_extra
-        # per-sample cumulative offsets into the packed arrays (contiguous
-        # within each sample) for fast per-minibatch slicing.
-        sparse_offsets = np.zeros(total_n + 1, dtype=np.int64)
-        np.cumsum(sparse_counts, out=sparse_offsets[1:])
+        remap = -np.ones(keep_train.shape[0], dtype=np.int64)
+        remap[keep_train.cpu().numpy()] = np.arange(nb_main, dtype=np.int64)
+      extra_base = nb_main
+
+    # Packed legal structures for the sparse learn path (built after the
+    # league filter if active).
+    total_n = extra_base + n_extra
+    sparse_rows = sparse_cols = sparse_counts = None
+    sparse_offsets = None
+    if use_sparse:
+      sparse_rows, sparse_cols, sparse_counts = self._pack_legal_batch(
+          n_extra, remap=remap, extra_base=extra_base)
+      sparse_offsets = np.zeros(total_n + 1, dtype=np.int64)
+      np.cumsum(sparse_counts, out=sparse_offsets[1:])
     self._extra_samples = []
 
     # Keep the batch a whole number of minibatches: with a trailing remainder
@@ -833,6 +1102,9 @@ class PPO(nn.Module):
       b_values = b_values[:batch_size]
       b_returns = b_returns[:batch_size]
       b_advantages = b_advantages[:batch_size]
+      if self.num_aux:
+        b_aux = b_aux[:batch_size]
+        b_aux_mask = b_aux_mask[:batch_size]
     minibatch_size = max(1, batch_size // self.num_minibatches)
 
     # Optimizing the policy and value network
@@ -847,17 +1119,16 @@ class PPO(nn.Module):
         if use_sparse:
           # Slice the packed legal entries for this minibatch (vectorized via
           # the per-sample cumulative offsets).
+          features = self.network.shared(b_obs[mb_inds])
+          newvalue = self._value_from_features(features)
           cnt_mb = sparse_counts[mb_inds].astype(np.int64)
           m_size = int(cnt_mb.sum())
-          newvalue = self.network.critic[-1](
-              self.network.shared(b_obs[mb_inds])).view(-1)
           if m_size > 0:
             starts = sparse_offsets[mb_inds]
             borders = np.concatenate([[0], np.cumsum(cnt_mb)])
             rep = np.repeat(np.arange(len(mb_inds)), cnt_mb)
             within = np.arange(m_size) - borders[rep]
             col_idx = np.repeat(starts, cnt_mb) + within
-            features = self.network.shared(b_obs[mb_inds])
             logprob, entropy = self._sparse_minibatch(
                 features, rep, sparse_cols[col_idx],
                 b_actions.long()[mb_inds], self.network.actor[-1].weight,
@@ -873,6 +1144,7 @@ class PPO(nn.Module):
               legal_actions_mask=b_legal_actions_mask[mb_inds],
               action=b_actions.long()[mb_inds])
           logprob = newlogprob
+          features = None
         logratio = logprob - b_logprobs[mb_inds]
         ratio = logratio.exp()
 
@@ -913,6 +1185,28 @@ class PPO(nn.Module):
         entropy_loss = entropy.mean()
         loss = pg_loss - self.entropy_coef * entropy_loss + v_loss * self.value_coef
 
+        # Auxiliary-head loss: supervise the trunk's auxiliary predictors
+        # (e.g. "final total VP") on the terminal-derived targets back-filled
+        # into this batch. Only rows whose episode closed get a target; others
+        # are masked out, so the loss is over the available fraction.
+        aux_loss = torch.zeros((), device=self.device)
+        aux_hit = 0
+        if self.num_aux and features is not None:
+          pred = self.network.get_aux(features)
+          tgt = b_aux[mb_inds]
+          msk = b_aux_mask[mb_inds]
+          for k, name in enumerate(self.aux_tasks):
+            p = pred[name]
+            if p.dim() > 1 and p.size(1) == 1:
+              p = p.view(-1)
+            m = msk[:, k].float()
+            denom = m.sum()
+            if denom > 0:
+              aux_loss = aux_loss + (((p - tgt[:, k])**2) * m).sum() / denom
+              aux_hit += 1
+          if aux_hit:
+            loss = loss + self.aux_coef * aux_loss
+
         self.optimizer.zero_grad()
         loss.backward()
         nn.utils.clip_grad_norm_(self.parameters(), self.max_grad_norm)
@@ -938,6 +1232,9 @@ class PPO(nn.Module):
                              self.total_steps_done)
       self.writer.add_scalar("losses/entropy", entropy_loss.item(),
                              self.total_steps_done)
+      if self.num_aux and features is not None:
+        self.writer.add_scalar("losses/aux_loss", aux_loss.item(),
+                               self.total_steps_done)
       self.writer.add_scalar("losses/old_approx_kl", old_approx_kl.item(),
                              self.total_steps_done)
       self.writer.add_scalar("losses/approx_kl", approx_kl.item(),

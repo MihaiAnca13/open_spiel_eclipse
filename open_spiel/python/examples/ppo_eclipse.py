@@ -41,6 +41,8 @@ from torch import nn
 
 import pyspiel
 from open_spiel.python import rl_environment
+from open_spiel.python.examples.league import Matchmaker
+from open_spiel.python.examples.league import PolicyRoster
 from open_spiel.python.pytorch.ppo import PPO
 from open_spiel.python.pytorch.ppo import layer_init
 from open_spiel.python.vector_env import SyncVectorEnv
@@ -92,12 +94,14 @@ flags.DEFINE_integer(
 
 flags.DEFINE_bool("shaping", True,
                   "Potential-based shaping from the obs 'score' slot.")
-flags.DEFINE_enum("phi", "soft", ["banked", "soft", "none"],
+flags.DEFINE_enum("phi", "banked", ["banked", "soft", "none", "learned"],
                   "Potential definition. 'banked' = current VP if the game "
                   "ended now. 'soft' = banked plus in-progress presence terms "
                   "(colony ships, disks on sectors, orbitals/monoliths, "
                   "ambassadors) so the shaped reward is non-zero even before "
-                  "any VP is banked. 'none' disables shaping.")
+                  "any VP is banked. 'none' disables shaping. 'learned' = the "
+                  "network's own predicted final VP (win-value based), i.e. a "
+                  "learned potential (requires --value_mode=win).")
 flags.DEFINE_float("phi_w_colony", 0.5,
                    "Soft-Phi weight per colony ship (in VP-equivalent units).")
 flags.DEFINE_float("phi_w_disk", 1.0,
@@ -109,6 +113,13 @@ flags.DEFINE_float("phi_w_ambassador", 1.0,
 flags.DEFINE_float("gamma", 0.99, "Discount factor (used for shaping too).")
 flags.DEFINE_float("gae_lambda", 0.95, "GAE lambda.")
 flags.DEFINE_bool("gae", True, "Use GAE.")
+flags.DEFINE_enum("value_mode", "win", ["win", "vp"],
+                  "Value/return objective. 'win' = terminal targets are "
+                  "per-seat rank utilities (1st/2nd/3rd/4th), so the agent "
+                  "optimizes 'finish first'. 'vp' = raw final VP (the original "
+                  "behaviour).")
+flags.DEFINE_float("aux_coef", 0.1,
+                   "Weight of auxiliary-head losses (e.g. final-VP regression).")
 flags.DEFINE_float("learning_rate", 2.5e-4, "Learning rate.")
 flags.DEFINE_integer("num_minibatches", 4, "Number of minibatches.")
 flags.DEFINE_integer("update_epochs", 4, "Number of updates epochs.")
@@ -123,9 +134,47 @@ flags.DEFINE_float("target_kl", None, "Target KL divergence threshold.")
 flags.DEFINE_integer("nn_width", 64, "Hidden width of actor/critic MLPs.")
 flags.DEFINE_integer("nn_depth", 2, "Number of hidden layers in each MLP.")
 
+flags.DEFINE_bool(
+    "league", False,
+    "Population self-play: train main against a roster of snapshots/"
+    "exploiters sampled into mixed lineups (requires --roster_dir).")
+flags.DEFINE_string("roster_dir", "runs/roster",
+                    "Directory backing the policy roster (checkpoints + JSON).")
+flags.DEFINE_integer("snapshot_every", 25,
+                     "Snapshot the main policy into the roster every N updates.")
+flags.DEFINE_float("selfplay_fraction", 0.5,
+                   "Fraction of (re)spawned lineups that are pure self-play.")
+flags.DEFINE_float("old_fraction", 0.125,
+                   "Within mixed lineups, chance a seat is a weak/old policy.")
+flags.DEFINE_bool(
+    "eval_squad", False,
+    "At the eval cadence, pit main against a snapshots-only eval squad and "
+    "report win rate / avg rank (no heuristics in v1).")
+flags.DEFINE_string(
+    "exploit_victim", None,
+    "Sequential-exploiter mode: train this run's policy ONLY against the "
+    "frozen roster policy id given here (e.g. a snapshot), starting from the "
+    "current main weights (or the victim's if none), then report the win-rate "
+    "vs the victim.")
+flags.DEFINE_bool("exploit_promote", False,
+                  "In exploiter mode, fold the trained policy into the roster "
+                  "as an exploiter entry when it beats the victim.")
+flags.DEFINE_float("exploit_lr", 1e-3,
+                   "Learning rate used in exploiter mode (higher than main).")
+
 
 class EclipsePPOAgent(nn.Module):
-  """MLP actor-critic for Eclipse's flat observation vector."""
+  """MLP actor-critic for Eclipse's flat observation vector.
+
+  The critic is a win/rank value head: it outputs 4 logits (P(rank 1..4)) and
+  ``get_value`` returns the expected rank-utility (1st=1.0, 2nd=0.5, 3rd=0.0,
+  4th=-0.5). Auxiliary heads (``final_vp``) regress terminal quantities from
+  the shared trunk, giving the network a dense, learned signal about what leads
+  to VP without hand-tuned shaping weights.
+  """
+
+  # Rank-utility table (1st..4th), matching ppo.rank_utility's default.
+  RANK_UTILITY = (1.0, 0.5, 0.0, -0.5)
 
   def __init__(self, num_actions, observation_shape, device, width=64,
                depth=2):
@@ -140,18 +189,37 @@ class EclipsePPOAgent(nn.Module):
 
     self.critic = nn.Sequential(
         self.shared,
-        layer_init(nn.Linear(width, 1), std=1.0),
+        layer_init(nn.Linear(width, 4), std=1.0),
     )
     self.actor = nn.Sequential(
         self.shared,
         layer_init(nn.Linear(width, num_actions), std=0.01),
     )
+    # Auxiliary heads: predict terminal quantities from the shared trunk.
+    self.aux_heads = nn.ModuleDict({
+        "final_vp": layer_init(nn.Linear(width, 1), std=1.0),
+    })
     self.num_actions = num_actions
     self.device = device
     self.register_buffer("mask_value", torch.tensor(-1e6))
 
   def get_value(self, x):
-    return self.critic(x)
+    return self.rank_value(self.critic(x))
+
+  def rank_value(self, rank_logits):
+    """Expected rank-utility from (..., 4) rank logits."""
+    probs = rank_logits.softmax(dim=-1)
+    utility = torch.tensor(self.RANK_UTILITY, dtype=rank_logits.dtype,
+                           device=rank_logits.device)
+    return (probs * utility).sum(dim=-1)
+
+  def value_from_features(self, features):
+    """Scalar win value from shared features (sparse learn path)."""
+    return self.rank_value(self.critic[-1](features))
+
+  def get_aux(self, features):
+    """Auxiliary-head raw outputs keyed by task name."""
+    return {name: head(features) for name, head in self.aux_heads.items()}
 
   def get_action_and_value(self, x, legal_actions_mask=None, action=None):
     if legal_actions_mask is None:
@@ -162,7 +230,7 @@ class EclipsePPOAgent(nn.Module):
                               mask_value=self.mask_value)
     if action is None:
       action = probs.sample()
-    return action, probs.log_prob(action), probs.entropy(), self.critic(
+    return action, probs.log_prob(action), probs.entropy(), self.get_value(
         x), probs.probs
 
 
@@ -172,6 +240,14 @@ def make_agent_fn(width, depth):
                            width=width, depth=depth)
 
   return agent_fn
+
+
+# Win-mode potential squash: raw VP-unit potentials are mapped onto the
+# rank-utility scale ([1..4] -> ~[-0.5, 1]) so shaped rewards and terminal
+# rank-utility targets stay comparable. The tensor already normalizes VP by
+# /200, so u(vp) = clip(vp/200, -0.5, 1).
+def _squash_win(vp):
+  return float(np.clip(np.array(vp) / 200.0, -0.5, 1.0))
 
 
 # Observation tensor score slots written by the C++ game (see eclipse.cc):
@@ -239,24 +315,186 @@ def phi_soft_opponent(obs_viewer, block):
                  w_amb * amb)
 
 
-def potential_self(obs):
-  """Potential of the acting seat from its own observation."""
+def potential_self(obs, win_squash=False):
+  """Potential of the acting seat from its own observation.
+
+  Returns VP units for banked/soft; with ``win_squash`` those are mapped onto
+  the rank-utility scale (so shaped rewards stay comparable to terminal
+  rank-utility targets). 'learned' is handled separately by the caller (it
+  needs the network).
+  """
   mode, _, _ = _phi_cached()
   if mode == "banked":
-    return phi_from_obs_slot(obs, SCORE_SELF_SLOT)
-  if mode == "soft":
-    return phi_soft_self(obs)
-  return 0.0
+    v = phi_from_obs_slot(obs, SCORE_SELF_SLOT)
+  elif mode == "soft":
+    v = phi_soft_self(obs)
+  else:
+    v = 0.0
+  return _squash_win(v) if (win_squash and mode in ("banked", "soft")) else v
 
 
-def potential_opponent(obs_viewer, block):
-  """Potential of a non-acting seat read from the viewer's observation."""
+def potential_opponent(obs_viewer, block, win_squash=False):
+  """Potential of a non-acting seat read from the viewer's observation.
+
+  VP units for banked/soft; ``win_squash`` maps onto the rank-utility scale.
+  """
   mode, _, _ = _phi_cached()
   if mode == "banked":
-    return phi_from_obs_slot(obs_viewer, block)
-  if mode == "soft":
-    return phi_soft_opponent(obs_viewer, block)
-  return 0.0
+    v = phi_from_obs_slot(obs_viewer, block)
+  elif mode == "soft":
+    v = phi_soft_opponent(obs_viewer, block)
+  else:
+    v = 0.0
+  return _squash_win(v) if (win_squash and mode in ("banked", "soft")) else v
+
+
+def _phi_wins(agent, obs_np, device):
+  """Win-value (expected rank-utility) of the mover for each row's own obs."""
+  with torch.no_grad():
+    x = torch.from_numpy(np.asarray(obs_np, dtype=np.float32)).to(device)
+    return agent.get_value(x).cpu().numpy()
+
+
+# ── League (population self-play) helpers ───────────────────────────────────
+
+def _league_setup(agent, roster, matchmaker, agent_fn, num_actions,
+                  input_shape, device):
+  """Initializes league mode: networks + lineups for all envs."""
+  lineup = matchmaker.lineups()
+  need = set(lineup.reshape(-1).tolist())
+  networks = {"main": agent.network}
+  for pid in need - {"main"}:
+    networks[pid] = roster.load_net(pid, agent_fn, num_actions, input_shape,
+                                    device)
+    if networks[pid] is None:
+      raise ValueError(f"roster has no weights for opponent {pid}")
+  agent.setup_league(networks, lineup, "main")
+  return lineup
+
+
+def _refresh_lineups(agent, matchmaker, roster, agent_fn, num_actions,
+                     input_shape, device, done_flags):
+  """Re-samples lineups for (re)spawned envs and loads any new policies.
+
+  Lineups are fixed per env until that env's episode ends; on reset we give it
+  a fresh lineup so newly added snapshots/exploiters enter play.
+  """
+  for i, done in enumerate(done_flags):
+    if not done:
+      continue
+    agent.lineup[i, :] = np.asarray(matchmaker.sample_lineup(), dtype=object)
+  need = set(agent.lineup.reshape(-1).tolist())
+  for pid in need:
+    if pid in agent.networks:
+      continue
+    networks = roster.load_net(pid, agent_fn, num_actions, input_shape,
+                               device)
+    if networks is None:
+      raise ValueError(f"roster has no weights for opponent {pid}")
+    agent.networks[pid] = networks
+
+
+def _maybe_snapshot(agent, roster, update):
+  """Captures the main policy into the roster on the snapshot cadence."""
+  if update > 0 and update % FLAGS.snapshot_every == 0:
+    roster.record_main(agent.network, update)
+    roster.add_snapshot(agent.network, update)
+    roster.prune(keep_recent=4, keep_spaced=4)
+
+
+def _eval_squad(agent, roster, agent_fn, num_actions, input_shape, device,
+                game_str, num_players, num_games, rng_seed, main_seats=(0, 1)):
+  """Plays main (argmax) against a snapshots-only squad.
+
+  ``main_seats`` are driven by the main policy; the remaining seats each draw a
+  snapshot from the roster. Returns (main_wins, games, main_ranks) where main
+  rank is 1..4 placement, or None if the roster has no opponents. Runs on the
+  network's raw policy (argmax over legal actions) so no PPO buffers are
+  touched.
+  """
+  opponents = roster.opponent_ids(exclude_main=True)
+  if not opponents:
+    return None
+  rng = np.random.RandomState(rng_seed)
+  nets = {"main": agent.network}
+  pool = sorted(opponents[:3])
+  for pid in pool:
+    nets[pid] = roster.load_net(pid, agent_fn, num_actions, input_shape,
+                                device)
+  other_seats = [s for s in range(num_players) if s not in main_seats]
+  main_wins = 0
+  ranks = []
+  for g in range(num_games):
+    env = rl_environment.Environment(
+        game=pyspiel.load_game(game_str),
+        chance_event_sampler=rl_environment.ChanceEventSampler(
+            seed=rng_seed + g),
+        observation_type=rl_environment.ObservationType.OBSERVATION,
+        observations_as_numpy=True)
+    policy_for = {s: str(rng.choice(pool)) for s in other_seats}
+    time_step = env.reset(players="current")
+    while not time_step.last():
+      seat = int(time_step.observations["current_player"])
+      pid = "main" if seat in main_seats else policy_for[seat]
+      net = nets[pid]
+      obs = time_step.observations["info_state"][seat]
+      legal = time_step.observations["legal_actions"][seat]
+      with torch.no_grad():
+        x = torch.from_numpy(np.asarray(obs, dtype=np.float32))[None].to(
+            device)
+        logits = net.actor(x)
+        mask = torch.full((1, logits.size(1)), -1e6).to(device)
+        mask[0, np.asarray(legal, dtype=np.int64)] = logits[
+            0, np.asarray(legal, dtype=np.int64)]
+        action = int(mask.argmax().item())
+      time_step = env.step([action])
+    rewards = np.asarray(time_step.rewards, dtype=np.float32)
+    main_best = max(rewards[s] for s in main_seats)
+    rank = 1 + int(np.sum(rewards > main_best))
+    main_wins += int(rank == 1)
+    ranks.append(rank)
+  return main_wins, num_games, ranks
+
+
+def _eval_head2head(agent, opponent_net, agent_fn, num_actions, input_shape,
+                    device, game_str, num_players, num_games, rng_seed):
+  """Win-rate of the main policy (argmax) against a single opponent net.
+
+  Main drives seat 0; the opponent drives every other seat. Returns
+  (main_wins, num_games, main_ranks).
+  """
+  nets = {"main": agent.network, "opp": opponent_net}
+  other_seats = list(range(1, num_players))
+  main_wins = 0
+  ranks = []
+  for g in range(num_games):
+    env = rl_environment.Environment(
+        game=pyspiel.load_game(game_str),
+        chance_event_sampler=rl_environment.ChanceEventSampler(
+            seed=rng_seed + g),
+        observation_type=rl_environment.ObservationType.OBSERVATION,
+        observations_as_numpy=True)
+    time_step = env.reset(players="current")
+    while not time_step.last():
+      seat = int(time_step.observations["current_player"])
+      pid = "main" if seat == 0 else "opp"
+      net = nets[pid]
+      obs = time_step.observations["info_state"][seat]
+      legal = time_step.observations["legal_actions"][seat]
+      with torch.no_grad():
+        x = torch.from_numpy(np.asarray(obs, dtype=np.float32))[None].to(
+            device)
+        logits = net.actor(x)
+        mask = torch.full((1, logits.size(1)), -1e6).to(device)
+        mask[0, np.asarray(legal, dtype=np.int64)] = logits[
+            0, np.asarray(legal, dtype=np.int64)]
+        action = int(mask.argmax().item())
+      time_step = env.step([action])
+    rewards = np.asarray(time_step.rewards, dtype=np.float32)
+    rank = 1 + int(np.sum(rewards > rewards[0]))
+    main_wins += int(rank == 1)
+    ranks.append(rank)
+  return main_wins, num_games, ranks
 
 
 def _log_update(agent, episode_returns, recent_returns, writer, update, eval_every=None):
@@ -350,10 +588,60 @@ def main(_):
       device=device,
       writer=writer,
       agent_fn=make_agent_fn(FLAGS.nn_width, FLAGS.nn_depth),
+      value_mode=FLAGS.value_mode,
+      aux_tasks=["final_vp"] if FLAGS.aux_coef > 0 else None,
+      aux_target_fn=(lambda rvec: np.asarray(rvec, dtype=np.float32).reshape(
+          -1, 1) / 200.0),
+      aux_coef=FLAGS.aux_coef,
   )
 
   batch_size = FLAGS.num_envs * FLAGS.num_steps
   num_updates = FLAGS.total_timesteps // batch_size
+
+  # League (population self-play) setup: roster + matchmaker + lineups.
+  agent_fn = make_agent_fn(FLAGS.nn_width, FLAGS.nn_depth)
+  num_actions = game.num_distinct_actions()
+  roster = None
+  matchmaker = None
+  exploit_victim_net = None
+  if FLAGS.league or FLAGS.exploit_victim:
+    roster = PolicyRoster(FLAGS.roster_dir)
+  if FLAGS.league:
+    matchmaker = Matchmaker(
+        roster, FLAGS.num_envs, num_players,
+        selfplay_fraction=FLAGS.selfplay_fraction,
+        old_fraction=FLAGS.old_fraction, seed=FLAGS.seed + 12345)
+    _league_setup(agent, roster, matchmaker, agent_fn, num_actions,
+                  input_shape, device)
+  elif FLAGS.exploit_victim:
+    # Sequential-exploiter mode: one trainable policy (this run) vs a frozen
+    # victim filling every other seat. Fixed lineup, no matchmaking/refresh.
+    victim_id = FLAGS.exploit_victim
+    exploit_victim_net = roster.load_net(victim_id, agent_fn, num_actions,
+                                         input_shape, device)
+    if exploit_victim_net is None:
+      raise ValueError(f"exploit victim {victim_id} not in roster {FLAGS.roster_dir}")
+    starter = roster.load_net("main", agent_fn, num_actions, input_shape,
+                              device)
+    if starter is None:
+      starter = exploit_victim_net
+    agent.network.load_state_dict(starter.state_dict())
+    if FLAGS.exploit_lr > 0:
+      for group in agent.optimizer.param_groups:
+        group["lr"] = FLAGS.exploit_lr
+    lineup = np.tile(
+        np.asarray(["main"] + [victim_id] * (num_players - 1), dtype=object),
+        (FLAGS.num_envs, 1))
+    agent.setup_league({"main": agent.network, victim_id:
+                        exploit_victim_net}, lineup, "main")
+
+  # Shaping configuration resolved once per run.
+  win_squash = FLAGS.value_mode == "win"
+  phi_learned = FLAGS.phi == "learned"
+  if phi_learned and not win_squash:
+    raise ValueError("--phi=learned requires --value_mode=win (the learned "
+                     "potential is the network's win value).")
+  phi_mode = FLAGS.phi
 
   # Per-player episode return logging.
   episode_returns = {i: [] for i in range(FLAGS.num_envs)}
@@ -366,22 +654,40 @@ def main(_):
       for step in range(FLAGS.num_steps):
         acts = agent.step_np(step_arrays)
         obs_batch = agent.last_obs_batch
-        phi_prev = np.fromiter(
-            (potential_self(obs_batch[i]) for i in range(FLAGS.num_envs)),
-            dtype=np.float64, count=FLAGS.num_envs)
+        if FLAGS.shaping and phi_learned:
+          phi_prev = _phi_wins(agent, obs_batch, device)
+        else:
+          phi_prev = np.fromiter(
+              (potential_self(obs_batch[i], win_squash)
+               for i in range(FLAGS.num_envs)),
+              dtype=np.float32, count=FLAGS.num_envs)
         step_arrays = envs.step_np(acts, reset_if_done=True)
-        shaped = np.zeros(FLAGS.num_envs)
-        if FLAGS.shaping:
+        if FLAGS.league:
+          _refresh_lineups(agent, matchmaker, roster, agent_fn, num_actions,
+                           input_shape, device, step_arrays.dones)
+        shaped = np.zeros(FLAGS.num_envs, dtype=np.float32)
+        if FLAGS.shaping and phi_mode != "none":
           seats = agent.last_seats
           new_seats = step_arrays.seats
-          for i in range(FLAGS.num_envs):
-            if step_arrays.dones[i]:
-              continue
-            viewer = int(new_seats[i])
-            seat = seats[i]
-            k = opponent_block_index(seat, viewer)
-            phi_next = potential_opponent(step_arrays.obs[i], OPP_BASE + k * 25)
-            shaped[i] = FLAGS.gamma * phi_next - phi_prev[i]
+          if phi_learned:
+            # Learned potential: win-value of whoever is to act next. Computed
+            # from each row's own observation at s' (same-scale as the mover's
+            # own obs at s), so the telescope is an approximation.
+            phi_next = _phi_wins(agent, step_arrays.obs, device)
+            for i in range(FLAGS.num_envs):
+              if step_arrays.dones[i]:
+                continue
+              shaped[i] = FLAGS.gamma * phi_next[i] - phi_prev[i]
+          else:
+            for i in range(FLAGS.num_envs):
+              if step_arrays.dones[i]:
+                continue
+              viewer = int(new_seats[i])
+              seat = seats[i]
+              k = opponent_block_index(seat, viewer)
+              phi_next = potential_opponent(step_arrays.obs[i],
+                                            OPP_BASE + k * 25, win_squash)
+              shaped[i] = FLAGS.gamma * phi_next - phi_prev[i]
         agent.post_step_np(step_arrays.rewards, step_arrays.dones,
                            shaped_reward=shaped)
         for i in range(FLAGS.num_envs):
@@ -390,8 +696,21 @@ def main(_):
             episode_returns[i].append(ret)
             recent_returns.append(ret)
       agent.learn_np(step_arrays.obs, step_arrays.seats)
+      if FLAGS.league:
+        _maybe_snapshot(agent, roster, update)
       if update % FLAGS.eval_every == 0:
         _log_update(agent, episode_returns, recent_returns, writer, update)
+        if FLAGS.eval_squad and roster is not None:
+          res = _eval_squad(agent, roster, agent_fn, num_actions, input_shape,
+                            device, FLAGS.game, num_players,
+                            num_games=8, rng_seed=FLAGS.seed + update * 7)
+          if res is not None:
+            wins, games, ranks = res
+            avg = float(np.mean(ranks))
+            print(f"  [squad] main win-rate {wins}/{games}  avg_rank={avg:.2f}")
+            writer.add_scalar("squad/main_win_rate", wins / games,
+                              agent.total_steps_done)
+            writer.add_scalar("squad/avg_rank", avg, agent.total_steps_done)
     envs.close()
   else:
     time_step = envs.reset(players="current")
@@ -402,25 +721,44 @@ def main(_):
         # Uses the CPU numpy obs batch already gathered by agent.step (no
         # second GPU->CPU round trip).
         obs_batch = agent.last_obs_batch
-        phi_prev = np.fromiter(
-            (potential_self(obs_batch[i]) for i in range(FLAGS.num_envs)),
-            dtype=np.float64, count=FLAGS.num_envs)
+        if FLAGS.shaping and phi_learned:
+          phi_prev = _phi_wins(agent, obs_batch, device)
+        else:
+          phi_prev = np.fromiter(
+              (potential_self(obs_batch[i], win_squash)
+               for i in range(FLAGS.num_envs)),
+              dtype=np.float32, count=FLAGS.num_envs)
 
         time_step, reward, done, unreset = envs.step(
             agent_output, reset_if_done=True, players="current")
+        if FLAGS.league:
+          _refresh_lineups(agent, matchmaker, roster, agent_fn, num_actions,
+                           input_shape, device, done)
 
-        shaped = np.zeros(FLAGS.num_envs)
-        if FLAGS.shaping:
+        shaped = np.zeros(FLAGS.num_envs, dtype=np.float32)
+        if FLAGS.shaping and phi_mode != "none":
           seats = agent.last_seats
-          for i, ts in enumerate(time_step):
-            if done[i]:
-              continue
-            viewer = ts.observations["current_player"]
-            seat = seats[i]
-            k = opponent_block_index(seat, viewer)
-            phi_next = potential_opponent(
-                ts.observations["info_state"][viewer], OPP_BASE + k * 25)
-            shaped[i] = FLAGS.gamma * phi_next - phi_prev[i]
+          if phi_learned:
+            new_obs = np.stack([
+                ts.observations["info_state"][ts.observations["current_player"]]
+                for ts in time_step
+            ], axis=0)
+            phi_next = _phi_wins(agent, new_obs, device)
+            for i in range(FLAGS.num_envs):
+              if done[i]:
+                continue
+              shaped[i] = FLAGS.gamma * phi_next[i] - phi_prev[i]
+          else:
+            for i, ts in enumerate(time_step):
+              if done[i]:
+                continue
+              viewer = ts.observations["current_player"]
+              seat = seats[i]
+              k = opponent_block_index(seat, viewer)
+              phi_next = potential_opponent(
+                  ts.observations["info_state"][viewer], OPP_BASE + k * 25,
+                  win_squash)
+              shaped[i] = FLAGS.gamma * phi_next - phi_prev[i]
 
         agent.post_step(reward, done, shaped_reward=shaped.tolist())
 
@@ -433,8 +771,38 @@ def main(_):
 
       agent.learn(time_step)
 
+      if FLAGS.league:
+        _maybe_snapshot(agent, roster, update)
+
       if update % FLAGS.eval_every == 0:
         _log_update(agent, episode_returns, recent_returns, writer, update)
+        if FLAGS.eval_squad and roster is not None:
+          res = _eval_squad(agent, roster, agent_fn, num_actions, input_shape,
+                            device, FLAGS.game, num_players,
+                            num_games=8, rng_seed=FLAGS.seed + update * 7)
+          if res is not None:
+            wins, games, ranks = res
+            avg = float(np.mean(ranks))
+            print(f"  [squad] main win-rate {wins}/{games}  avg_rank={avg:.2f}")
+            writer.add_scalar("squad/main_win_rate", wins / games,
+                              agent.total_steps_done)
+            writer.add_scalar("squad/avg_rank", avg, agent.total_steps_done)
+
+  # Sequential-exploiter closeout: report the win-rate vs the frozen victim and
+  # optionally fold the trained policy into the roster.
+  if FLAGS.exploit_victim and exploit_victim_net is not None:
+    wins, games, _ = _eval_head2head(
+        agent, exploit_victim_net, agent_fn, num_actions, input_shape, device,
+        FLAGS.game, num_players, num_games=16,
+        rng_seed=FLAGS.seed + 777)
+    print(f"[exploiter] vs victim {FLAGS.exploit_victim}: "
+          f"win-rate {wins}/{games}")
+    writer.add_scalar("exploiter/victim_win_rate", wins / games,
+                      agent.total_steps_done)
+    if FLAGS.exploit_promote and wins / games >= 0.5 and roster is not None:
+      roster.add_exploiter(agent.network, agent.updates_done,
+                           FLAGS.exploit_victim, win_rate=wins / games)
+      print(f"[exploiter] promoted to roster")
 
   writer.close()
   print("pilot done")

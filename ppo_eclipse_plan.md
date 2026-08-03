@@ -81,6 +81,32 @@ The original Stage 1 checklist, all done:
 
 Same philosophy as before: short pilot runs judged against logged diagnostics (episode return per player, entropy, KL/clip-fraction — standard PPO diagnostics, extended with per-player return tracking for the general-sum multiplayer case) before committing to long runs. Revisit throughput/timing estimates once Stage 0 and Stage 3 give real numbers, rather than guessing now.
 
+## Phase: Win-utility value head + learned auxiliary heads (done)
+
+Moves the value target off raw VP (which rewards "cashing out a big score", not "finishing first") onto **rank-utility**, and replaces the hand-tuned soft-Φ shaping weights with supervised auxiliary heads.
+
+- `open_spiel/python/pytorch/ppo.py`: `rank_utility()`/`rank_of()` map a per-seat payoff vector to a scalar target via the rank distribution `(1.0, 0.5, 0.0, -0.5)`; new `value_mode="win"` vs legacy `"vp"`; terminal targets (both sparse+batch paths) become rank-utility for win mode; `post_step`/`post_step_np` close out every seat's last decision with that seat's rank-utility target; `aux_targets`/`aux_mask` buffers back-fill terminal-derived aux targets onto every stored row of a seat when its episode closes; aux loss (masked MSE, `aux_coef`) added in `_learn_core`.
+- `open_spiel/python/examples/ppo_eclipse.py`: `EclipsePPOAgent` now has a **4-output rank critic** (softmax → expected rank-utility, `rank_value`), an `aux_heads.final_vp` head (predicts terminal VP/200), and `value_from_features` for the sparse learn path; `--phi` gained `learned` (potential = the network's own win value, `_phi_wins`); `--value_mode` default `win`.
+- Decision trail: the 4-output rank critic is the value head *and* the learned potential — B/A-style shaping replaces the hand-rolled soft-Φ weights for the **default post-A1 runs**, with `--phi=banked` choosing banked-VP potential (conservative: the shaped signal stays policy-invariant) and `--phi=soft|none` still available.
+- Tests: `open_spiel/python/pytorch/ppo_win_test.py` (6 tests incl. rank-utility ties `[40,20,40,30]`→seat3 rank 3), plus regressions (`ppo_selfplay_pytorch_test.py`, `ppo_pytorch_test.py`).
+- Pilot A (`clever-badger-3100`): `--value_mode=win --phi=banked`, 128 envs / 524k steps → nonzero-VP episodes 0→35/200 and mean terminal return 0.0→0.40, validating win+aux mechanics end-to-end.
+
+## Phase: League / population self-play with exploiters (done)
+
+- `open_spiel/python/pytorch/ppo.py`: `setup_league(networks, lineup, train_pid)`; `_act_batch` routes each (env, seat) row through its lineup policy's network; `step`/`step_np` mark `trainable` rows = train_pid seats and skip non-trainable seats in `_last_decision`/aux backfill and extra-sample closeout (`.get()` guard); `_learn_core` **drops non-trainable rows** before any loss math (advantages/returns/obs/aux all filtered; packed-legal sparse structures remapped to the filtered index space with extras appended after main rows — bug fixed: `keep` must include the appended extras and `extra_base` must be main-only row count, else zero-legal-count rows → NaN entropy).
+- New `open_spiel/python/examples/league.py`: `PolicyRoster` (JSON index + per-net `.pt`, `record_main`, `add_snapshot` (`snap_u<update>`), `add_exploiter`, `prune`, `load_net` [now `.to(device)`-safe], `opponent_ids`) and `Matchmaker` (`sample_lineup` keeps `train_pid` on seat 0, draws opponents/selfplay by fraction, `lineups`).
+- `open_spiel/python/examples/ppo_eclipse.py`: `--league` (matchmaking + snapshots + optional `--eval_squad` ladder argmax vs snapshots), and sequential-exploiter mode `--exploit_victim=<id>` (one trainable policy vs a frozen victim, head-to-head argmax eval at closeout, `--exploit_promote` folds it into the roster when win-rate ≥ 0.5; `--exploit_lr` boosts LR).
+- Decision trail: exploiters are **sequential** (one at a time), not concurrent — single 12GB GPU; heuristics (rule-based dev/bot opponents) are **excluded from the league in v1**, deferred to v2; FCM is out of scope (no engine exists); league mode is optional — default single-network self-play is unchanged (`value_mode="vp"` stays raw-VP compatible).
+- Tests: `open_spiel/python/examples/league_test.py` (roster roundtrip, missing net → None, prune bounds, matchmaker lineup shapes/mixed) and `open_spiel/python/pytorch/ppo_league_test.py` (multi-network colored_trails: main-only gradients — frozen snap unchanged after `learn`, no extras close out non-trainable seats, trainable flags per seat).
+- Smoke (Eclipse): league mode with `--snapshot_every=1` produces `main.pt` + `snap_u1.pt` + `roster.json`; exploiter mode trained vs frozen `snap_u1`, head-to-head 16/16 win-rate, promoted → `expl_u1_vsnap_u1.pt` (role=exploiter, win_rate=1.0).
+
+## Stage 3.5 — Staged roll-out of the league (pending)
+
+Short staged runs before long production runs, judged on the same diagnostics + league-specific signals:
+1. `--league` only (main vs frozen snapshots, matchmaker lineups, `--eval_squad`) — verify main learns to beat increasingly-old snapshots.
+2. `--exploit_victim=<snapshot>` exploiters run sequentially, promoted on win — watch for policy-collapse/repeated-exploit patterns and use `prune` to keep the roster small.
+3. Long run: league + exploiters together with heuristics excluded (v2 adds them).
+
 ## Stage 4 (optional, future, out of scope for now)
 
 If pure-PPO play quality falls short after real tuning, consider wrapping the trained policy with a light MCTS at **play time only** (not training time) for a strength boost — no training-time batching infrastructure required for that, since it's just inference-time search on top of an already-good learned policy/value function.
@@ -91,12 +117,15 @@ If pure-PPO play quality falls short after real tuning, consider wrapping the tr
 - **Stage 0.5**: **done** — chosen Φ(s) documented above with code justification and the pilot verdict (banked-only: not learnable; soft/none: learnable; recorded in the Stage 0.5 notes).
 - **Stage 1**: **done** — attribution unit test + colored_trails smoke test added and green; single-agent regression green.
 - **Stage 2**: **done (smoke)** — ppo_eclipse.py runs end-to-end on GPU; shapes/masking correct over the full ~11K actions; used for the Stage 0.5 pilots.
-- **Stage 3**: pilot-run diagnostics compared across hyperparameter sweeps — underway (banked/soft/none A/B above is a first pass).
+- **Stage 3**: pilot-run diagnostics compared across hyperparameter sweeps — underway (banked/soft/none A/B above is a first pass; win-utility + aux-heads Pilot A and league/exploiter smokes landed).
+- **Win/rank + aux heads**: **done** — `ppo_win_test.py` 6/6, regressions green.
+- **League self-play + exploiters**: **done** — `league_test.py` 5/5, `ppo_league_test.py` 2/2, Eclipse league + exploiter smokes green.
+- **Stage 3.5**: staged roll-out of the league on Eclipse — pending.
 
 ### Critical files
-- Modified: `open_spiel/python/pytorch/ppo.py` (N-player self-play generalization, per-seat GAE + terminal closeout + shaped reward hook), `open_spiel/games/eclipse/eclipse.cc` (write live per-seat `total_vp` into the observation score slots).
+- Modified: `open_spiel/python/pytorch/ppo.py` (N-player self-play generalization, per-seat GAE + terminal closeout + shaped reward hook; win/rank value + aux heads; league/multi-policy support), `open_spiel/games/eclipse/eclipse.cc` (write live per-seat `total_vp` into the observation score slots), `open_spiel/python/examples/ppo_eclipse.py` (Eclipse agent rank critic + aux heads + `--phi=learned`, `--league`/exploiter/eval-squad wiring).
 - Reference only, no modification expected: `open_spiel/python/rl_environment.py`, `open_spiel/python/vector_env.py` (both already correctly handle chance nodes, per-player observations, and per-player rewards), `open_spiel/python/examples/independent_tabular_qlearning.py` and `dqn_breakthrough_pytorch.py` (turn-dispatch idiom precedent), `open_spiel/python/algorithms/alpha_zero/alpha_zero.py` (one-shared-model-dispatched-by-seat precedent).
-- New: `open_spiel/python/examples/ppo_eclipse.py`, `open_spiel/python/pytorch/ppo_selfplay_pytorch_test.py`.
+- New: `open_spiel/python/examples/ppo_eclipse.py`, `open_spiel/python/pytorch/ppo_selfplay_pytorch_test.py`, `open_spiel/python/pytorch/ppo_win_test.py`, `open_spiel/python/pytorch/ppo_league_test.py`, `open_spiel/python/examples/league.py`, `open_spiel/python/examples/league_test.py`.
 
 Stages 2-4 should be refined once Stage 0/1 are actually built and measured — this is a living plan, not a locked spec.
 
