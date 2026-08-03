@@ -59,6 +59,48 @@ SetupConfig NormalizeSetupConfig(SetupConfig config) {
     return config;
 }
 
+namespace {
+
+// The 6 non-Terran species used for the unique-alien draft (each at most once).
+constexpr std::array<Species, 6> kAlienSpecies = {
+    Species::ERIDANI_EMPIRE, Species::HYDRAN_PROGRESS, Species::PLANTA,
+    Species::DESCENDANTS_OF_DRACO, Species::MECHANEMA, Species::ORION_HEGEMONY};
+
+}  // namespace
+
+void RandomizeSetupForEpisode(std::mt19937_64& rng, SetupConfig& config,
+                              double alien_prob, bool randomize_difficulty,
+                              bool randomize_warped, double warped_prob) {
+    config = NormalizeSetupConfig(config);
+
+    // Race assignment: unique alien draft with Terran as filler. Each alien
+    // species is used at most once; Terran may appear any number of times.
+    std::array<Species, 6> aliens = kAlienSpecies;
+    std::shuffle(aliens.begin(), aliens.end(), rng);
+    std::bernoulli_distribution alien_pick(alien_prob);
+    size_t alien_idx = 0;
+    for (uint8_t i = 0; i < config.players; ++i) {
+        Species picked = Species::TERRAN_FACTIONS;
+        if (alien_idx < aliens.size() && alien_pick(rng)) {
+            picked = aliens[alien_idx++];
+        }
+        config.staged_players[i].species = picked;
+    }
+
+    if (randomize_difficulty) {
+        static constexpr NPCDifficulty kBots[3] = {NPCDifficulty::EASY,
+                                                   NPCDifficulty::MEDIUM,
+                                                   NPCDifficulty::HARD};
+        std::uniform_int_distribution<int> diff(0, 2);
+        config.npc_difficulty = kBots[diff(rng)];
+    }
+
+    if (randomize_warped) {
+        std::bernoulli_distribution warp_pick(warped_prob);
+        config.warped_universe = warp_pick(rng);
+    }
+}
+
 
 State InitializeDeterministicSetupState(const SetupConfig& raw_config) {
     SetupConfig config = NormalizeSetupConfig(raw_config);

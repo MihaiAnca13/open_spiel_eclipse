@@ -4,6 +4,8 @@
 #include <array>
 #include <iostream>
 #include <random>
+#include <set>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -17,6 +19,15 @@
 #include "open_spiel/games/eclipse/galaxy.h"
 #include "open_spiel/games/eclipse/warped_universe/adjacency.h"
 #include "open_spiel/games/eclipse/warped_universe/warped_universe.h"
+
+// Streaming for the global Species/NPCDifficulty enums so SPIEL_CHECK_EQ can
+// print readable failures.
+inline std::ostream& operator<<(std::ostream& os, Species v) {
+  return os << nlohmann::json(v).get<std::string>();
+}
+inline std::ostream& operator<<(std::ostream& os, NPCDifficulty v) {
+  return os << nlohmann::json(v).get<std::string>();
+}
 #include "open_spiel/json/include/nlohmann/json.hpp"
 #include "open_spiel/spiel.h"
 #include "open_spiel/spiel_utils.h"
@@ -92,6 +103,131 @@ void InitialStateChanceNodeTest() {
   SPIEL_CHECK_FALSE(state->IsChanceNode());
   SPIEL_CHECK_GE(state->CurrentPlayer(), 0);
   SPIEL_CHECK_LT(state->CurrentPlayer(), game->NumPlayers());
+}
+
+std::shared_ptr<const Game> LoadRandomizedEclipseGame(
+    int players, uint64_t rng_seed, bool randomize_races,
+    bool randomize_npc_diff, bool randomize_warped, double alien_prob = 0.8,
+    double warped_prob = 0.5) {
+  std::ostringstream s;
+  s << "eclipse(players=" << players << ",rng_seed=" << rng_seed
+    << ",randomize_races=" << (randomize_races ? "true" : "false")
+    << ",race_alien_prob=" << alien_prob
+    << ",randomize_npc_difficulty=" << (randomize_npc_diff ? "true" : "false")
+    << ",randomize_warped=" << (randomize_warped ? "true" : "false")
+    << ",warped_prob=" << warped_prob << ")";
+  return LoadGame(s.str());
+}
+
+std::vector<Species> EpisodeSpecies(const State& state) {
+  const auto* es = dynamic_cast<const EclipseState*>(&state);
+  SPIEL_CHECK_TRUE(es != nullptr);
+  const auto& raw = es->RawState();
+  std::vector<Species> species;
+  for (const auto& player : raw.players) {
+    species.push_back(player.species_id);
+  }
+  return species;
+}
+
+constexpr std::array<Species, 6> kTestAlienSpecies = {
+    Species::ERIDANI_EMPIRE, Species::HYDRAN_PROGRESS, Species::PLANTA,
+    Species::DESCENDANTS_OF_DRACO, Species::MECHANEMA,
+    Species::ORION_HEGEMONY};
+
+void SetupRandomizationTest() {
+  // (1) Determinism: same game string + seed draws the same assignment.
+  auto g1 = LoadRandomizedEclipseGame(4, 42, true, false, false);
+  auto s1 = g1->NewInitialState();
+  s1->ApplyAction(0);  // resolve initial setup chance node
+  auto g2 = LoadRandomizedEclipseGame(4, 42, true, false, false);
+  auto s2 = g2->NewInitialState();
+  s2->ApplyAction(0);
+  const auto assn1 = EpisodeSpecies(*s1);
+  const auto assn2 = EpisodeSpecies(*s2);
+  SPIEL_CHECK_EQ(assn1.size(), assn2.size());
+  for (size_t p = 0; p < assn1.size(); ++p) {
+    SPIEL_CHECK_EQ(assn1[p], assn2[p]);
+  }
+
+  // (2) Within one episode: alien species are unique (no repeats on two
+  // seats); Terran may repeat (with-replacement filler).
+  std::set<Species> aliens_seen;
+  int terran_count = 0;
+  for (Species species : EpisodeSpecies(*s1)) {
+    if (species == Species::TERRAN_FACTIONS) {
+      ++terran_count;
+    } else {
+      SPIEL_CHECK_TRUE(aliens_seen.insert(species).second);
+    }
+  }
+  SPIEL_CHECK_LE(terran_count, 4);
+  SPIEL_CHECK_EQ(aliens_seen.size() + terran_count, 4);
+
+  // (3) Variety: distinct race assignments across different seeds, including
+  // at least one all-Terran assignment (aliens are optional per-seat).
+  std::set<std::vector<Species>> assignments;
+  for (uint64_t seed = 0; seed < 16; ++seed) {
+    auto g = LoadRandomizedEclipseGame(4, seed, true, false, false);
+    auto st = g->NewInitialState();
+    st->ApplyAction(0);
+    const auto assn = EpisodeSpecies(*st);
+    for (Species species : assn) {
+      SPIEL_CHECK_TRUE(std::find(kTestAlienSpecies.begin(),
+                                 kTestAlienSpecies.end(), species) !=
+                       kTestAlienSpecies.end() ||
+                       species == Species::TERRAN_FACTIONS);
+    }
+    assignments.insert(assn);
+  }
+  SPIEL_CHECK_GE(assignments.size(), 5);
+
+  // (4) NPC difficulty randomization covers all three levels.
+  std::set<NPCDifficulty> difficulties;
+  for (uint64_t seed = 0; seed < 24; ++seed) {
+    auto g = LoadRandomizedEclipseGame(4, seed, false, true, false);
+    auto st = g->NewInitialState();
+    st->ApplyAction(0);
+    auto* es = dynamic_cast<EclipseState*>(st.get());
+    SPIEL_CHECK_TRUE(es != nullptr);
+    difficulties.insert(es->RawState().gcds_difficulty);
+    SPIEL_CHECK_EQ(es->RawState().guardian_difficulty,
+                   es->RawState().gcds_difficulty);
+    SPIEL_CHECK_EQ(es->RawState().ancient_difficulty,
+                   es->RawState().gcds_difficulty);
+  }
+  SPIEL_CHECK_EQ(difficulties.size(), 3);
+
+  // (5) Warped-universe randomization flips between both values.
+  std::set<bool> warped_values;
+  for (uint64_t seed = 0; seed < 24; ++seed) {
+    auto g = LoadRandomizedEclipseGame(4, seed, false, false, true);
+    auto st = g->NewInitialState();
+    st->ApplyAction(0);
+    auto* es = dynamic_cast<EclipseState*>(st.get());
+    SPIEL_CHECK_TRUE(es != nullptr);
+    warped_values.insert(es->RawState().warped_universe);
+  }
+  SPIEL_CHECK_EQ(warped_values.size(), 2);
+
+  // (6) Serialization round-trip preserves the drawn config.
+  auto g3 = LoadRandomizedEclipseGame(4, 7, true, true, true);
+  auto st3 = g3->NewInitialState();
+  st3->ApplyAction(0);
+  std::string serialized = st3->Serialize();
+  auto g4 = LoadRandomizedEclipseGame(4, 7, true, true, true);
+  auto st4 = g4->DeserializeState(serialized);
+  const auto assn3 = EpisodeSpecies(*st3);
+  const auto assn4 = EpisodeSpecies(*st4);
+  SPIEL_CHECK_EQ(assn3.size(), assn4.size());
+  for (size_t p = 0; p < assn3.size(); ++p) {
+    SPIEL_CHECK_EQ(assn3[p], assn4[p]);
+  }
+  auto* es3 = dynamic_cast<EclipseState*>(st3.get());
+  auto* es4 = dynamic_cast<EclipseState*>(st4.get());
+  SPIEL_CHECK_TRUE(es3 != nullptr && es4 != nullptr);
+  SPIEL_CHECK_EQ(es3->RawState().gcds_difficulty, es4->RawState().gcds_difficulty);
+  SPIEL_CHECK_EQ(es3->RawState().warped_universe, es4->RawState().warped_universe);
 }
 
 void RandomSimulationAndSerializationTest() {
@@ -2971,7 +3107,8 @@ int main(int argc, char** argv) {
   RUN_TEST(WarpedUniverseTest);
   RUN_TEST(WarpedUniverseExploreRotationTest);
   RUN_TEST(SectorCoordMapTest);
+  RUN_TEST(SetupRandomizationTest);
 
 #undef RUN_TEST
-  std::cout << "[==========] 75 tests passed." << std::endl;
+  std::cout << "[==========] 76 tests passed." << std::endl;
 }

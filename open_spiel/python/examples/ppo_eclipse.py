@@ -48,6 +48,11 @@ from open_spiel.python.pytorch.ppo import layer_init
 from open_spiel.python.vector_env import SyncVectorEnv
 
 try:
+  from tqdm import tqdm
+except ImportError:
+  tqdm = None
+
+try:
   from open_spiel.python.async_vector_env import AsyncVectorEnv
 except ImportError:
   AsyncVectorEnv = None
@@ -70,6 +75,20 @@ class NullWriter(object):
   def close(self):
     pass
 
+
+# Module-level handle to the active tqdm bar (set by main()). All non-bar
+# console output routes through _emit so it draws above (not through) the bar.
+_ACTIVE_PBAR = None
+
+
+def _emit(message):
+  """Print outside the progress bar (above it) when one is active."""
+  bar = _ACTIVE_PBAR
+  if bar is not None:
+    bar.write(message)
+  else:
+    print(message)
+
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string("game", "eclipse(players=4)", "Name of the game.")
@@ -79,10 +98,31 @@ flags.DEFINE_bool("torch_deterministic", True, "Deterministic torch.")
 flags.DEFINE_string("track", None, "Experiment tracking run id.")
 flags.DEFINE_string("run_dir", "runs", "Root dir for tensorboard runs.")
 
+flags.DEFINE_bool(
+    "randomize_races", True,
+    "Randomize per-episode race assignment (unique alien draft, Terran as "
+    "filler) instead of using the fixed species_p* game params.")
+flags.DEFINE_float(
+    "race_alien_prob", 0.8,
+    "Per-seat probability of drawing a (unique) alien species when "
+    "--randomize_races; the remainder are Terran Factions.")
+flags.DEFINE_bool(
+    "randomize_npc_difficulty", True,
+    "Randomize the NPC (GCDS/guardian/ancient) difficulty per episode.")
+flags.DEFINE_bool(
+    "randomize_warped", True,
+    "Randomize the warped-universe module flag per episode.")
+flags.DEFINE_float("warped_prob", 0.5,
+                   "Probability the warped-universe module is on when "
+                   "--randomize_warped.")
+
 flags.DEFINE_integer("num_envs", 8, "Number of parallel game environments.")
 flags.DEFINE_integer("num_steps", 128, "Rollout steps per update per env.")
 flags.DEFINE_integer("total_timesteps", 100_000, "Total environment steps.")
 flags.DEFINE_integer("eval_every", 10, "Log every N updates.")
+flags.DEFINE_bool("progress", True,
+                  "Show a tqdm-style progress bar with it/s (env steps/sec). "
+                  "Disabled automatically if tqdm is not installed.")
 
 flags.DEFINE_integer(
     "num_workers", 0,
@@ -505,8 +545,22 @@ def _log_update(agent, episode_returns, recent_returns, writer, update, eval_eve
   if recent:
     summary = (f"  mean_term_return={np.mean(recent):.2f}  "
                f"nonzero_episodes={nonzero}/{len(recent)}")
-  print(f"[update {update}] steps={agent.total_steps_done}"
-        f"  total_episodes={n_completed}{summary}")
+  losses = ""
+  metrics = getattr(agent, "last_metrics", None) or {}
+  if metrics:
+    parts = [
+        f"policy_loss={metrics['policy_loss']:.4f}",
+        f"value_loss={metrics['value_loss']:.4f}",
+        f"entropy={metrics['entropy']:.4f}",
+    ]
+    if metrics.get("aux_loss") is not None:
+      parts.append(f"aux_loss={metrics['aux_loss']:.4f}")
+    parts.append(f"approx_kl={metrics['kl']:.4f}")
+    parts.append(f"clipfrac={metrics['clipfrac']:.3f}")
+    parts.append(f"explained_var={metrics['explained_variance']:.3f}")
+    losses = "  " + "  ".join(parts)
+  _emit(f"[update {update}] steps={agent.total_steps_done}"
+        f"  total_episodes={n_completed}{summary}{losses}")
   if writer is not None:
     writer.add_scalar("charts/num_episodes", n_completed,
                       agent.total_steps_done)
@@ -515,6 +569,48 @@ def _log_update(agent, episode_returns, recent_returns, writer, update, eval_eve
                         agent.total_steps_done)
       writer.add_scalar("charts/nonzero_episodes", nonzero,
                         agent.total_steps_done)
+
+
+def _parse_game_string(game_str):
+  """Splits 'short_name(param1=v1,...)' into (name, params_dict)."""
+  if "(" not in game_str:
+    return game_str, {}
+  name, rest = game_str.split("(", 1)
+  if not rest.endswith(")"):
+    raise ValueError(f"malformed game string: {game_str}")
+  params = {}
+  for piece in rest[:-1].split(","):
+    if not piece:
+      continue
+    key, _, val = piece.partition("=")
+    params[key.strip()] = val.strip()
+  return name.strip(), params
+
+
+def _render_game_string(name, params):
+  if not params:
+    return name
+  return name + "(" + ",".join(
+      f"{k}={v}" for k, v in params.items()) + ")"
+
+
+def _float_str(value):
+  return f"{value:.6f}".rstrip("0").rstrip(".")
+
+
+def _randomized_game_string(base_game_str, rng_seed):
+  """Base game string + per-env rng_seed + opt-in setup randomization."""
+  name, params = _parse_game_string(base_game_str)
+  params["rng_seed"] = str(int(rng_seed))
+  if FLAGS.randomize_races:
+    params["randomize_races"] = "true"
+    params["race_alien_prob"] = _float_str(FLAGS.race_alien_prob)
+  if FLAGS.randomize_npc_difficulty:
+    params["randomize_npc_difficulty"] = "true"
+  if FLAGS.randomize_warped:
+    params["randomize_warped"] = "true"
+    params["warped_prob"] = _float_str(FLAGS.warped_prob)
+  return _render_game_string(name, params)
 
 
 def main(_):
@@ -540,10 +636,17 @@ def main(_):
                   sorted(vars(FLAGS).items())])),
   )
 
+  # Each env gets its own seeded game instance (distinct rng_seed) so setup
+  # draws, starting tech/discovery markets, tiles, and (when enabled) per-episode
+  # race/difficulty/module randomization all differ across environments.
+  env_game_strs = [
+      _randomized_game_string(FLAGS.game, FLAGS.seed + i)
+      for i in range(FLAGS.num_envs)
+  ]
   game = pyspiel.load_game(FLAGS.game)
   envs_list = [
       rl_environment.Environment(
-          game=pyspiel.load_game(FLAGS.game),
+          game=pyspiel.load_game(env_game_strs[i]),
           chance_event_sampler=rl_environment.ChanceEventSampler(
               seed=FLAGS.seed + i),
           observation_type=rl_environment.ObservationType.OBSERVATION,
@@ -556,7 +659,7 @@ def main(_):
         envs_list,
         num_workers=FLAGS.num_workers,
         sampler_seeds=[FLAGS.seed + i for i in range(FLAGS.num_envs)],
-        game_str=FLAGS.game,
+        game_strs=env_game_strs,
     )
     game = envs_list[0]._game  # pylint: disable=protected-access
   else:
@@ -597,6 +700,35 @@ def main(_):
 
   batch_size = FLAGS.num_envs * FLAGS.num_steps
   num_updates = FLAGS.total_timesteps // batch_size
+
+  # tqdm-style progress over total env steps; it/s = env steps per second.
+  global _ACTIVE_PBAR
+  pbar = None
+  if FLAGS.progress and tqdm is not None:
+    pbar = tqdm(
+        total=FLAGS.total_timesteps,
+        unit="envstep",
+        desc=run_name,
+        ncols=110,
+        dynamic_ncols=True,
+    )
+    _ACTIVE_PBAR = pbar
+
+  def _pbar_postfix():
+    """Per-update diagnostic string for the tqdm bar."""
+    if pbar is None:
+      return
+    metrics = getattr(agent, "last_metrics", None) or {}
+    parts = []
+    for key in ("policy_loss", "value_loss", "entropy", "kl"):
+      if key in metrics:
+        parts.append(f"{key}={metrics[key]:.3g}")
+    recent = recent_returns[-20:]
+    if recent:
+      parts.append(f"ret={np.mean(recent):.2g}")
+      parts.append(f"nz={sum(1 for r in recent if r > 0.5)}/{len(recent)}")
+    pbar.set_postfix_str("  ".join(parts))
+
 
   # League (population self-play) setup: roster + matchmaker + lineups.
   agent_fn = make_agent_fn(FLAGS.nn_width, FLAGS.nn_depth)
@@ -696,21 +828,27 @@ def main(_):
             episode_returns[i].append(ret)
             recent_returns.append(ret)
       agent.learn_np(step_arrays.obs, step_arrays.seats)
+      if pbar is not None:
+        pbar.update(FLAGS.num_envs * FLAGS.num_steps)
+        _pbar_postfix()
       if FLAGS.league:
         _maybe_snapshot(agent, roster, update)
       if update % FLAGS.eval_every == 0:
         _log_update(agent, episode_returns, recent_returns, writer, update)
         if FLAGS.eval_squad and roster is not None:
-          res = _eval_squad(agent, roster, agent_fn, num_actions, input_shape,
-                            device, FLAGS.game, num_players,
-                            num_games=8, rng_seed=FLAGS.seed + update * 7)
+          res = _eval_squad(
+              agent, roster, agent_fn, num_actions, input_shape, device,
+              _randomized_game_string(FLAGS.game, FLAGS.seed + update * 7),
+              num_players, num_games=8, rng_seed=FLAGS.seed + update * 7)
           if res is not None:
             wins, games, ranks = res
             avg = float(np.mean(ranks))
-            print(f"  [squad] main win-rate {wins}/{games}  avg_rank={avg:.2f}")
+            _emit(f"  [squad] main win-rate {wins}/{games}  avg_rank={avg:.2f}")
             writer.add_scalar("squad/main_win_rate", wins / games,
                               agent.total_steps_done)
             writer.add_scalar("squad/avg_rank", avg, agent.total_steps_done)
+    if pbar is not None:
+      pbar.close()
     envs.close()
   else:
     time_step = envs.reset(players="current")
@@ -771,19 +909,24 @@ def main(_):
 
       agent.learn(time_step)
 
+      if pbar is not None:
+        pbar.update(FLAGS.num_envs * FLAGS.num_steps)
+        _pbar_postfix()
+
       if FLAGS.league:
         _maybe_snapshot(agent, roster, update)
 
       if update % FLAGS.eval_every == 0:
         _log_update(agent, episode_returns, recent_returns, writer, update)
         if FLAGS.eval_squad and roster is not None:
-          res = _eval_squad(agent, roster, agent_fn, num_actions, input_shape,
-                            device, FLAGS.game, num_players,
-                            num_games=8, rng_seed=FLAGS.seed + update * 7)
+          res = _eval_squad(
+              agent, roster, agent_fn, num_actions, input_shape, device,
+              _randomized_game_string(FLAGS.game, FLAGS.seed + update * 7),
+              num_players, num_games=8, rng_seed=FLAGS.seed + update * 7)
           if res is not None:
             wins, games, ranks = res
             avg = float(np.mean(ranks))
-            print(f"  [squad] main win-rate {wins}/{games}  avg_rank={avg:.2f}")
+            _emit(f"  [squad] main win-rate {wins}/{games}  avg_rank={avg:.2f}")
             writer.add_scalar("squad/main_win_rate", wins / games,
                               agent.total_steps_done)
             writer.add_scalar("squad/avg_rank", avg, agent.total_steps_done)
@@ -793,19 +936,21 @@ def main(_):
   if FLAGS.exploit_victim and exploit_victim_net is not None:
     wins, games, _ = _eval_head2head(
         agent, exploit_victim_net, agent_fn, num_actions, input_shape, device,
-        FLAGS.game, num_players, num_games=16,
-        rng_seed=FLAGS.seed + 777)
-    print(f"[exploiter] vs victim {FLAGS.exploit_victim}: "
+        _randomized_game_string(FLAGS.game, FLAGS.seed + 777), num_players,
+        num_games=16, rng_seed=FLAGS.seed + 777)
+    _emit(f"[exploiter] vs victim {FLAGS.exploit_victim}: "
           f"win-rate {wins}/{games}")
     writer.add_scalar("exploiter/victim_win_rate", wins / games,
                       agent.total_steps_done)
     if FLAGS.exploit_promote and wins / games >= 0.5 and roster is not None:
       roster.add_exploiter(agent.network, agent.updates_done,
                            FLAGS.exploit_victim, win_rate=wins / games)
-      print(f"[exploiter] promoted to roster")
+      _emit(f"[exploiter] promoted to roster")
 
+  if pbar is not None:
+    pbar.close()
   writer.close()
-  print("pilot done")
+  _emit("pilot done")
 
 
 if __name__ == "__main__":

@@ -207,6 +207,11 @@ const GameType game_type{
         {"rng_seed", GameParameter(0)},
         {"npc_difficulty", GameParameter(std::string("Easy"))},
         {"warped_universe", GameParameter(false)},
+        {"randomize_races", GameParameter(false)},
+        {"race_alien_prob", GameParameter(0.8)},
+        {"randomize_npc_difficulty", GameParameter(false)},
+        {"randomize_warped", GameParameter(false)},
+        {"warped_prob", GameParameter(0.5)},
         {"species_p0", GameParameter(std::string("Terran Factions"))},
         {"species_p1", GameParameter(std::string("Terran Factions"))},
         {"species_p2", GameParameter(std::string("Terran Factions"))},
@@ -2055,14 +2060,29 @@ void EclipseState::ResolveChanceEvent(Action action_id) {
   switch (pending_random_event_) {
     case PendingRandomEvent::initial_setup: {
       SPIEL_CHECK_EQ(action_id, chance_resolve);
-      eclipse_state_ = InitializeDeterministicSetupState(setup_config_);
-      ResolveInitialSetupRandomness(eclipse_game_->rng(), setup_config_,
+      // Per-episode setup randomization (opt-in): draw races, NPC difficulty,
+      // and the warped-universe flag from the game RNG into a local copy, and
+      // record the draw back into setup_config_ so serialization and the
+      // information string reflect the actual episode config.
+      SetupConfig cfg = setup_config_;
+      if (eclipse_game_->GetRandomizeRacesParam() ||
+          eclipse_game_->GetRandomizeNpcDifficultyParam() ||
+          eclipse_game_->GetRandomizeWarpedParam()) {
+        RandomizeSetupForEpisode(
+            eclipse_game_->rng(), cfg, eclipse_game_->GetRaceAlienProbParam(),
+            eclipse_game_->GetRandomizeNpcDifficultyParam(),
+            eclipse_game_->GetRandomizeWarpedParam(),
+            eclipse_game_->GetWarpedProbParam());
+        setup_config_ = cfg;
+      }
+      eclipse_state_ = InitializeDeterministicSetupState(cfg);
+      ResolveInitialSetupRandomness(eclipse_game_->rng(), cfg,
                                     eclipse_state_);
 
       std::vector<PlayerConfig> player_choices;
-      player_choices.reserve(setup_config_.players);
+      player_choices.reserve(cfg.players);
       for (const StagedPlayerConfig& staged_player :
-           setup_config_.staged_players) {
+           cfg.staged_players) {
         player_choices.push_back(PlayerConfig{
             .species = staged_player.species,
             .is_ai = staged_player.is_ai,

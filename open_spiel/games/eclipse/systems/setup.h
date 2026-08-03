@@ -48,6 +48,20 @@ void ResolveInitialSetupRandomness(std::mt19937_64& rng,
                                    State& state);
 void FinalizeGameSetup(State& state,
                        const std::vector<PlayerConfig>& player_choices);
+
+// Per-episode setup randomization (opt-in via game params). Draws a fresh
+// race assignment (unique alien draft, Terran as filler), NPC difficulty, and
+// warped-universe flag from ``rng`` into ``config``:
+//   - Races: the 6 alien species are drawn without replacement (each used at
+//     most once); each seat is an alien with probability ``alien_prob``,
+//     otherwise Terran. Terran fills in whatever slots remain when the alien
+//     pool is exhausted, so it may appear any number of times.
+//   - Difficulty: uniform over EASY/MEDIUM/HARD when ``randomize_difficulty``.
+//   - Warped universe: drawn with probability ``warped_prob`` when
+//     ``randomize_warped``.
+void RandomizeSetupForEpisode(std::mt19937_64& rng, SetupConfig& config,
+                              double alien_prob, bool randomize_difficulty,
+                              bool randomize_warped, double warped_prob);
 SetupSnapshot CreatePreChoiceSnapshot(const SetupConfig& config);
 SetupSnapshot FinalizeSetupSnapshot(
     const SetupSnapshot& snapshot,

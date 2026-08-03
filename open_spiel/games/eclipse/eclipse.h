@@ -42,6 +42,21 @@ class EclipseGame : public Game {
   bool GetWarpedUniverseParam() const {
     return ParameterValue<bool>("warped_universe");
   }
+  bool GetRandomizeRacesParam() const {
+    return ParameterValue<bool>("randomize_races");
+  }
+  double GetRaceAlienProbParam() const {
+    return ParameterValue<double>("race_alien_prob");
+  }
+  bool GetRandomizeNpcDifficultyParam() const {
+    return ParameterValue<bool>("randomize_npc_difficulty");
+  }
+  bool GetRandomizeWarpedParam() const {
+    return ParameterValue<bool>("randomize_warped");
+  }
+  double GetWarpedProbParam() const {
+    return ParameterValue<double>("warped_prob");
+  }
   SetupConfig InitialSetupConfig() const;
 
   std::mt19937_64& rng() const { return rng_; }

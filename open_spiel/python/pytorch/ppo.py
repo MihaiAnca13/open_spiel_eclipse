@@ -361,6 +361,11 @@ class PPO(nn.Module):
     self.updates_done = 0
     self.start_time = time.time()
 
+    # Per-update loss diagnostics (filled by _learn_core), so outer loops can
+    # report value/policy/entropy/aux loss + KL/clip/explained-variance without
+    # pulling them from a tensorboard writer.
+    self.last_metrics = None
+
   def setup_league(self, networks, lineup, train_pid):
     """Enables population self-play.
 
@@ -1219,7 +1224,20 @@ class PPO(nn.Module):
     y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
     var_y = np.var(y_true)
     explained_var = np.nan if var_y == 0 else 1 - np.var(y_true -
-                                                         y_pred) / var_y
+                                                          y_pred) / var_y
+
+    # Per-update diagnostics for the outer loop (tqdm progress / console).
+    self.last_metrics = {
+        "policy_loss": float(pg_loss.detach()),
+        "value_loss": float(v_loss.detach()),
+        "entropy": float(entropy_loss.detach()),
+        "aux_loss": float(aux_loss.detach()),
+        "clipfrac": float(np.mean(clipfracs)),
+        "old_kl": float(old_approx_kl.detach()),
+        "kl": float(approx_kl.detach()),
+        "explained_variance": float(explained_var),
+    }
+
 
     # TRY NOT TO MODIFY: record rewards for plotting purposes
     if self.writer is not None:

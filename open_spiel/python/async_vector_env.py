@@ -81,13 +81,14 @@ class AsyncVectorEnv(object):
                num_workers=1,
                sampler_seeds=None,
                max_legal=None,
-               game_str=None):
+               game_str=None,
+               game_strs=None):
     """Constructor.
 
     Args:
       envs: list of ``rl_environment.Environment``, used to introspect the
         game shape on this side. The actual envs are recreated inside each
-        worker from the same game string + seed, so passing a probe list of
+        worker from the same game strings + seeds, so passing a probe list of
         length ``num_envs`` with the same construction params is enough.
       num_workers: number of worker processes.
       sampler_seeds: list of per-env ChanceEventSampler seeds (same length as
@@ -97,10 +98,15 @@ class AsyncVectorEnv(object):
       max_legal: max number of legal actions across all decision nodes; auto
         probed if None.
       game_str: the game string used to load the envs (e.g.
-        ``"eclipse(players=4)"``). Workers rebuild their own fresh game from
-        this string; important because the eclipse game object carries a
-        mutable RNG that must not be shared across processes, and a parent
-        instance may already have advanced it via probe resets.
+        ``"eclipse(players=4)"``) when all envs share one configuration.
+        Workers rebuild their own fresh game from this string; important
+        because the eclipse game object carries a mutable RNG that must not be
+        shared across processes, and a parent instance may already have
+        advanced it via probe resets.
+      game_strs: optional per-env list of game strings (same length as
+        ``envs``), used when each environment should be built from a different
+        configuration (e.g. per-env ``rng_seed``). Takes precedence over
+        ``game_str``.
     """
     if not isinstance(envs, list) or not envs:
       raise ValueError("Need a non-empty list of rl_environment.Environment")
@@ -119,6 +125,13 @@ class AsyncVectorEnv(object):
         pieces = [f"{k}={v!s}".lower() if isinstance(v, bool) else k + "=" +
                   str(v) for k, v in spec.items()]
         self._game_str += "(" + ",".join(pieces) + ")"
+    self._game_strs = game_strs
+    if self._game_strs is None:
+      self._game_strs = [self._game_str] * self.num_envs
+    if len(self._game_strs) != self.num_envs:
+      raise ValueError(
+          f"game_strs must have length num_envs ({self.num_envs}), got "
+          f"{len(self._game_strs)}")
     self._sampler_seeds = sampler_seeds
     self._max_legal = max_legal if max_legal else self._probe_max_legal(envs)
     self.num_workers = num_workers
@@ -177,9 +190,10 @@ class AsyncVectorEnv(object):
       self._go.append(go)
       self._done.append(done)
       seeds = self._sampler_seeds[start:start + count]
+      games = self._game_strs[start:start + count]
       p = self._ctx.Process(
           target=_worker_main,
-          args=(start, count, self.num_players, self._game_str,
+          args=(start, count, self.num_players, games,
                 self._max_legal, self.obs_size, seeds, self.action_buf,
                 self.obs_buf, self.legal_buf, self.legal_len, self.rew_buf,
                 self.done_buf, self.cur_buf, go, done))
@@ -329,14 +343,14 @@ class AsyncVectorEnv(object):
       b.unlink()
 
 
-def _worker_main(start, count, num_players, game, max_legal, obs_size,
+def _worker_main(start, count, num_players, games, max_legal, obs_size,
                  seeds, action_buf, obs_buf, legal_buf, legal_len, rew_buf,
                  done_buf, cur_buf, go, done):
   """Worker process body: owns a shard of ``SyncVectorEnv``."""
   envs = []
   for i in range(count):
     env = rl_environment.Environment(
-        game=game,
+        game=games[i],
         chance_event_sampler=rl_environment.ChanceEventSampler(
             seed=int(seeds[i])),
         observation_type=rl_environment.ObservationType.OBSERVATION,
