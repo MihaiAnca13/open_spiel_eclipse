@@ -123,6 +123,9 @@ flags.DEFINE_integer("eval_every", 10, "Log every N updates.")
 flags.DEFINE_bool("progress", True,
                   "Show a tqdm-style progress bar with it/s (env steps/sec). "
                   "Disabled automatically if tqdm is not installed.")
+flags.DEFINE_bool("anneal_lr", True,
+                  "Linearly anneal the learning rate to 0 over the run "
+                  "(standard PPO practice for long training).")
 
 flags.DEFINE_integer(
     "num_workers", 0,
@@ -856,6 +859,8 @@ def main(_):
             episode_returns[i].append(ret)
             recent_returns.append(ret)
       agent.learn_np(step_arrays.obs, step_arrays.seats)
+      if FLAGS.anneal_lr:
+        agent.anneal_learning_rate(update, num_updates)
       if pbar is not None:
         pbar.update(FLAGS.num_envs * FLAGS.num_steps)
         _pbar_postfix()
@@ -936,6 +941,9 @@ def main(_):
             recent_returns.append(ret)
 
       agent.learn(time_step)
+
+      if FLAGS.anneal_lr:
+        agent.anneal_learning_rate(update, num_updates)
 
       if pbar is not None:
         pbar.update(FLAGS.num_envs * FLAGS.num_steps)
