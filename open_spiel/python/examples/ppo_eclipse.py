@@ -500,6 +500,99 @@ GALAXY_BASE = 45 + 135 + 125  # obs block C starts after A+B0+5 opponent blocks.
 CELL_STRIDE = 6
 
 
+# Observation slots used by the episode diagnostics (see eclipse.cc layout):
+#   A + 0        round / 8
+#   B0 + 7       self "eliminated"       -> index 52
+#   Bn + 2       opponent n "eliminated" -> OPP_BASE + block*25 + 2
+ROUND_SLOT = 0
+SELF_ELIM_SLOT = 45 + 7
+OPP_ELIM_OFFSET = 2
+MAX_ROUNDS = 8
+
+
+class EpisodeDiagnostics:
+  """Why episodes end, reconstructed from the acting seat's observation.
+
+  The single most important fact about Eclipse self-play was invisible in the
+  old telemetry: unskilled play does not merely score 0, it goes *bankrupt* --
+  every seat eliminated in round 1-2, after which the remaining rounds are
+  empty. `mean_episode_return` (seat-0 VP) could not distinguish that from a
+  contested game, and after the A0 engine fix it no longer even shows up as a
+  zero return, because eliminated seats now score what they had banked.
+
+  Everything here comes from the observation the trainer already gathers: every
+  seat's `eliminated` bit is visible in the acting seat's own view (its own slot
+  plus one per opponent block), and the round counter is in the global block. So
+  no engine change and no extra env traffic is needed.
+
+  Tracked per episode: the round at which each seat was eliminated (elimination
+  is monotone, so first-seen is the answer), and the furthest round reached.
+  """
+
+  def __init__(self, num_envs, num_players, history=400):
+    self.num_envs = num_envs
+    self.num_players = num_players
+    self.elim_round = np.zeros((num_envs, num_players), dtype=np.int16)
+    self.elim_round.fill(-1)          # -1 = still alive
+    self.max_round = np.zeros(num_envs, dtype=np.int16)
+    self.survivors = collections.deque(maxlen=history)
+    self.elim_rounds = collections.deque(maxlen=history)
+    self.rounds_reached = collections.deque(maxlen=history)
+    self.all_seat_vp = collections.deque(maxlen=history)
+    self.wipeouts = collections.deque(maxlen=history)
+    self._cols = None
+
+  def _elim_columns(self, seats):
+    """(num_players, num_envs) obs column holding each seat's eliminated bit."""
+    seat_ids = np.arange(self.num_players, dtype=np.int64)[:, None]
+    viewers = np.asarray(seats, dtype=np.int64)[None, :]
+    block = seat_ids - (seat_ids > viewers).astype(np.int64)
+    return np.where(seat_ids == viewers, SELF_ELIM_SLOT,
+                    OPP_BASE + block * 25 + OPP_ELIM_OFFSET)
+
+  def observe(self, obs_batch, seats):
+    """Folds one step's observations into the per-episode trackers."""
+    obs = np.asarray(obs_batch)
+    rounds = np.rint(obs[:, ROUND_SLOT] * MAX_ROUNDS).astype(np.int16)
+    np.maximum(self.max_round, rounds, out=self.max_round)
+    cols = self._elim_columns(seats)
+    rows = np.arange(obs.shape[0], dtype=np.int64)[None, :]
+    flags = obs[rows, cols] > 0.5          # (num_players, num_envs)
+    newly = flags.T & (self.elim_round < 0)
+    if newly.any():
+      self.elim_round[newly] = np.broadcast_to(
+          rounds[:, None], self.elim_round.shape)[newly]
+
+  def close_episodes(self, done_idx, rewards):
+    """Records finished episodes and resets their trackers."""
+    for i in done_idx:
+      i = int(i)
+      elim = self.elim_round[i]
+      alive = int(np.sum(elim < 0))
+      self.survivors.append(alive)
+      self.wipeouts.append(1 if alive == 0 else 0)
+      self.elim_rounds.append(
+          float(np.mean(np.where(elim < 0, MAX_ROUNDS, elim))))
+      self.rounds_reached.append(int(self.max_round[i]))
+      self.all_seat_vp.append(np.asarray(rewards[i], dtype=np.float32).copy())
+      self.elim_round[i] = -1
+      self.max_round[i] = 0
+
+  def summary(self):
+    if not self.survivors:
+      return None
+    vp = np.stack(self.all_seat_vp)
+    return {
+        "wipeout_rate": float(np.mean(self.wipeouts)),
+        "survivors": float(np.mean(self.survivors)),
+        "mean_elim_round": float(np.mean(self.elim_rounds)),
+        "rounds_reached": float(np.mean(self.rounds_reached)),
+        "vp_all_seats_mean": float(vp.mean()),
+        "vp_all_seats_max": float(vp.max(axis=1).mean()),
+        "episodes": len(self.survivors),
+    }
+
+
 def _greedy_pick(obs, legal, rng):
   """Priority-heuristic move for the fixed Greedy baseline.
 
@@ -1033,7 +1126,8 @@ def _eval_head2head(agent, opponent_net, agent_fn, num_actions, input_shape,
   return EvalResult(main_wins, num_games, ranks, utils)
 
 
-def _log_update(agent, episode_returns, recent_returns, writer, update, eval_every=None):
+def _log_update(agent, episode_returns, recent_returns, writer, update,
+                eval_every=None, diag=None):
   n_completed = sum(len(r) for r in episode_returns.values())
   recent = recent_returns[-200:]
   nonzero = sum(1 for r in recent if r > 0.5)
@@ -1059,8 +1153,20 @@ def _log_update(agent, episode_returns, recent_returns, writer, update, eval_eve
     parts.append(f"clipfrac={metrics['clipfrac']:.3f}")
     parts.append(f"explained_var={metrics['explained_variance']:.3f}")
     losses = "  " + "  ".join(parts)
+  # Headline health line: why episodes are ending. `mean_episode_return`
+  # (seat-0 VP) cannot distinguish "everyone went bankrupt in round 2" from a
+  # contested game, and after the eliminated-player scoring fix a wipeout no
+  # longer even reads as a zero return.
+  health = ""
+  dstats = diag.summary() if diag is not None else None
+  if dstats:
+    health = (f"  wipeout={dstats['wipeout_rate']:.2f}"
+              f"  survivors={dstats['survivors']:.2f}/{agent.num_players}"
+              f"  elim_round={dstats['mean_elim_round']:.2f}/8"
+              f"  vp_all={dstats['vp_all_seats_mean']:.2f}"
+              f"  vp_best={dstats['vp_all_seats_max']:.2f}")
   _emit(f"[update {update}] steps={agent.total_steps_done}"
-        f"  total_episodes={n_completed}{summary}{losses}")
+        f"  total_episodes={n_completed}{health}{summary}{losses}")
   if writer is not None:
     writer.add_scalar("charts/num_episodes", n_completed,
                       agent.total_steps_done)
@@ -1069,6 +1175,10 @@ def _log_update(agent, episode_returns, recent_returns, writer, update, eval_eve
                         agent.total_steps_done)
       writer.add_scalar("charts/nonzero_episodes", nonzero,
                         agent.total_steps_done)
+    if dstats:
+      for key in ("wipeout_rate", "survivors", "mean_elim_round",
+                  "rounds_reached", "vp_all_seats_mean", "vp_all_seats_max"):
+        writer.add_scalar(f"health/{key}", dstats[key], agent.total_steps_done)
 
 
 def _parse_game_string(game_str):
@@ -1351,6 +1461,9 @@ def main(_):
   # Per-player episode return logging.
   episode_returns = {i: [] for i in range(FLAGS.num_envs)}
   recent_returns = []
+  # Why episodes end (bankruptcy vs. a played-out game) -- the signal the old
+  # telemetry could not express.
+  diag = EpisodeDiagnostics(FLAGS.num_envs, num_players)
 
   if use_async:
     _ = envs.reset(players="current")
@@ -1379,6 +1492,7 @@ def main(_):
         acts = agent.step_np(step_arrays)
         t1 = time.perf_counter() if _tm is not None else None
         obs_batch = agent.last_obs_batch
+        diag.observe(obs_batch, agent.last_seats)
         if FLAGS.shaping and phi_learned:
           phi_prev = _phi_wins(agent, obs_batch, device)
         else:
@@ -1426,6 +1540,8 @@ def main(_):
           _refresh_lineups(agent, matchmaker, roster, agent_fn, num_actions,
                            input_shape, device, step_arrays.dones)
         donor_idx = np.flatnonzero(step_arrays.dones)
+        if donor_idx.size:
+          diag.close_episodes(donor_idx, step_arrays.rewards)
         for i in donor_idx:
           ret = float(step_arrays.rewards[i][0])
           episode_returns[i].append(ret)
@@ -1454,7 +1570,8 @@ def main(_):
         _pbar_postfix()
       _maybe_snapshot(agent, roster, update)
       if update % FLAGS.eval_every == 0:
-        _log_update(agent, episode_returns, recent_returns, writer, update)
+        _log_update(agent, episode_returns, recent_returns, writer, update,
+                    diag=diag)
         if FLAGS.verdict_every_sec and time.time() - _last_verdict_ts[0] >= \
             FLAGS.verdict_every_sec:
           _last_verdict_ts[0] = time.time()
@@ -1494,6 +1611,7 @@ def main(_):
         # Uses the CPU numpy obs batch already gathered by agent.step (no
         # second GPU->CPU round trip).
         obs_batch = agent.last_obs_batch
+        diag.observe(obs_batch, agent.last_seats)
         if FLAGS.shaping and phi_learned:
           phi_prev = _phi_wins(agent, obs_batch, device)
         else:
@@ -1543,11 +1661,14 @@ def main(_):
                            input_shape, device, done)
 
         # Episode return logging.
-        for i, ts in enumerate(unreset):
-          if ts.last():
-            ret = float(ts.rewards[0])
-            episode_returns[i].append(ret)
-            recent_returns.append(ret)
+        finished = [i for i, ts in enumerate(unreset) if ts.last()]
+        if finished:
+          diag.close_episodes(
+              finished, {i: unreset[i].rewards for i in finished})
+        for i in finished:
+          ret = float(unreset[i].rewards[0])
+          episode_returns[i].append(ret)
+          recent_returns.append(ret)
 
       agent.learn(time_step)
 
@@ -1564,7 +1685,8 @@ def main(_):
       _maybe_snapshot(agent, roster, update)
 
       if update % FLAGS.eval_every == 0:
-        _log_update(agent, episode_returns, recent_returns, writer, update)
+        _log_update(agent, episode_returns, recent_returns, writer, update,
+                    diag=diag)
         if FLAGS.eval_squad and roster is not None:
           eval_seed = FLAGS.seed + FLAGS.eval_seed_offset
           res = _eval_squad(
