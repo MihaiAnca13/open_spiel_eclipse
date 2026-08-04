@@ -31,6 +31,7 @@ the potential-based telescope consistent. This addresses the sparse terminal
 reward problem without access to expert/human demonstration data.
 """
 
+import collections
 from datetime import datetime
 import os
 import random
@@ -48,6 +49,8 @@ from open_spiel.python.examples.league import PolicyRoster
 from open_spiel.python.pytorch.ppo import PPO
 from open_spiel.python.pytorch.ppo import layer_init
 from open_spiel.python.pytorch.ppo import rank_utility
+from open_spiel.python.pytorch.ppo import rank_of
+from open_spiel.python.pytorch.ppo import DEFAULT_RANK_UTILITY as RANK_UTILITY_TABLE
 from open_spiel.python.vector_env import SyncVectorEnv
 
 try:
@@ -243,6 +246,16 @@ flags.DEFINE_integer(
     "max_seconds", 0,
     "Hard wall-clock cap (seconds) for fail-fast runs: at this deadline emit "
     "a final verdict + snapshot the roster and exit 0. 0 disables.")
+flags.DEFINE_integer(
+    "eval_games", 32,
+    "Games per baseline in the verdict eval. 8 (the old value) gives a +-0.18 "
+    "standard error on a win rate, which cannot separate configurations; the "
+    "reported bootstrap interval makes the remaining noise explicit.")
+flags.DEFINE_integer(
+    "eval_seed_offset", 7777,
+    "Eval boards are drawn from FLAGS.seed + this fixed offset, so evals at "
+    "different points in training are paired on the same held-out boards "
+    "rather than re-rolling the galaxy each time.")
 flags.DEFINE_bool("eval_random", True,
                   "In the verdict eval, include main vs fixed-Random avg rank.")
 flags.DEFINE_bool("eval_greedy", True,
@@ -625,15 +638,76 @@ def _maybe_snapshot(agent, roster, update, force=False):
     roster.prune(keep_recent=4, keep_spaced=4)
 
 
+# Result of an evaluation match set. ``utils`` is the per-game mean tie-aware
+# rank utility over main's seats -- the quantity the training objective actually
+# optimizes, and the one to judge progress on. ``ranks`` (main's best placement)
+# is kept for continuity with earlier logs but is a much blunter instrument: it
+# reports 1 for any game nobody strictly beat main in, which for Eclipse means a
+# 0-0-0-0 mutual-bankruptcy game scores as a win.
+EvalResult = collections.namedtuple(
+    "EvalResult", ["wins", "games", "ranks", "utils"])
+
+
+def main_outcome(rewards, main_seats):
+  """(mean rank utility over main's seats, main's best placement) for one game.
+
+  Uses the shared tie-aware ``rank_utility`` with no VP escape bonus: evaluation
+  measures the true constant-sum objective, not the training-time nudge.
+  """
+  utility = float(np.mean(
+      [rank_utility(rewards, s) for s in main_seats]))
+  best_rank = min(rank_of(rewards, s) for s in main_seats)
+  return utility, best_rank
+
+
+def chance_utility(num_players):
+  """Mean rank utility of an *equal-strength* policy.
+
+  Because tie-aware rank utility is constant-sum, every seat averages
+  ``sum(table) / num_players`` under symmetry -- independent of how many seats
+  main occupies. This is the null hypothesis every strength number must clear.
+  """
+  table = RANK_UTILITY_TABLE[:num_players]
+  return sum(table) / max(1, num_players)
+
+
+def mean_ci(values, num_boot=2000, seed=0, alpha=0.05):
+  """(mean, lo, hi) bootstrap percentile interval for the mean of ``values``."""
+  arr = np.asarray(values, dtype=np.float64)
+  if arr.size == 0:
+    return float("nan"), float("nan"), float("nan")
+  if arr.size == 1:
+    return float(arr[0]), float("nan"), float("nan")
+  rng = np.random.RandomState(seed)
+  idx = rng.randint(0, arr.size, size=(num_boot, arr.size))
+  means = arr[idx].mean(axis=1)
+  return (float(arr.mean()),
+          float(np.percentile(means, 100.0 * alpha / 2.0)),
+          float(np.percentile(means, 100.0 * (1.0 - alpha / 2.0))))
+
+
+def _fmt_eval(label, res, num_players):
+  """One-line report: utility vs the chance level, with an interval."""
+  mean, lo, hi = mean_ci(res.utils)
+  chance = chance_utility(num_players)
+  beats = "" if np.isnan(lo) else ("  BEATS-CHANCE" if lo > chance else
+                                   ("  BELOW-CHANCE" if hi < chance else
+                                    "  inconclusive"))
+  ci = "" if np.isnan(lo) else f" [{lo:+.3f},{hi:+.3f}]"
+  return (f"  [verdict] vs {label:<8s} utility={mean:+.3f}{ci} "
+          f"(chance {chance:+.3f}, n={res.games})  "
+          f"best_rank={np.mean(res.ranks):.2f}  win={res.wins}/{res.games}"
+          f"{beats}")
+
+
 def _eval_squad(agent, roster, agent_fn, num_actions, input_shape, device,
                 game_str, num_players, num_games, rng_seed, main_seats=(0, 1)):
   """Plays main (argmax) against a snapshots-only squad.
 
   ``main_seats`` are driven by the main policy; the remaining seats each draw a
-  snapshot from the roster. Returns (main_wins, games, main_ranks) where main
-  rank is 1..4 placement, or None if the roster has no opponents. Runs on the
-  network's raw policy (argmax over legal actions) so no PPO buffers are
-  touched.
+  snapshot from the roster. Returns an ``EvalResult``, or None if the roster has
+  no opponents. Runs on the network's raw policy (argmax over legal actions) so
+  no PPO buffers are touched.
   """
   opponents = roster.opponent_ids(exclude_main=True)
   if not opponents:
@@ -647,6 +721,7 @@ def _eval_squad(agent, roster, agent_fn, num_actions, input_shape, device,
   other_seats = [s for s in range(num_players) if s not in main_seats]
   main_wins = 0
   ranks = []
+  utils = []
   for g in range(num_games):
     env = rl_environment.Environment(
         game=pyspiel.load_game(game_str),
@@ -672,11 +747,11 @@ def _eval_squad(agent, roster, agent_fn, num_actions, input_shape, device,
         action = int(mask.argmax().item())
       time_step = env.step([action])
     rewards = np.asarray(time_step.rewards, dtype=np.float32)
-    main_best = max(rewards[s] for s in main_seats)
-    rank = 1 + int(np.sum(rewards > main_best))
+    utility, rank = main_outcome(rewards, main_seats)
     main_wins += int(rank == 1)
     ranks.append(rank)
-  return main_wins, num_games, ranks
+    utils.append(utility)
+  return EvalResult(main_wins, num_games, ranks, utils)
 
 
 def _eval_fixed_opponent(agent, bot_pick, game_str, num_players, num_games,
@@ -687,6 +762,7 @@ def _eval_fixed_opponent(agent, bot_pick, game_str, num_players, num_games,
   rng = np.random.RandomState(rng_seed)
   main_wins = 0
   ranks = []
+  utils = []
   other = [s for s in range(num_players) if s not in main_seats]
   for g in range(num_games):
     env = rl_environment.Environment(
@@ -712,11 +788,11 @@ def _eval_fixed_opponent(agent, bot_pick, game_str, num_players, num_games,
         action = bot_pick(obs, legal)
       time_step = env.step([action])
     rewards = np.asarray(time_step.rewards, dtype=np.float32)
-    main_best = max(rewards[s] for s in main_seats)
-    rank = 1 + int(np.sum(rewards > main_best))
+    utility, rank = main_outcome(rewards, main_seats)
     main_wins += int(rank == 1)
     ranks.append(rank)
-  return main_wins, num_games, ranks
+    utils.append(utility)
+  return EvalResult(main_wins, num_games, ranks, utils)
 
 
 def _run_verdict(agent, roster, agent_fn, num_actions, input_shape, device,
@@ -724,40 +800,47 @@ def _run_verdict(agent, roster, agent_fn, num_actions, input_shape, device,
   """Full fail-fast verdict: main {0,1} vs fixed Random, fixed Greedy and the
   snapshot squad. Emits one line per baseline and writes scalars to ``writer``.
   """
-  rng = np.random.RandomState(seed=None)
   bot_rng = np.random.RandomState(12345)
+  num_games = FLAGS.eval_games
   out = {}
+
+  def _record(label, key, res):
+    if res is None:
+      return
+    mean, lo, hi = mean_ci(res.utils)
+    out[key] = res
+    _emit(_fmt_eval(label, res, num_players))
+    writer.add_scalar(f"verdict/{key}_utility", mean, step)
+    writer.add_scalar(f"verdict/{key}_avg_rank", float(np.mean(res.ranks)),
+                      step)
+    writer.add_scalar(f"verdict/{key}_win_rate", res.wins / max(1, res.games),
+                      step)
+    if not np.isnan(lo):
+      writer.add_scalar(f"verdict/{key}_utility_lo", lo, step)
+      writer.add_scalar(f"verdict/{key}_utility_hi", hi, step)
+
+  # The eval seed set is fixed (independent of `step`) so measurements at
+  # different points in training are paired on the same boards; a seed that
+  # moved with the step count added board variance to every comparison.
+  eval_seed = FLAGS.seed + FLAGS.eval_seed_offset
+  writer.add_scalar("verdict/chance_utility", chance_utility(num_players), step)
   if FLAGS.eval_random:
     rand_bot = lambda _o, legal: int(
         bot_rng.choice(np.asarray(legal, dtype=np.int32)))
-    wins, games, ranks = _eval_fixed_opponent(agent, rand_bot, game_str,
-                                              num_players, num_games=8,
-                                              rng_seed=FLAGS.seed + step)
-    avg = float(np.mean(ranks))
-    out["random"] = (wins, games, avg)
-    _emit(f"  [verdict] vs Random   win {wins}/{games}  avg_rank={avg:.2f}")
-    writer.add_scalar("verdict/random_avg_rank", avg, step)
+    _record("Random", "random",
+            _eval_fixed_opponent(agent, rand_bot, game_str, num_players,
+                                 num_games=num_games, rng_seed=eval_seed))
   if FLAGS.eval_greedy:
     greedy_bot = lambda obs, legal: _greedy_pick(
         np.asarray(obs, dtype=np.float32), legal, bot_rng)
-    wins, games, ranks = _eval_fixed_opponent(agent, greedy_bot, game_str,
-                                              num_players, num_games=8,
-                                              rng_seed=FLAGS.seed + step)
-    avg = float(np.mean(ranks))
-    out["greedy"] = (wins, games, avg)
-    _emit(f"  [verdict] vs Greedy   win {wins}/{games}  avg_rank={avg:.2f}")
-    writer.add_scalar("verdict/greedy_avg_rank", avg, step)
+    _record("Greedy", "greedy",
+            _eval_fixed_opponent(agent, greedy_bot, game_str, num_players,
+                                 num_games=num_games, rng_seed=eval_seed))
   if roster is not None:
-    res = _eval_squad(agent, roster, agent_fn, num_actions, input_shape,
-                      device, game_str, num_players, num_games=8,
-                      rng_seed=FLAGS.seed + step)
-    if res is not None:
-      wins, games, ranks = res
-      avg = float(np.mean(ranks))
-      out["squad"] = (wins, games, avg)
-      _emit(f"  [verdict] vs Squad    win {wins}/{games}  avg_rank={avg:.2f}")
-      writer.add_scalar("verdict/squad_win_rate", wins / games, step)
-      writer.add_scalar("verdict/squad_avg_rank", avg, step)
+    _record("Squad", "squad",
+            _eval_squad(agent, roster, agent_fn, num_actions, input_shape,
+                        device, game_str, num_players, num_games=num_games,
+                        rng_seed=eval_seed))
   return out
 
 
@@ -772,6 +855,7 @@ def _eval_head2head(agent, opponent_net, agent_fn, num_actions, input_shape,
   other_seats = list(range(1, num_players))
   main_wins = 0
   ranks = []
+  utils = []
   for g in range(num_games):
     env = rl_environment.Environment(
         game=pyspiel.load_game(game_str),
@@ -796,10 +880,11 @@ def _eval_head2head(agent, opponent_net, agent_fn, num_actions, input_shape,
         action = int(mask.argmax().item())
       time_step = env.step([action])
     rewards = np.asarray(time_step.rewards, dtype=np.float32)
-    rank = 1 + int(np.sum(rewards > rewards[0]))
+    utility, rank = main_outcome(rewards, (0,))
     main_wins += int(rank == 1)
     ranks.append(rank)
-  return main_wins, num_games, ranks
+    utils.append(utility)
+  return EvalResult(main_wins, num_games, ranks, utils)
 
 
 def _log_update(agent, episode_returns, recent_returns, writer, update, eval_every=None):
@@ -1180,17 +1265,21 @@ def main(_):
                                                FLAGS.seed + update * 7),
                        num_players, writer, agent.total_steps_done)
         if FLAGS.eval_squad and roster is not None:
+          eval_seed = FLAGS.seed + FLAGS.eval_seed_offset
           res = _eval_squad(
               agent, roster, agent_fn, num_actions, input_shape, device,
-              _randomized_game_string(FLAGS.game, FLAGS.seed + update * 7),
-              num_players, num_games=8, rng_seed=FLAGS.seed + update * 7)
+              _randomized_game_string(FLAGS.game, eval_seed),
+              num_players, num_games=FLAGS.eval_games, rng_seed=eval_seed)
           if res is not None:
-            wins, games, ranks = res
-            avg = float(np.mean(ranks))
-            _emit(f"  [squad] main win-rate {wins}/{games}  avg_rank={avg:.2f}")
-            writer.add_scalar("squad/main_win_rate", wins / games,
+            mean, lo, hi = mean_ci(res.utils)
+            _emit(_fmt_eval("Squad", res, num_players))
+            writer.add_scalar("squad/main_utility", mean,
                               agent.total_steps_done)
-            writer.add_scalar("squad/avg_rank", avg, agent.total_steps_done)
+            writer.add_scalar("squad/main_win_rate",
+                              res.wins / max(1, res.games),
+                              agent.total_steps_done)
+            writer.add_scalar("squad/avg_rank", float(np.mean(res.ranks)),
+                              agent.total_steps_done)
     if pbar is not None:
       pbar.close()
     envs.close()
@@ -1269,33 +1358,48 @@ def main(_):
       if update % FLAGS.eval_every == 0:
         _log_update(agent, episode_returns, recent_returns, writer, update)
         if FLAGS.eval_squad and roster is not None:
+          eval_seed = FLAGS.seed + FLAGS.eval_seed_offset
           res = _eval_squad(
               agent, roster, agent_fn, num_actions, input_shape, device,
-              _randomized_game_string(FLAGS.game, FLAGS.seed + update * 7),
-              num_players, num_games=8, rng_seed=FLAGS.seed + update * 7)
+              _randomized_game_string(FLAGS.game, eval_seed),
+              num_players, num_games=FLAGS.eval_games, rng_seed=eval_seed)
           if res is not None:
-            wins, games, ranks = res
-            avg = float(np.mean(ranks))
-            _emit(f"  [squad] main win-rate {wins}/{games}  avg_rank={avg:.2f}")
-            writer.add_scalar("squad/main_win_rate", wins / games,
+            mean, lo, hi = mean_ci(res.utils)
+            _emit(_fmt_eval("Squad", res, num_players))
+            writer.add_scalar("squad/main_utility", mean,
                               agent.total_steps_done)
-            writer.add_scalar("squad/avg_rank", avg, agent.total_steps_done)
+            writer.add_scalar("squad/main_win_rate",
+                              res.wins / max(1, res.games),
+                              agent.total_steps_done)
+            writer.add_scalar("squad/avg_rank", float(np.mean(res.ranks)),
+                              agent.total_steps_done)
 
   # Sequential-exploiter closeout: report the win-rate vs the frozen victim and
   # optionally fold the trained policy into the roster.
   if FLAGS.exploit_victim and exploit_victim_net is not None:
-    wins, games, _ = _eval_head2head(
+    h2h = _eval_head2head(
         agent, exploit_victim_net, agent_fn, num_actions, input_shape, device,
         _randomized_game_string(FLAGS.game, FLAGS.seed + 777), num_players,
-        num_games=16, rng_seed=FLAGS.seed + 777)
+        num_games=FLAGS.eval_games, rng_seed=FLAGS.seed + 777)
+    win_rate = h2h.wins / max(1, h2h.games)
+    mean, lo, hi = mean_ci(h2h.utils)
+    chance = chance_utility(num_players)
     _emit(f"[exploiter] vs victim {FLAGS.exploit_victim}: "
-          f"win-rate {wins}/{games}")
-    writer.add_scalar("exploiter/victim_win_rate", wins / games,
+          f"utility={mean:+.3f} [{lo:+.3f},{hi:+.3f}] (chance {chance:+.3f})  "
+          f"win-rate {h2h.wins}/{h2h.games}")
+    writer.add_scalar("exploiter/victim_win_rate", win_rate,
                       agent.total_steps_done)
-    if FLAGS.exploit_promote and wins / games >= 0.5 and roster is not None:
+    writer.add_scalar("exploiter/victim_utility", mean, agent.total_steps_done)
+    # Promote on beating the chance level with a non-overlapping interval, not
+    # on a raw win-rate threshold: main holds 1 of num_players seats here, so
+    # an equal-strength policy already wins 1/num_players of the time.
+    promote = (not np.isnan(lo)) and lo > chance
+    if FLAGS.exploit_promote and promote and roster is not None:
       roster.add_exploiter(agent.network, agent.updates_done,
-                           FLAGS.exploit_victim, win_rate=wins / games)
-      _emit(f"[exploiter] promoted to roster")
+                           FLAGS.exploit_victim, win_rate=win_rate)
+      _emit("[exploiter] promoted to roster")
+    elif FLAGS.exploit_promote:
+      _emit("[exploiter] not promoted (did not beat chance utility)")
 
   if pbar is not None:
     pbar.close()
