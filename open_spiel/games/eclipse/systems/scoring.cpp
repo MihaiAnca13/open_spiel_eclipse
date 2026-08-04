@@ -184,7 +184,14 @@ std::array<double, MAX_PLAYERS> evaluate_final_returns(const ::State& state) {
     // Resolve ties natively using raw storage metrics
     for (size_t i = 0; i < state.players.size(); ++i) {
         if (state.players[i].eliminated) {
-            returns[i] = 0.0;
+            // Rulebook (PLAYER ELIMINATION): eliminated players still count
+            // their score. Their components are off the board by now, so use the
+            // total snapshotted at the moment of elimination. Clamped at 0 to
+            // respect MinUtility() (the traitor -2 penalty can make a snapshot
+            // negative; that pre-existing MinUtility violation is tracked
+            // separately for the live-player path).
+            const int16_t snapshot = state.players[i].vp_at_elimination;
+            returns[i] = snapshot > 0 ? static_cast<double>(snapshot) : 0.0;
             continue;
         }
 

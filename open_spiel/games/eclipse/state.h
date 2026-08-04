@@ -119,6 +119,16 @@ struct Player {
     uint8_t extra_influence_discs = 0;
     std::array<uint8_t, 3> graveyard_counts = {0, 0, 0};
     bool eliminated = false;
+    // VP total snapshotted at the moment of elimination, or -1 while alive.
+    // The rulebook (PLAYER ELIMINATION) says eliminated players still count
+    // their score, but elimination also removes their components from the
+    // board, so the score has to be captured before that happens. Returning 0
+    // for them instead (the previous behaviour) made "eliminated in round 2"
+    // and "solvent through round 8 holding three sectors" indistinguishable in
+    // the terminal payoff -- the single largest source of flatness in the
+    // learning signal, since ~95% of unskilled games end with everyone
+    // bankrupt.
+    int16_t vp_at_elimination = -1;
     uint64_t researched_techs_military = 0;  // standard MIL bits + rare bits
     uint64_t researched_techs_grid = 0;      // standard GRID bits + rare bits
     uint64_t researched_techs_nano = 0;      // standard NANO bits + rare bits
@@ -168,7 +178,7 @@ struct Player {
 
 static_assert(static_cast<size_t>(ShipType::STARBASE) + 1 == 4, "The first 4 ShipType values must map to blueprints index 0-3");
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Player, id, score, species_id, is_ai, has_passed, disks_on_sectors, disks_on_actions, disks_on_reactions, resources, colony_ships_total, colony_ships_available, orbitals, monoliths, blueprints, reputation_track, trade_rate, extra_influence_discs, graveyard_counts, eliminated, researched_techs_military, researched_techs_grid, researched_techs_nano, ambassador_tiles_held, ambassador_tiles_pending_return, traitor_held, discovery_vp_tiles_kept, parts_inventory, warp_portal_eligible, owned_minor_species, pending_artifact_key_chunks);
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Player, id, score, species_id, is_ai, has_passed, disks_on_sectors, disks_on_actions, disks_on_reactions, resources, colony_ships_total, colony_ships_available, orbitals, monoliths, blueprints, reputation_track, trade_rate, extra_influence_discs, graveyard_counts, eliminated, vp_at_elimination, researched_techs_military, researched_techs_grid, researched_techs_nano, ambassador_tiles_held, ambassador_tiles_pending_return, traitor_held, discovery_vp_tiles_kept, parts_inventory, warp_portal_eligible, owned_minor_species, pending_artifact_key_chunks);
 
 struct UpkeepState {
     enum class Step : uint8_t {

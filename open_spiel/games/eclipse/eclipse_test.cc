@@ -2116,6 +2116,55 @@ void ScoringDiscoveryVpTest() {
   SPIEL_CHECK_EQ(b.total_vp, 6);
 }
 
+void ScoringEliminatedPlayerCountsSnapshotTest() {
+  // Rulebook (PLAYER ELIMINATION): "Eliminated players count their score."
+  // Their components are off the board by the time returns are evaluated, so
+  // the total is snapshotted at elimination and read back from there. Returning
+  // 0 instead made "eliminated in round 2" indistinguishable from "solvent
+  // through round 8", which is the dominant outcome in unskilled play and
+  // flattened the terminal learning signal.
+  ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+  s.players[0].ambassador_tiles_held = 3;
+  s.players[0].discovery_vp_tiles_kept = 2;
+  const int16_t alive_total = compute_player_score(s, 0).total_vp;
+  SPIEL_CHECK_EQ(alive_total, 7);  // 3 ambassadors + 2 tiles x 2 VP
+
+  // Eliminate: snapshot first (as the upkeep bankruptcy path does), then strip.
+  s.players[0].vp_at_elimination = alive_total;
+  s.players[0].eliminated = true;
+  s.players[0].ambassador_tiles_held = 0;
+  s.players[0].discovery_vp_tiles_kept = 0;
+
+  auto returns = evaluate_final_returns(s);
+  SPIEL_CHECK_EQ(returns[0], static_cast<double>(alive_total));
+
+  // A negative snapshot (traitor penalty) is clamped so MinUtility() holds.
+  s.players[0].vp_at_elimination = -2;
+  returns = evaluate_final_returns(s);
+  SPIEL_CHECK_EQ(returns[0], 0.0);
+}
+
+void ScoringEliminationSerializationTest() {
+  // vp_at_elimination must survive the JSON round trip used by
+  // Serialize()/DeserializeState(), or a resumed or cloned state silently loses
+  // the eliminated seats' scores and they revert to 0.
+  ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+  s.players[0].vp_at_elimination = 9;
+  s.players[0].eliminated = true;
+
+  // ::Player is the eclipse struct; unqualified Player is open_spiel::Player
+  // (an int alias) inside this namespace.
+  nlohmann::json j = s.players[0];
+  ::Player restored = j.get<::Player>();
+  SPIEL_CHECK_EQ(restored.vp_at_elimination, 9);
+  SPIEL_CHECK_TRUE(restored.eliminated);
+
+  // And it reaches the payoff through evaluate_final_returns.
+  ::State t = s;
+  auto returns = evaluate_final_returns(t);
+  SPIEL_CHECK_EQ(returns[0], 9.0);
+}
+
 void ScoringAllCategoriesTest() {
   // Verify the total rolls up every category.
   ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
@@ -3026,9 +3075,11 @@ void SectorCoordMapTest() {
 }  // namespace open_spiel
 
 int main(int argc, char** argv) {
+  int tests_run = 0;
 #define RUN_TEST(test_func) \
   std::cout << "[ RUN      ] eclipse_test." << #test_func << std::endl; \
   open_spiel::eclipse::test_func(); \
+  ++tests_run; \
   std::cout << "[       OK ] eclipse_test." << #test_func << std::endl;
 
   RUN_TEST(BasicEclipseTests);
@@ -3070,6 +3121,8 @@ int main(int argc, char** argv) {
   RUN_TEST(TiedInitiativeOrderTest);
   RUN_TEST(TiedInitiativeMissileEdgeTest);
   RUN_TEST(TiedInitiativeMidRoundDeathTest);
+  RUN_TEST(ScoringEliminatedPlayerCountsSnapshotTest);
+  RUN_TEST(ScoringEliminationSerializationTest);
   RUN_TEST(ScoringAmbassadorTest);
   RUN_TEST(ScoringTraitorTest);
   RUN_TEST(ScoringDiscoveryVpTest);
@@ -3110,5 +3163,8 @@ int main(int argc, char** argv) {
   RUN_TEST(SetupRandomizationTest);
 
 #undef RUN_TEST
-  std::cout << "[==========] 76 tests passed." << std::endl;
+  // Counted, not hardcoded: the literal had drifted from the actual
+  // number of RUN_TEST entries and under-reported the suite.
+  std::cout << "[==========] " << tests_run << " tests passed."
+            << std::endl;
 }
