@@ -267,3 +267,54 @@ compare against the 408M-step run's terminal values:
     wipeout rate of 1.00; a 17k-step smoke already moves it to 1.95 and 0.94.
 - Sprint C (capacity, factored action head, distributional rank critic,
   play-time search) is untouched.
+
+---
+
+# Sprint B3 result (2026-08-05): the shaping grid, re-adjudicated
+
+13 cells, 18 min each on equal wall clock, fixed action space, judged by the
+batched held-out evaluator plus the health diagnostics. **This supersedes the
+Sprint-1 grid table entirely.**
+
+`aux=rank`, both seeds (utility vs Greedy is the discriminating column; chance is
++0.250):
+
+| phi | Greedy s1 | Greedy s2 | mean | vp_all s1 | vp_all s2 | elim_round s1/s2 |
+|---|---|---|---|---|---|---|
+| soft | +0.674 | +0.332 | **0.503** | **13.00** | **9.09** | 6.71 / 5.24 |
+| banked | +0.430 | +0.434 | 0.432 | 8.46 | 10.31 | 4.69 / 5.62 |
+| telescope | +0.279 | +0.543 | 0.411 | 8.62 | 8.90 | 4.75 / 5.10 |
+| none | +0.291 | +0.416 | 0.354 | 8.09 | 7.84 | 5.29 / 4.46 |
+| learned | +0.475 | +0.066 | 0.271 | 6.50 | 4.30 | **7.96 / 6.94** |
+
+`aux=none` (seed 1 only): none G+0.441 vp 9.41 | telescope G+0.180 vp 9.79 |
+learned G+0.117 vp 7.18.
+
+## The methodological finding, which matters more than the ranking
+
+Within-run bootstrap intervals on 64 eval games are about **+-0.06**. Run-to-run
+variance between seeds is **+-0.17 to 0.34**. The eval interval measures only
+eval-game sampling noise and *understates the real uncertainty by 3-5x*. Two
+seeds therefore separate almost nothing here: `soft` and `telescope` swap places
+between seed 1 and seed 2. Any future cell comparison needs ~8-10 seeds, or a
+paired design, before a ranking means anything. The original Sprint-1 grid drew
+conclusions from **one** seed and 8 eval games.
+
+## What is robust
+
+- **`learned` is refuted.** Worst vs Greedy and lowest vp_all in all three runs
+  it appeared in, while having the *highest* survival (elim_round 7.96 / 6.94 /
+  7.98). It reliably learns not to die without learning to score -- which is
+  exactly why it looked best on a metric that could not see VP across seats.
+  It was the pre-Sprint-A default.
+- **`soft` scores the most VP** in both its seeds, and has the best mean utility.
+  Default changed to `soft`.
+- **`telescope` is not justified as a default.** It is the only policy-invariant
+  variant and I made it the default on that basis -- but invariance means it
+  cannot supply inductive bias, only help optimization, and it measured mid-pack
+  with the highest variance of any cell. Being right about the mathematics did not
+  make it the better default. `soft` is not invariant and wins.
+- **The bankruptcy collapse is gone in every cell** (`wipeout` 0.00-0.04 against
+  1.00 for random play, `vp_all` 4-13 against ~1.3). That is Sprint A's objective
+  and action-space fixes, not the shaping choice -- no cell is anywhere near the
+  old degenerate basin.

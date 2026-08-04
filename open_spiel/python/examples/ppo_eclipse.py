@@ -18,25 +18,19 @@ This is the Stage 0.5/1 training path (see ppo_eclipse_plan.md). A single
 shared network acts for whichever seat is to move in each of `num_envs` parallel
 games (the N-player self-play generalization of open_spiel.python.pytorch.ppo).
 
-Reward shaping (default on, --phi=telescope) differences a banked-VP potential
-across each seat's *own* consecutive decisions:
+Reward shaping (default on, --phi=soft) adds banked VP plus in-progress presence
+terms (colony ships, disks on sectors, orbitals/monoliths, ambassadors), read
+straight out of the observation. Shaping is skipped on the terminal transition,
+where the true payoff is used.
 
-  phi(s)  = the acting seat's banked VP if the game ended now
-  shaped  = gamma * phi(next own decision) - phi(this one)
-
-That is the transition the discount is applied to in self-play GAE (a seat's
-chain skips the other seats' rows and applies one gamma per own decision), so it
-is the variant that actually telescopes and is therefore policy-invariant.
-Shaping is skipped on the terminal transition, where the true payoff is used.
-
-Other --phi settings are kept for comparison and are documented on the flag.
-Note in particular that --phi=learned (the previous default) differences the
-critic's value at the *next acting seat's* state against the mover's own -- two
-different players' values in a competitive game, so not a potential difference.
-It is retained because the Sprint-1 grid found it the only setting that escaped
-the degenerate all-zero-VP basin, which is worth re-testing now that the
-objective (tie-aware rank utility) and the action space (no legal-action
-truncation) are fixed.
+`soft` is the Sprint-B3 grid's pick: highest VP in both seeds and the best mean
+utility against the stronger (Greedy) baseline. It is *not* policy-invariant, and
+that seems to be the point -- the invariant variant (--phi=telescope, which
+differences a potential across each seat's own consecutive decisions and so is the
+only one that truly telescopes against the per-own-decision gamma in the
+self-play GAE) measured mid-pack, because invariance by construction cannot
+supply inductive bias. See the --phi flag for the full grid and, importantly, for
+why 2 seeds resolve much less than the eval intervals suggest.
 
 This addresses the sparse terminal reward problem without access to
 expert/human demonstration data.
@@ -168,26 +162,40 @@ flags.DEFINE_integer(
 
 flags.DEFINE_bool("shaping", True,
                   "Potential-based shaping from the obs 'score' slot.")
-flags.DEFINE_enum("phi", "telescope",
+flags.DEFINE_enum("phi", "soft",
                   ["banked", "soft", "none", "learned", "telescope"],
-                  "Potential definition.\n"
-                  "'telescope' (default) = banked-VP potential differenced "
-                  "across a seat's own consecutive decisions, i.e. the only "
-                  "variant that actually telescopes against the per-own-decision "
-                  "gamma used in the self-play GAE, and hence the only one that "
-                  "is policy-invariant.\n"
-                  "'learned' = the network's own win-value at the *next* acting "
-                  "seat's state minus its own at this one. These are different "
-                  "players' values in a competitive game, so it is not a "
-                  "potential difference; kept because the Sprint-1 grid found it "
-                  "the only setting that escaped the degenerate all-zero basin, "
-                  "which is worth re-testing now that the objective and the "
-                  "action space are fixed (requires --value_mode=win).\n"
+                  "Potential definition. Adjudicated by the Sprint-B3 grid "
+                  "(5 shapings x 18 min, 2 seeds, judged on batched held-out "
+                  "evals). Read the caveat below before trusting any ranking.\n"
+                  "'soft' (default) = banked VP plus in-progress presence terms "
+                  "(colony ships, disks on sectors, orbitals/monoliths, "
+                  "ambassadors). Highest vp_all in *both* seeds (13.00, 9.09) "
+                  "and the best mean utility vs Greedy (0.503). Not "
+                  "policy-invariant -- it biases toward expansion -- which "
+                  "appears to be useful inductive bias here.\n"
+                  "'telescope' = banked-VP potential differenced across a seat's "
+                  "own consecutive decisions. The only variant that actually "
+                  "telescopes against the per-own-decision gamma in the self-play "
+                  "GAE, so the only policy-invariant one. It was briefly the "
+                  "default on that theoretical basis, but invariance means it "
+                  "cannot supply inductive bias, and it measured mid-pack with "
+                  "high variance (Greedy 0.279 / 0.543 across seeds).\n"
                   "'banked' = current VP if the game ended now, differenced "
-                  "across env steps (does not telescope).\n"
-                  "'soft' = banked plus in-progress presence terms (colony "
-                  "ships, disks on sectors, orbitals/monoliths, ambassadors).\n"
-                  "'none' disables shaping.")
+                  "across env steps (does not telescope). Mid-pack but by far the "
+                  "most seed-stable (0.430 / 0.434), which makes it the right "
+                  "control for architecture A/Bs.\n"
+                  "'learned' = the network's own win-value at the *next* acting "
+                  "seat's state minus the mover's own -- two different players' "
+                  "values, so not a potential difference at all. REFUTED: worst "
+                  "vs Greedy and lowest vp_all in all 3 runs it appeared in, "
+                  "while having the *highest* survival, i.e. it learns not to die "
+                  "without learning to score. It was the pre-Sprint-A default, "
+                  "chosen on a metric that could not see VP.\n"
+                  "'none' disables shaping. Mid-pack.\n"
+                  "CAVEAT: within-run eval intervals are ~+-0.06 but run-to-run "
+                  "variance is +-0.17..0.34, so 2 seeds separate only 'learned is "
+                  "worst' and 'soft scores most'. Resolving the rest needs ~8-10 "
+                  "seeds per cell.")
 flags.DEFINE_float("phi_w_colony", 0.5,
                    "Soft-Phi weight per colony ship (in VP-equivalent units).")
 flags.DEFINE_float("phi_w_disk", 1.0,
