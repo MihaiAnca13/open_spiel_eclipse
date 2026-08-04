@@ -18,17 +18,28 @@ This is the Stage 0.5/1 training path (see ppo_eclipse_plan.md). A single
 shared network acts for whichever seat is to move in each of `num_envs` parallel
 games (the N-player self-play generalization of open_spiel.python.pytorch.ppo).
 
-Reward shaping (default on, --phi=learned) uses a learned potential: the
-network's own win-value prediction, which the Sprint-1 grid validated as the
-only configuration that stays monotonic against its own snapshots while
-crushing fixed Random/Greedy baselines:
+Reward shaping (default on, --phi=telescope) differences a banked-VP potential
+across each seat's *own* consecutive decisions:
 
-  phi(s)  = my-seat predicted final win-value (rank utility scale, /200)
-  shaped  = gamma * phi(s') - phi(s), added to the acting seat's transition
+  phi(s)  = the acting seat's banked VP if the game ended now
+  shaped  = gamma * phi(next own decision) - phi(this one)
 
-Shaping is skipped on the terminal transition (true payoff is used), keeping
-the potential-based telescope consistent. This addresses the sparse terminal
-reward problem without access to expert/human demonstration data.
+That is the transition the discount is applied to in self-play GAE (a seat's
+chain skips the other seats' rows and applies one gamma per own decision), so it
+is the variant that actually telescopes and is therefore policy-invariant.
+Shaping is skipped on the terminal transition, where the true payoff is used.
+
+Other --phi settings are kept for comparison and are documented on the flag.
+Note in particular that --phi=learned (the previous default) differences the
+critic's value at the *next acting seat's* state against the mover's own -- two
+different players' values in a competitive game, so not a potential difference.
+It is retained because the Sprint-1 grid found it the only setting that escaped
+the degenerate all-zero-VP basin, which is worth re-testing now that the
+objective (tie-aware rank utility) and the action space (no legal-action
+truncation) are fixed.
+
+This addresses the sparse terminal reward problem without access to
+expert/human demonstration data.
 """
 
 import collections
@@ -157,14 +168,25 @@ flags.DEFINE_integer(
 
 flags.DEFINE_bool("shaping", True,
                   "Potential-based shaping from the obs 'score' slot.")
-flags.DEFINE_enum("phi", "learned", ["banked", "soft", "none", "learned"],
-                  "Potential definition. 'learned' (default, validated by the "
-                  "Sprint-1 grid) = the network's own predicted win-value, "
-                  "i.e. a learned critic potential (requires "
-                  "--value_mode=win). 'banked' = current VP if the game ended "
-                  "now. 'soft' = banked plus in-progress presence terms (colony "
-                  "ships, disks on sectors, orbitals/monoliths, ambassadors) so "
-                  "the shaped reward is non-zero even before any VP is banked. "
+flags.DEFINE_enum("phi", "telescope",
+                  ["banked", "soft", "none", "learned", "telescope"],
+                  "Potential definition.\n"
+                  "'telescope' (default) = banked-VP potential differenced "
+                  "across a seat's own consecutive decisions, i.e. the only "
+                  "variant that actually telescopes against the per-own-decision "
+                  "gamma used in the self-play GAE, and hence the only one that "
+                  "is policy-invariant.\n"
+                  "'learned' = the network's own win-value at the *next* acting "
+                  "seat's state minus its own at this one. These are different "
+                  "players' values in a competitive game, so it is not a "
+                  "potential difference; kept because the Sprint-1 grid found it "
+                  "the only setting that escaped the degenerate all-zero basin, "
+                  "which is worth re-testing now that the objective and the "
+                  "action space are fixed (requires --value_mode=win).\n"
+                  "'banked' = current VP if the game ended now, differenced "
+                  "across env steps (does not telescope).\n"
+                  "'soft' = banked plus in-progress presence terms (colony "
+                  "ships, disks on sectors, orbitals/monoliths, ambassadors).\n"
                   "'none' disables shaping.")
 flags.DEFINE_float("phi_w_colony", 0.5,
                    "Soft-Phi weight per colony ship (in VP-equivalent units).")
@@ -340,6 +362,17 @@ class EclipsePPOAgent(nn.Module):
     """Scalar win value from shared features (sparse learn path)."""
     return self.rank_value(self.critic[-1](features))
 
+  def value_bounds(self):
+    """(min, max) representable value.
+
+    ``rank_value`` is a convex combination of RANK_UTILITY, so the critic is
+    *hard bounded* to [-0.5, 1.0]. Any value target outside that band is
+    unfittable no matter how long training runs, which caps explained variance
+    and corrupts every advantage derived from it. PPO reports the out-of-band
+    fraction so a shaping choice that pushes returns out of range is visible.
+    """
+    return min(self.RANK_UTILITY), max(self.RANK_UTILITY)
+
   def get_aux(self, features):
     """Auxiliary-head raw outputs keyed by task name."""
     return {name: head(features) for name, head in self.aux_heads.items()}
@@ -419,10 +452,18 @@ SCORE_DIVISOR = 200.0  # total_vp normalized by /200 in the tensor.
 
 
 def opponent_block_index(seat, viewer):
-  """Block index of `seat` as seen by `viewer`, matchingC++ opponent ordering."""
-  if seat < viewer:
-    return seat
-  return seat - 1
+  """Block index of `seat` within `viewer`'s opponent blocks, or None.
+
+  Returns None when ``seat == viewer``: that seat occupies the *self* block, not
+  an opponent block. Previously this returned ``seat - 1`` in that case, reading
+  a different player's slots -- and for seat 0, index -1, i.e. ``OPP_BASE - 25``,
+  which is unrelated observation memory. The same-seat case is common in Eclipse
+  because macro actions (explore -> place -> rotate, build/upgrade/move
+  internals) keep one seat acting for several consecutive steps.
+  """
+  if seat == viewer:
+    return None
+  return seat if seat < viewer else seat - 1
 
 
 # Eclipse flat action-id layout (see eclipse.cc anonymous namespace):
@@ -1225,10 +1266,17 @@ def main(_):
   # Shaping configuration resolved once per run.
   win_squash = FLAGS.value_mode == "win"
   phi_learned = FLAGS.phi == "learned"
+  # 'telescope' is handled inside PPO (post_step(phi=...)): the delta spans a
+  # seat's own consecutive decisions, so it cannot be computed from a single
+  # env step here.
+  phi_telescope = FLAGS.phi == "telescope"
   if phi_learned and not win_squash:
     raise ValueError("--phi=learned requires --value_mode=win (the learned "
                      "potential is the network's win value).")
   phi_mode = FLAGS.phi
+  if FLAGS.shaping and phi_telescope:
+    _emit("shaping: telescope phi (banked VP, differenced across each seat's "
+          "own consecutive decisions)")
 
   # Per-player episode return logging.
   episode_returns = {i: [] for i in range(FLAGS.num_envs)}
@@ -1273,7 +1321,7 @@ def main(_):
           _refresh_lineups(agent, matchmaker, roster, agent_fn, num_actions,
                            input_shape, device, step_arrays.dones)
         shaped = np.zeros(FLAGS.num_envs, dtype=np.float32)
-        if FLAGS.shaping and phi_mode != "none":
+        if FLAGS.shaping and phi_mode not in ("none", "telescope"):
           seats = np.asarray(agent.last_seats)
           new_seats = step_arrays.seats.astype(np.int64)
           not_done = ~step_arrays.dones
@@ -1284,14 +1332,28 @@ def main(_):
             phi_next = _phi_wins(agent, step_arrays.obs, device)
             shaped[not_done] = FLAGS.gamma * phi_next[not_done] - phi_prev[not_done]
           else:
-            # Vectorized: one obs gather for all envs' next potential instead
-            # of a per-env Python loop.
-            blocks = OPP_BASE + np.where(seats < new_seats, seats, seats - 1) * 25
-            phi_next = potential_opponent_vec(step_arrays.obs, blocks, win_squash)
+            # phi(s') for the acting seat. When a *different* seat is now to
+            # move, read the mover's opponent block in that viewer's obs; when
+            # the same seat keeps acting (common in Eclipse macro actions:
+            # explore -> place -> rotate, build/upgrade/move internals) the
+            # mover is the viewer, so read its self slots. The block-relative
+            # soft-phi offsets differ between the two layouts, hence two calls
+            # rather than one index trick. Previously the same-seat case read
+            # seat-1's block -- and for seat 0, unrelated memory at OPP_BASE-25.
+            same = seats == new_seats
+            blocks = OPP_BASE + np.where(seats < new_seats, seats,
+                                         np.maximum(seats - 1, 0)) * 25
+            phi_next = potential_opponent_vec(step_arrays.obs, blocks,
+                                              win_squash)
+            if same.any():
+              phi_next = np.where(
+                  same, potential_self_vec(step_arrays.obs, win_squash),
+                  phi_next)
             shaped[not_done] = FLAGS.gamma * phi_next[not_done] - phi_prev[not_done]
         t2b = time.perf_counter() if _tm is not None else None
-        agent.post_step_np(step_arrays.rewards, step_arrays.dones,
-                           shaped_reward=shaped)
+        agent.post_step_np(
+            step_arrays.rewards, step_arrays.dones, shaped_reward=shaped,
+            phi=(phi_prev if (FLAGS.shaping and phi_telescope) else None))
         donor_idx = np.flatnonzero(step_arrays.dones)
         for i in donor_idx:
           ret = float(step_arrays.rewards[i][0])
@@ -1377,7 +1439,7 @@ def main(_):
                            input_shape, device, done)
 
         shaped = np.zeros(FLAGS.num_envs, dtype=np.float32)
-        if FLAGS.shaping and phi_mode != "none":
+        if FLAGS.shaping and phi_mode not in ("none", "telescope"):
           seats = agent.last_seats
           if phi_learned:
             new_obs = np.stack([
@@ -1395,13 +1457,20 @@ def main(_):
                 continue
               viewer = ts.observations["current_player"]
               seat = seats[i]
+              obs_viewer = ts.observations["info_state"][viewer]
               k = opponent_block_index(seat, viewer)
-              phi_next = potential_opponent(
-                  ts.observations["info_state"][viewer], OPP_BASE + k * 25,
-                  win_squash)
+              if k is None:
+                # Same seat still to move: it is the viewer, so read its self
+                # slots rather than an opponent block.
+                phi_next = potential_self(obs_viewer, win_squash)
+              else:
+                phi_next = potential_opponent(obs_viewer, OPP_BASE + k * 25,
+                                              win_squash)
               shaped[i] = FLAGS.gamma * phi_next - phi_prev[i]
 
-        agent.post_step(reward, done, shaped_reward=shaped.tolist())
+        agent.post_step(
+            reward, done, shaped_reward=shaped.tolist(),
+            phi=(phi_prev if (FLAGS.shaping and phi_telescope) else None))
 
         # Episode return logging.
         for i, ts in enumerate(unreset):

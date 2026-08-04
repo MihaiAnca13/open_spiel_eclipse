@@ -389,6 +389,11 @@ class PPO(nn.Module):
     # scatter in _learn_core. Writing them one scalar at a time would issue a
     # GPU kernel per (env, seat) per episode in the hot loop.
     self._closeout_writes = []
+    # Per-own-decision potential shaping (post_step(phi=...)): the last
+    # (row, phi) recorded for each (env, seat), and the deferred additive reward
+    # writes that pair a seat's consecutive decisions.
+    self._pending_phi = [{} for _ in range(self.num_envs)]
+    self._shaping_adds = []
 
     # Auxiliary-head buffers (self-play/win mode only): per (step, env) target
     # vectors and availability masks for the aux tasks. Targets are back-filled
@@ -624,8 +629,13 @@ class PPO(nn.Module):
             if not self._acts_trainable(i, s):
               continue
             # Packed legal cols for this env's seat (no dense mask materialized);
-            # matches the format stored by step_np.
-            la = ts.observations["legal_actions"][seats[i]]
+            # matches the format stored by step_np. NOTE: index time_step[i] --
+            # reading the leaked loop variable from the packing loop above meant
+            # every env got the *last* env's timestep, which under
+            # players="current" is None for any env whose acting seat differs, so
+            # cols came out empty. An empty legal set gives a zero-length segment
+            # in _segment_lse_entropy -> lse = -inf -> NaN entropy -> NaN loss.
+            la = time_step[i].observations["legal_actions"][s]
             cols = (np.asarray(la, dtype=np.int64) if la else
                     np.zeros(0, dtype=np.int64))
             self._last_decision[i][s] = (
@@ -808,8 +818,51 @@ class PPO(nn.Module):
           (env_idx, seat, obs_, cols_, int(action_), logprob_, value_,
            target, ex_aux, ex_aux_mask))
 
+  def _record_phi(self, env_idx, seat, row, phi):
+    """Pairs a seat's consecutive decisions into one telescoping shaped reward.
+
+    Potential-based shaping needs ``gamma * phi(s') - phi(s)`` across the same
+    transition the discount is applied to. In self-play GAE that transition is
+    between a seat's *own* consecutive decisions (a seat's chain skips the other
+    seats' rows and applies one gamma per own decision) -- not between
+    consecutive env steps. Shaping across env steps therefore does not telescope,
+    and comparing potentials of *different* seats (what --phi=learned does) is
+    not a potential difference at all.
+
+    So the delta is attributed to the seat's *previous* decision row, which is
+    only known once the seat acts again -- hence the deferred additive write.
+
+    A seat whose previous decision fell in an earlier rollout batch has no row
+    left to credit, so that one delta per (env, seat) per batch is dropped.
+    """
+    prev = self._pending_phi[env_idx].get(seat)
+    self._pending_phi[env_idx][seat] = (row, float(phi))
+    if prev is None:
+      return
+    prev_row, prev_phi = prev
+    if prev_row >= self._episode_start_row[env_idx]:
+      self._shaping_adds.append(
+          (prev_row, env_idx, self.gamma * float(phi) - prev_phi))
+
   def _apply_closeout_writes(self):
-    """Flushes deferred terminal rewards/dones as one vectorized scatter."""
+    """Flushes deferred shaping adds, then terminal rewards/dones.
+
+    Order matters: a terminal row's reward is the true payoff, so the overwrite
+    must land after any additive shaping on that row.
+    """
+    if self._shaping_adds:
+      rows = np.fromiter((w[0] for w in self._shaping_adds), dtype=np.int64,
+                         count=len(self._shaping_adds))
+      envs = np.fromiter((w[1] for w in self._shaping_adds), dtype=np.int64,
+                         count=len(self._shaping_adds))
+      vals = np.fromiter((w[2] for w in self._shaping_adds), dtype=np.float32,
+                         count=len(self._shaping_adds))
+      self.rewards.index_put_(
+          (torch.from_numpy(rows).to(self.device),
+           torch.from_numpy(envs).to(self.device)),
+          torch.from_numpy(vals).to(self.device),
+          accumulate=True)
+      self._shaping_adds = []
     if not self._closeout_writes:
       return
     rows = np.fromiter((w[0] for w in self._closeout_writes), dtype=np.int64,
@@ -859,7 +912,7 @@ class PPO(nn.Module):
     return (torch.from_numpy(tgt[seat]).to(self.device),
             torch.ones((self.num_aux,), dtype=torch.float32).to(self.device))
 
-  def post_step(self, reward, done, shaped_reward=None):
+  def post_step(self, reward, done, shaped_reward=None, phi=None):
     """Stores rewards/dones for the action taken at the current batch step.
 
     Args:
@@ -884,10 +937,13 @@ class PPO(nn.Module):
         rew_row[i] = (self._terminal_target(rvec, seat) if is_done else
                       rvec[seat] + shaped)
         done_row[i] = 1.0 if is_done else 0.0
+        if phi is not None and not is_done:
+          self._record_phi(i, seat, row, phi[i])
         if is_done:
           self._backfill_aux(i, row, rvec)
           self._attribute_terminal(i, row, rvec, seat)
           self._last_decision[i].clear()
+          self._pending_phi[i].clear()
           self._episode_start_row[i] = row + 1
       self.rewards[row] = torch.from_numpy(rew_row).to(self.device)
       self.dones[row] = torch.from_numpy(done_row).to(self.device)
@@ -898,7 +954,7 @@ class PPO(nn.Module):
     self.total_steps_done += self.num_envs
     self.cur_batch_idx += 1
 
-  def post_step_np(self, reward, done, shaped_reward=None):
+  def post_step_np(self, reward, done, shaped_reward=None, phi=None):
     """Array-native ``post_step``; identical semantics, numpy inputs.
 
     Args:
@@ -929,6 +985,10 @@ class PPO(nn.Module):
             terminal[i] = reward_np[i, int(seats[i])]
       rew_row = np.where(done_np, terminal, chosen + shaped).astype(np.float32)
       done_row = done_np.astype(np.float32)
+      if phi is not None:
+        for i in range(self.num_envs):
+          if not done_np[i]:
+            self._record_phi(i, int(seats[i]), row, phi[i])
       # Terminal-closeout bookkeeping only for envs that actually finished.
       for i in done_idx:
         rvec = reward_np[i]
@@ -936,6 +996,7 @@ class PPO(nn.Module):
         self._backfill_aux(i, row, rvec)
         self._attribute_terminal(int(i), row, rvec, seat)
         self._last_decision[i].clear()
+        self._pending_phi[i].clear()
         self._episode_start_row[i] = row + 1
       self.rewards[row] = torch.from_numpy(rew_row).to(self.device)
       self.dones[row] = torch.from_numpy(done_row).to(self.device)
@@ -1127,10 +1188,13 @@ class PPO(nn.Module):
     e = (logits_e - m[rows_gpu]).exp()
     s = torch.zeros(b_mb, device=self.device)
     s.scatter_add_(0, rows_gpu, e)
-    lse = m + s.log()
     num = torch.zeros(b_mb, device=self.device)
     num.scatter_add_(0, rows_gpu, e * logits_e)
-    entropy = lse - num / s
+    # See _segment_lse_entropy: guard the zero-legal-entry row against NaN.
+    empty = s == 0
+    safe_s = torch.where(empty, torch.ones_like(s), s)
+    lse = torch.where(empty, torch.zeros_like(m), m + safe_s.log())
+    entropy = torch.where(empty, torch.zeros_like(m), lse - num / safe_s)
     # log_prob of the chosen action: logit_a = features @ W[action] + b[action]
     wa = weight[actions_mb]          # (B_mb, H)
     logit_a = (features * wa).sum(-1) + bias[actions_mb]
@@ -1154,10 +1218,17 @@ class PPO(nn.Module):
     e = (logits_e - m[rows]).exp()
     s = torch.zeros(batch_size, device=self.device)
     s.scatter_add_(0, rows, e)
-    lse = m + s.log()
     num = torch.zeros(batch_size, device=self.device)
     num.scatter_add_(0, rows, e * logits_e)
-    entropy = lse - num / s
+    # A row with no legal entries leaves m = -inf and s = 0, giving
+    # lse = -inf and entropy = -inf - 0/0 = NaN, which poisons the whole loss.
+    # It should not happen (a decision node always has a legal action) but a
+    # bookkeeping slip upstream has produced it twice, and silently, so the
+    # degenerate row contributes zero rather than NaN.
+    empty = s == 0
+    safe_s = torch.where(empty, torch.ones_like(s), s)
+    lse = torch.where(empty, torch.zeros_like(m), m + safe_s.log())
+    entropy = torch.where(empty, torch.zeros_like(m), lse - num / safe_s)
     return lse, entropy
 
   def _gumbel_sample(self, logits_e, rows, cols, batch_size):
@@ -1525,6 +1596,17 @@ class PPO(nn.Module):
     # zero. Observed in the Sprint-1 grid: aux_loss ~8-11 (unnormalized raw-VP
     # targets) against pg_loss ~1e-3, i.e. the optimizer was almost entirely
     # doing VP regression. Anything sustained above ~0.5 here wants attention.
+    # Fraction of value targets the critic cannot represent. A bounded value
+    # head (e.g. an expected-rank-utility read-out, hard-limited to
+    # [-0.5, 1.0]) silently caps explained variance once shaping pushes returns
+    # outside its range, and every advantage built on it is then wrong.
+    out_of_band = 0.0
+    bounds = getattr(self.network, "value_bounds", None)
+    if callable(bounds):
+      lo, hi = bounds()
+      out_of_band = float(
+          ((b_returns < lo) | (b_returns > hi)).float().mean().detach())
+
     _pg = abs(float(pg_loss.detach()))
     _vf = self.value_coef * abs(float(v_loss.detach()))
     _aux = self.aux_coef * abs(float(aux_loss.detach())) if aux_hit else 0.0
@@ -1537,6 +1619,7 @@ class PPO(nn.Module):
         "entropy": float(entropy_loss.detach()),
         "aux_loss": float(aux_loss.detach()),
         "aux_share": aux_share,
+        "returns_out_of_band": out_of_band,
         "clipfrac": float(np.mean(clipfracs)),
         "old_kl": float(old_approx_kl.detach()),
         "kl": float(approx_kl.detach()),
@@ -1560,6 +1643,8 @@ class PPO(nn.Module):
                                self.total_steps_done)
         self.writer.add_scalar("losses/aux_share", aux_share,
                                self.total_steps_done)
+      self.writer.add_scalar("losses/returns_out_of_band", out_of_band,
+                             self.total_steps_done)
       self.writer.add_scalar("losses/old_approx_kl", old_approx_kl.item(),
                              self.total_steps_done)
       self.writer.add_scalar("losses/approx_kl", approx_kl.item(),
@@ -1577,8 +1662,11 @@ class PPO(nn.Module):
     self.updates_done += 1
     self.cur_batch_idx = 0
     # Rows are overwritten from 0 next batch, so every env's in-progress episode
-    # now starts at row 0 again.
+    # now starts at row 0 again, and any pending potential refers to a row that
+    # no longer exists.
     self._episode_start_row[:] = 0
+    for pending in self._pending_phi:
+      pending.clear()
 
   def anneal_rank_vp_beta(self, update, num_total_updates, beta_to=0.0):
     """Linearly moves the VP escape bonus from its initial slope to ``beta_to``.

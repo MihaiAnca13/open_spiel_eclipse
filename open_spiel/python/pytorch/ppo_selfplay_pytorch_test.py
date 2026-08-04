@@ -189,6 +189,110 @@ class PPOSelfPlayTest(absltest.TestCase):
     self.assertGreater(boundaries_checked, 0)
 
 
+class _SparseDummy(torch.nn.Module):
+  """Minimal shared-trunk network, enough for PPO's buffer bookkeeping."""
+
+  def __init__(self, num_actions, observation_shape, device):
+    del device
+    super().__init__()
+    self.num_actions = num_actions
+    size = int(np.prod(observation_shape))
+    self.shared = torch.nn.Sequential(torch.nn.Linear(size, 8), torch.nn.Tanh())
+    self.actor = torch.nn.Sequential(self.shared,
+                                     torch.nn.Linear(8, num_actions))
+    self.critic = torch.nn.Sequential(self.shared, torch.nn.Linear(8, 1))
+    self.register_buffer("mask_value", torch.tensor(-1e6))
+
+  def get_value(self, x):
+    return self.critic(x).view(-1)
+
+
+class TelescopeShapingTest(absltest.TestCase):
+  """post_step(phi=...) must produce an exact potential-based telescope."""
+
+  GAMMA = 0.97
+
+  def test_shaped_reward_telescopes_across_own_decisions(self):
+    """shaped(r_j) == gamma*phi(next own decision) - phi(this one).
+
+    Potential-based shaping is only policy-invariant when the difference spans
+    the same transition the discount does. In self-play GAE that is a seat's own
+    consecutive decisions -- its chain skips other seats' rows -- so differencing
+    across env steps (--phi=banked/soft) does not telescope, and differencing two
+    *different* seats' values (--phi=learned) is not a potential difference at
+    all.
+    """
+    steps, num_envs, num_players = 12, 2, 3
+    agent = PPO(input_shape=(4,), num_actions=3, num_players=num_players,
+                num_envs=num_envs, steps_per_batch=steps, num_minibatches=2,
+                gamma=self.GAMMA, device="cpu", agent_fn=_SparseDummy,
+                value_mode="vp")
+
+    rng = np.random.RandomState(0)
+    seats = np.array([[0, 1], [1, 2], [0, 0], [2, 1], [0, 2], [1, 0],
+                      [2, 1], [0, 0], [1, 1], [2, 2], [0, 0], [1, 1]])
+    phis = rng.uniform(0, 5, size=(steps, num_envs)).astype(np.float32)
+    dones = np.zeros((steps, num_envs), dtype=bool)
+    dones[7, 1] = True  # env 1 ends mid-batch; env 0 never terminates
+    payoff = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+
+    for row in range(steps):
+      seat_row = torch.from_numpy(seats[row].astype(np.int64))
+      agent.players_cpu[row] = seat_row
+      agent.players[row] = seat_row
+      agent.trainable_cpu[row] = True
+      agent.trainable[row] = True
+      agent.cur_batch_idx = row
+      rewards = np.zeros((num_envs, num_players), dtype=np.float32)
+      if dones[row].any():
+        rewards[1] = payoff
+      agent.post_step_np(rewards, dones[row], phi=phis[row])
+
+    agent._apply_closeout_writes()
+    stored = agent.rewards.numpy()
+
+    checked = 0
+    for env in range(num_envs):
+      episode_start = 0
+      for row in range(steps):
+        if dones[row, env]:
+          episode_start = row + 1
+      for seat in range(num_players):
+        rows = [r for r in range(steps) if seats[r, env] == seat]
+        for cur, nxt in zip(rows, rows[1:]):
+          if cur < episode_start or nxt < episode_start or dones[cur, env]:
+            continue
+          checked += 1
+          self.assertAlmostEqual(
+              float(stored[cur, env]),
+              self.GAMMA * phis[nxt, env] - phis[cur, env], places=4,
+              msg=f"env {env} seat {seat}: rows {cur}->{nxt} do not telescope")
+    self.assertGreater(checked, 5)
+
+    # The terminal transition carries the true payoff, never a shaping delta.
+    terminal_seat = int(seats[7, 1])
+    self.assertAlmostEqual(float(stored[7, 1]), float(payoff[terminal_seat]),
+                           places=5)
+
+  def test_pending_potentials_do_not_survive_the_batch(self):
+    """A potential recorded in a previous batch has no row left to credit."""
+    agent = PPO(input_shape=(4,), num_actions=3, num_players=2, num_envs=1,
+                steps_per_batch=2, num_minibatches=1, gamma=self.GAMMA,
+                device="cpu", agent_fn=_SparseDummy, value_mode="vp")
+    for row in range(2):
+      agent.players_cpu[row] = torch.zeros(1, dtype=torch.long)
+      agent.players[row] = torch.zeros(1, dtype=torch.long)
+      agent.trainable_cpu[row] = True
+      agent.trainable[row] = True
+      agent.cur_batch_idx = row
+      agent.post_step_np(np.zeros((1, 2), dtype=np.float32),
+                         np.zeros(1, dtype=bool),
+                         phi=np.array([1.0], dtype=np.float32))
+    agent.learn_np(np.zeros((1, 4), dtype=np.float32), np.zeros(1, np.int32))
+    self.assertEqual(agent._pending_phi[0], {})
+    self.assertEqual(agent._shaping_adds, [])
+
+
 if __name__ == "__main__":
   random.seed(SEED)
   torch.manual_seed(SEED)
