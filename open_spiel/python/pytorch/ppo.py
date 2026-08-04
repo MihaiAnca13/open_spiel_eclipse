@@ -1597,12 +1597,18 @@ class PPO(nn.Module):
     explained_var = np.nan if var_y == 0 else 1 - np.var(y_true -
                                                           y_pred) / var_y
 
-    # Share of the total loss magnitude contributed by the auxiliary term. The
-    # gradient is clipped globally (max_grad_norm over all parameters), so an
-    # aux term that dwarfs the policy term rescales the policy gradient toward
-    # zero. Observed in the Sprint-1 grid: aux_loss ~8-11 (unnormalized raw-VP
-    # targets) against pg_loss ~1e-3, i.e. the optimizer was almost entirely
-    # doing VP regression. Anything sustained above ~0.5 here wants attention.
+    # Share of the total loss magnitude contributed by the auxiliary term.
+    #
+    # Caveat on interpretation: pg_loss is the *clipped surrogate mean*, which
+    # sits near zero at ratio ~ 1 by construction, so this ratio is only a proxy
+    # for the thing that matters (the gradient-norm share). Measured on Eclipse
+    # at aux_coef=0.1 the two agreed closely -- loss share 0.76-0.85 against a
+    # gradient-norm share of 82% aux / 11% policy / 6% value -- so it is a useful
+    # early warning, but confirm with an explicit gradient measurement before
+    # concluding anything from it. Note also that the mechanism is direct
+    # gradient dominance on the shared trunk, not grad-norm clipping: the
+    # combined norm stayed under max_grad_norm throughout.
+    # Anything sustained above ~0.5 here wants attention.
     # Fraction of value targets the critic cannot represent. A bounded value
     # head (e.g. an expected-rank-utility read-out, hard-limited to
     # [-0.5, 1.0]) silently caps explained variance once shaping pushes returns

@@ -230,11 +230,25 @@ compare against the 408M-step run's terminal values:
 
 ## Still open
 
-- `losses/aux_share` reads ~0.71, i.e. the aux term is most of the loss
-  magnitude and (via global grad-norm clipping) is still suppressing the policy
-  gradient: `approx_kl` 0.002 and `clipfrac` 0.004 remain well below healthy PPO
-  bands (~0.01-0.03 / ~0.05-0.2). `--aux_coef` wants lowering by ~10x; this is
-  the first thing Sprint B should settle.
+- **`aux_coef` — investigated, left alone, tune in Sprint B.** `losses/aux_share`
+  reads ~0.83, and an explicit gradient-norm measurement on rows carrying aux
+  targets confirms the split is aux 82% / policy 11% / value 6%: the shared trunk
+  is trained mostly as a rank predictor. Two corrections to the obvious reading,
+  both measured:
+  (a) the mechanism is *not* grad-norm clipping crowding out the policy gradient
+  -- the combined norm (~0.34) stays under `--max_grad_norm` (0.5), so clipping
+  never engages; it would be direct gradient dominance on the shared trunk.
+  (b) an A/B at `--aux_coef=0.01` cut the aux share to 0.31 and changed nothing:
+  `approx_kl` and `clipfrac` stayed at ~0, and VP at matched steps was slightly
+  *worse* (11.97 vs 12.72 @1.65M). So aux dominance is not what is holding the
+  policy back, and the default is unchanged.
+- **Low `approx_kl` / `clipfrac` is probably not a pathology.** They sit near 0 in
+  every configuration tried, but entropy falls 1.96 -> 0.78 and VP climbs
+  1.75 -> 13.7 over the same window, so the policy is plainly learning; the trust
+  region simply never binds. That points at the step size being conservative
+  (a candidate for raising `--learning_rate`) rather than at broken updates.
+  Contrast the 408M-step run, where entropy was *flat* at 0.53 -- that was the
+  real no-learning signature, not the clipfrac value.
 - Sprint B (batched evaluator over a fixed held-out seed set, Elo, the
   elimination-rate / rounds-survived / per-action-family diagnostics) and the
   re-adjudication of the six grid cells are **not done**. The Sprint-1 ranking

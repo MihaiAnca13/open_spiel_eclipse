@@ -217,8 +217,20 @@ flags.DEFINE_float(
     "If >= 0, linearly anneal --rank_vp_beta to this value over the run, "
     "recovering the pure constant-sum 'finish first' objective once real "
     "outcomes differ. -1 keeps beta constant.")
-flags.DEFINE_float("aux_coef", 0.1,
-                   "Weight of auxiliary-head losses (e.g. final-VP regression).")
+flags.DEFINE_float(
+    "aux_coef", 0.1,
+    "Weight of auxiliary-head losses. Measured at this value on a minibatch of "
+    "rows carrying aux targets, the gradient-norm share is aux 82% / policy 11% "
+    "/ value 6%, i.e. the shared trunk is trained mostly as a rank predictor. "
+    "That looked like a problem, but an A/B at 0.01 (aux share 0.31) left "
+    "approx_kl and clipfrac unchanged and was slightly *behind* on VP at matched "
+    "steps, so the dominance is not in fact suppressing policy learning and the "
+    "value is left as-is pending the Sprint-B sweep. Two things worth knowing if "
+    "you tune it: the mechanism would be direct gradient dominance on the shared "
+    "trunk, not grad-norm clipping (the combined norm ~0.34 stays under "
+    "--max_grad_norm 0.5, so clipping never engages); and the aux loss is a mean "
+    "over *masked* rows, so its effective weight scales with how many episodes "
+    "closed in the batch.")
 flags.DEFINE_enum(
     "aux_target_mode", "rank", ["vp", "rank", "both", "none"],
     "Aux-head regression target. 'rank' (default) = per-seat tie-aware rank "
