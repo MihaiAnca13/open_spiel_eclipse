@@ -535,17 +535,21 @@ class PPO(nn.Module):
         self.legal_cols_packed[row] = np.asarray(cols_p, dtype=np.int64)
 
         if self.selfplay:
-          mask_cpu = legal_actions_mask_cpu.numpy()
           action_np = action.detach().cpu().numpy()
-          logprob_np = logprob.detach().cpu().numpy()
+          logprob_np = logprob.detach().cpu().numpy().ravel()
           value_np = value.detach().cpu().numpy().ravel()
           for i, s in enumerate(seats):
             if not self._acts_trainable(i, s):
               continue
+            # Packed legal cols for this env's seat (no dense mask materialized);
+            # matches the format stored by step_np.
+            la = ts.observations["legal_actions"][seats[i]]
+            cols = (np.asarray(la, dtype=np.int64) if la else
+                    np.zeros(0, dtype=np.int64))
             self._last_decision[i][s] = (
-                obs_cpu[i].copy(), mask_cpu[i].copy(), int(action_np[i]),
+                obs_cpu[i].copy(), cols, int(action_np[i]),
                 float(logprob_np[i]), float(value_np[i]))
-          action_view = action_np
+          action_view = action.detach().cpu().numpy()
         else:
           action_view = action.detach().cpu().tolist()
 
@@ -592,19 +596,26 @@ class PPO(nn.Module):
         ]
     with torch.no_grad():
       obs = torch.from_numpy(obs_cpu).to(self.device)
-      legal_actions_mask = self._build_mask(
-          self.num_envs, mask_rows, mask_cols)
-      action, logprob, _, value, probs = self._act_batch(
-          obs, legal_actions_mask, seats)
-
       row = self.cur_batch_idx
+      if self._sparse_supported():
+        # Sparse acting: no dense (num_envs, num_actions) logits/mask built or
+        # transferred; sample from packed legal entries only. ``legal_actions_mask``
+        # buffer is left stale (unused by the sparse learn path).
+        action, logprob, _, value = self._act_sparse(
+            obs, mask_rows, mask_cols, seats)
+      else:
+        legal_actions_mask = self._build_mask(
+            self.num_envs, mask_rows, mask_cols)
+        action, logprob, _, value, _ = self._act_batch(
+            obs, legal_actions_mask, seats)
+        self.legal_actions_mask[row] = legal_actions_mask
+
       self.players[row] = torch.from_numpy(
           seats.astype(np.int64)).to(self.device)
       self.players_cpu[row] = torch.from_numpy(seats.astype(np.int64))
       self.trainable[row] = torch.tensor(
           [self._acts_trainable(i, int(s)) for i, s in enumerate(seats)],
           dtype=torch.bool).to(self.device)
-      self.legal_actions_mask[row] = legal_actions_mask
       self.obs[row] = obs
       self.actions[row] = action
       self.logprobs[row] = logprob
@@ -617,24 +628,33 @@ class PPO(nn.Module):
         action_np = action.detach().cpu().numpy()
         logprob_np = logprob.detach().cpu().numpy().ravel()
         value_np = value.detach().cpu().numpy().ravel()
-        # Precompute per-env column offsets so each env's mask row can be
-        # sliced out of the packed legal buffers without a scan.
-        lens = np.bincount(mask_rows, minlength=self.num_envs)
+        # Per-env column offsets so each env's legal cols can be sliced out of
+        # the packed buffers (no dense 11k mask build) for the closeout sample.
+        lens = np.bincount(np.asarray(mask_rows, dtype=np.int64),
+                           minlength=self.num_envs)
         offsets = np.zeros(self.num_envs, dtype=np.int64)
         np.cumsum(lens[:-1], out=offsets[1:])
         for i, s in enumerate(seats):
           if not self._acts_trainable(i, int(s)):
             continue
-          n = lens[i]
-          mrow = np.zeros(self.num_actions, dtype=bool)
-          if n:
-            mrow[mask_cols[offsets[i]:offsets[i] + n]] = True
-          self._last_decision[i][s] = (
-              obs_cpu[i].copy(), mrow, int(action_np[i]),
+          n = int(lens[i])
+          cols = (mask_cols[offsets[i]:offsets[i] + n].astype(np.int64)
+                  if n else np.zeros(0, dtype=np.int64))
+          self._last_decision[i][int(s)] = (
+              obs_cpu[i].copy(), cols, int(action_np[i]),
               float(logprob_np[i]), float(value_np[i]))
         return np.asarray(action_np, dtype=np.int32)
 
       return action.detach().cpu().numpy().astype(np.int32)
+
+  def _resolve_last_decision(self, env_idx, seat):
+    """(obs, packed_cols, action, logprob, value) for a seat's last decision.
+
+    Returns the committed CPU record stored per step by ``step``/``step_np``
+    (obs copy + legal cols + action + logprob + value). None if the seat never
+    had a recorded decision.
+    """
+    return self._last_decision[env_idx].get(seat)
 
   def _terminal_target(self, per_agent_reward, seat):
     """Scalar terminal target for `seat` given the per-agent payoff vector."""
@@ -725,14 +745,14 @@ class PPO(nn.Module):
           for s in range(self.num_players):
             if s == seat:
               continue
-            pair = self._last_decision[i].get(s)
+            pair = self._resolve_last_decision(i, s)
             if pair is None:
               continue
-            obs_, mask_, action_, logprob_, value_ = pair
+            obs_, cols_, action_, logprob_, value_ = pair
             # Independent closed-out sample: target = seat's terminal payoff.
             ex_aux, ex_aux_mask = self._extras_aux(rvec, s)
             self._extra_samples.append(
-                (i, s, obs_, mask_, int(action_), logprob_, value_,
+                (i, s, obs_, cols_, int(action_), logprob_, value_,
                  self._terminal_target(rvec, s), ex_aux, ex_aux_mask))
           self._last_decision[i].clear()
       self.rewards[row] = torch.from_numpy(rew_row).to(self.device)
@@ -756,32 +776,41 @@ class PPO(nn.Module):
     """
     row = self.cur_batch_idx
     if self.selfplay:
-      seats = self.players_cpu[row].tolist()
-      rew_row = np.empty(self.num_envs, dtype=np.float32)
-      done_row = np.empty(self.num_envs, dtype=np.float32)
+      seats = self.players_cpu[row].numpy()
+      reward_np = np.asarray(reward, dtype=np.float32)      # (N, num_players)
+      done_np = np.asarray(done, dtype=bool)
       shaped = (np.zeros(self.num_envs, dtype=np.float32)
                 if shaped_reward is None else shaped_reward)
-      for i in range(self.num_envs):
-        rvec = reward[i]
-        seat = seats[i]
-        is_done = bool(done[i])
-        rew_row[i] = (self._terminal_target(rvec, seat) if is_done else
-                      rvec[seat] + shaped[i])
-        done_row[i] = 1.0 if is_done else 0.0
-        if is_done:
-          self._backfill_aux(i, row, rvec)
-          for s in range(self.num_players):
-            if s == seat:
-              continue
-            pair = self._last_decision[i].get(s)
-            if pair is None:
-              continue
-            obs_, mask_, action_, logprob_, value_ = pair
-            ex_aux, ex_aux_mask = self._extras_aux(rvec, s)
-            self._extra_samples.append(
-                (i, s, obs_, mask_, int(action_), logprob_, value_,
-                 self._terminal_target(rvec, s), ex_aux, ex_aux_mask))
-          self._last_decision[i].clear()
+      chosen = reward_np[np.arange(self.num_envs), seats]
+      terminal = np.empty(self.num_envs, dtype=np.float32)
+      terminal.fill(0.0)
+      done_idx = np.flatnonzero(done_np)
+      if done_idx.size:
+        if self.value_mode == "win":
+          for i in done_idx:
+            terminal[i] = rank_utility(reward_np[i], int(seats[i]))
+        else:
+          for i in done_idx:
+            terminal[i] = reward_np[i, int(seats[i])]
+      rew_row = np.where(done_np, terminal, chosen + shaped).astype(np.float32)
+      done_row = done_np.astype(np.float32)
+      # Terminal-closeout bookkeeping only for envs that actually finished.
+      for i in done_idx:
+        rvec = reward_np[i]
+        seat = int(seats[i])
+        self._backfill_aux(i, row, rvec)
+        for s in range(self.num_players):
+          if s == seat:
+            continue
+          pair = self._resolve_last_decision(i, s)
+          if pair is None:
+            continue
+          obs_, cols_, action_, logprob_, value_ = pair
+          ex_aux, ex_aux_mask = self._extras_aux(rvec, s)
+          self._extra_samples.append(
+              (i, s, obs_, cols_, int(action_), logprob_, value_,
+               self._terminal_target(rvec, s), ex_aux, ex_aux_mask))
+        self._last_decision[i].clear()
       self.rewards[row] = torch.from_numpy(rew_row).to(self.device)
       self.dones[row] = torch.from_numpy(done_row).to(self.device)
     else:
@@ -895,8 +924,8 @@ class PPO(nn.Module):
       step * num_envs + env, or the filtered index when ``remap`` is given).
     cols: (M,) int64 legal action id.
     counts: (B_total,) int64 legal count per sample.
-    Extras (terminal closeouts) are appended at the end, their cols derived
-    from the stored dense mask.
+    Extras (terminal closeouts) are appended at the end, their cols carried
+    directly as packed legal column indices (slot ``e[3]``).
 
     Args:
       remap: optional (steps * num_envs,) int64 array mapping old global
@@ -927,7 +956,7 @@ class PPO(nn.Module):
     if extra_base is None:
       extra_base = self.steps_per_batch * num_envs
     for k, e in enumerate(self._extra_samples):
-      cols_all.append(np.nonzero(e[3])[0].astype(np.int64))
+      cols_all.append(e[3].astype(np.int64))
       rows_all.append(
           np.full(len(cols_all[-1]), extra_base + k, dtype=np.int64))
     if rows_all:
@@ -982,6 +1011,122 @@ class PPO(nn.Module):
     logprob = logit_a - lse
     return logprob, entropy
 
+  def _pack_logits(self, features, rows, cols, weight, bias):
+    """Logits at the legal entries. ``rows`` are torch sample indices (a
+    row's entries contiguous); ``cols`` the legal action ids; ``features`` the
+    shared features for the batch. Returns (M,) logits and the (M,) rows torch
+    tensor for downstream segment ops."""
+    w = weight[cols]                 # (M, H)
+    f = features[rows]               # (M, H)
+    return (f * w).sum(-1) + bias[cols]
+
+  def _segment_lse_entropy(self, logits_e, rows, batch_size):
+    """Per-row logsumexp + entropy of the (masked) distribution given the
+    (M,) logits of legal entries grouped contiguously by row."""
+    m = torch.full((batch_size,), float("-inf"), device=self.device)
+    m.scatter_reduce_(0, rows, logits_e, reduce="amax", include_self=False)
+    e = (logits_e - m[rows]).exp()
+    s = torch.zeros(batch_size, device=self.device)
+    s.scatter_add_(0, rows, e)
+    lse = m + s.log()
+    num = torch.zeros(batch_size, device=self.device)
+    num.scatter_add_(0, rows, e * logits_e)
+    entropy = lse - num / s
+    return lse, entropy
+
+  def _gumbel_sample(self, logits_e, rows, cols, batch_size):
+    """Sample one action per row by Gumbel-max over the legal entries.
+
+    The Gumbel trick is exactly how ``torch.distributions.Categorical.sample``
+    samples (logits + Gumbel argmax), so this reproduces the dense
+    ``CategoricalMasked`` distribution without materializing the full
+    (B, num_actions) logits. Returns (B,) chosen action ids.
+    """
+    g = -torch.log(-torch.log(torch.rand(logits_e.shape, device=self.device)))
+    u = logits_e + g
+    mx = torch.full((batch_size,), float("-inf"), device=self.device)
+    mx.scatter_reduce_(0, rows, u, reduce="amax", include_self=False)
+    maxima = (u == mx[rows])
+    chosen = torch.full((batch_size,), self.num_actions, dtype=torch.long,
+                        device=self.device)
+    mrows = rows[maxima]
+    mcols = cols[maxima]
+    if mrows.size(0):
+      # 'amin' over the (measure-zero) tied maxima columns; include_self=False
+      # so healthy rows get exactly one valid col.
+      chosen.scatter_reduce_(0, mrows, mcols, reduce="amin", include_self=False)
+    return chosen
+
+  def _log_prob_chosen(self, features, chosen, lse, weight, bias):
+    """(B,) log_prob of ``chosen`` under the masked distribution with known
+    per-row logsumexp ``lse``."""
+    wa = weight[chosen]
+    logit_a = (features * wa).sum(-1) + bias[chosen]
+    return logit_a - lse
+
+  def _act_sparse(self, obs, mask_rows, mask_cols, seats):
+    """Array-native, sparse acting: sample from packed legal logits only.
+
+    Replaces the dense (num_envs, num_actions) logits + mask + softmax in the
+    per-step hot loop with one shared-trunk forward plus logits/entropy/logprob
+    computed only at the legal columns. Distributionally identical to dense
+    ``CategoricalMasked`` sampling (Gumbel-max over the legal set). League
+    traffic is dispatched per policy as in ``_act_batch``.
+
+    Args:
+      obs: (num_envs, obs_size) torch tensor on device.
+      mask_rows: (M,) numpy env (== row) indices per legal action.
+      mask_cols: (M,) numpy legal action ids.
+      seats: (num_envs,) numpy acting seat per env.
+
+    Returns:
+      (action, logprob, entropy, value) torch tensors, each (num_envs,).
+    """
+    batch = obs.shape[0]
+    if batch == 0:
+      return (torch.zeros(0, dtype=torch.long, device=self.device),
+              torch.zeros(0, device=self.device),
+              torch.zeros(0, device=self.device),
+              torch.zeros(0, device=self.device))
+    if not self.league:
+      nets = [self.network]
+      groups = [np.arange(batch)]
+    else:
+      pids = np.asarray(
+          [self.lineup[i, int(seats[i])] for i in range(batch)])
+      groups = [np.flatnonzero(pids == p) for p in np.unique(pids)]
+      nets = [self.networks[p] for p in np.unique(pids)]
+    action = torch.empty(batch, dtype=torch.long, device=self.device)
+    logprob = torch.empty(batch, device=self.device)
+    entropy = torch.empty(batch, device=self.device)
+    values = torch.empty(batch, device=self.device)
+    for net, idx in zip(nets, groups):
+      n = len(idx)
+      features = net.shared(obs[idx])
+      # Remap env (== row) indices in this group to local 0..n-1.
+      local = np.full(batch, -1, dtype=np.int64)
+      local[idx] = np.arange(n)
+      keep = local[mask_rows] >= 0
+      rows_np = local[mask_rows[keep]]
+      cols = torch.from_numpy(mask_cols[keep].astype(np.int64)).to(self.device)
+      rows = torch.from_numpy(rows_np.astype(np.int64)).to(self.device)
+      logits_e = self._pack_logits(features, rows, cols,
+                                   net.actor[-1].weight, net.actor[-1].bias)
+      chosen = self._gumbel_sample(logits_e, rows, cols, n)
+      lse, ent = self._segment_lse_entropy(logits_e, rows, n)
+      lp = self._log_prob_chosen(features, chosen, lse,
+                                 net.actor[-1].weight, net.actor[-1].bias)
+      if hasattr(net, "value_from_features"):
+        v = net.value_from_features(features).view(-1)
+      else:
+        v = net.critic[-1](features).view(-1)
+      idx_t = torch.from_numpy(idx.astype(np.int64)).to(self.device)
+      action[idx_t] = chosen
+      logprob[idx_t] = lp
+      entropy[idx_t] = ent
+      values[idx_t] = v
+    return action, logprob, entropy, values
+
   def _value_from_features(self, features):
     """Scalar value from shared features (sparse-path value computation).
 
@@ -1027,8 +1172,6 @@ class PPO(nn.Module):
     if n_extra:
       ex_obs = torch.Tensor(np.array([e[2] for e in self._extra_samples])
                            ).to(self.device)
-      ex_mask = torch.BoolTensor(
-          np.array([e[3] for e in self._extra_samples])).to(self.device)
       ex_actions = torch.tensor([e[4]
                                  for e in self._extra_samples]).to(self.device)
       ex_logprobs = torch.tensor([e[5]
@@ -1038,7 +1181,14 @@ class PPO(nn.Module):
       ex_targets = torch.tensor([e[7]
                                  for e in self._extra_samples]).to(self.device)
       b_obs = torch.cat([b_obs, ex_obs])
-      b_legal_actions_mask = torch.cat([b_legal_actions_mask, ex_mask])
+      if not use_sparse:
+        # Dense-path extras mask, reconstructed from packed legal cols.
+        ex_mask = torch.zeros((n_extra, self.num_actions), dtype=torch.bool,
+                              device=self.device)
+        for k, e in enumerate(self._extra_samples):
+          if e[3].size:
+            ex_mask[k, torch.from_numpy(e[3]).to(self.device)] = True
+        b_legal_actions_mask = torch.cat([b_legal_actions_mask, ex_mask])
       b_actions = torch.cat([b_actions, ex_actions])
       b_logprobs = torch.cat([b_logprobs, ex_logprobs])
       b_values = torch.cat([b_values, ex_values])
@@ -1068,7 +1218,11 @@ class PPO(nn.Module):
       # trainable-only and are appended after all main rows.
       nb_main = int(keep_train.cpu().numpy().sum())
       b_obs = b_obs[keep]
-      b_legal_actions_mask = b_legal_actions_mask[keep]
+      if not use_sparse:
+        # In the sparse path b_legal_actions_mask is unused (packed legal
+        # structures drive the loss) and has no extra rows, so it must not be
+        # indexed by the extras-extended keep vector.
+        b_legal_actions_mask = b_legal_actions_mask[keep]
       b_actions = b_actions[keep]
       b_logprobs = b_logprobs[keep]
       b_values = b_values[keep]

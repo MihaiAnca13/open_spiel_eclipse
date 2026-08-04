@@ -18,10 +18,12 @@ This is the Stage 0.5/1 training path (see ppo_eclipse_plan.md). A single
 shared network acts for whichever seat is to move in each of `num_envs` parallel
 games (the N-player self-play generalization of open_spiel.python.pytorch.ppo).
 
-Reward shaping (optional, default on) uses the banked-VP potential that the game
-already writes into the observation tensor's "score" slots:
+Reward shaping (default on, --phi=learned) uses a learned potential: the
+network's own win-value prediction, which the Sprint-1 grid validated as the
+only configuration that stays monotonic against its own snapshots while
+crushing fixed Random/Greedy baselines:
 
-  phi(s)  = my-seat banked VP (current VP if the game ended right now, /200)
+  phi(s)  = my-seat predicted final win-value (rank utility scale, /200)
   shaped  = gamma * phi(s') - phi(s), added to the acting seat's transition
 
 Shaping is skipped on the terminal transition (true payoff is used), keeping
@@ -45,6 +47,7 @@ from open_spiel.python.examples.league import Matchmaker
 from open_spiel.python.examples.league import PolicyRoster
 from open_spiel.python.pytorch.ppo import PPO
 from open_spiel.python.pytorch.ppo import layer_init
+from open_spiel.python.pytorch.ppo import rank_utility
 from open_spiel.python.vector_env import SyncVectorEnv
 
 try:
@@ -72,6 +75,9 @@ class NullWriter(object):
   def add_scalar(self, *args, **kwargs):
     pass
 
+  def flush(self):
+    pass
+
   def close(self):
     pass
 
@@ -97,6 +103,17 @@ flags.DEFINE_bool("cuda", True, "If True, cuda will be enabled by default.")
 flags.DEFINE_bool("torch_deterministic", True, "Deterministic torch.")
 flags.DEFINE_string("track", None, "Experiment tracking run id.")
 flags.DEFINE_string("run_dir", "runs", "Root dir for tensorboard runs.")
+flags.DEFINE_bool(
+    "no_tb", False,
+    "Disable the tensorboard writer entirely (NullWriter). Use for raw "
+    "throughput benchmarking; no scalar diagnostics are persisted.")
+flags.DEFINE_bool(
+    "timing", False,
+    "Emit per-phase wall-clock timings (ms/env-step) for the async loop "
+    "every --timing_every updates. Phases: act (PPO step_np), env "
+    "(AsyncVectorEnv.step_np nearest draw), shape (potential), learn.")
+flags.DEFINE_integer("timing_every", 10,
+                     "Cadence (updates) for --timing per-phase report.")
 
 flags.DEFINE_bool(
     "randomize_races", True,
@@ -137,14 +154,15 @@ flags.DEFINE_integer(
 
 flags.DEFINE_bool("shaping", True,
                   "Potential-based shaping from the obs 'score' slot.")
-flags.DEFINE_enum("phi", "banked", ["banked", "soft", "none", "learned"],
-                  "Potential definition. 'banked' = current VP if the game "
-                  "ended now. 'soft' = banked plus in-progress presence terms "
-                  "(colony ships, disks on sectors, orbitals/monoliths, "
-                  "ambassadors) so the shaped reward is non-zero even before "
-                  "any VP is banked. 'none' disables shaping. 'learned' = the "
-                  "network's own predicted final VP (win-value based), i.e. a "
-                  "learned potential (requires --value_mode=win).")
+flags.DEFINE_enum("phi", "learned", ["banked", "soft", "none", "learned"],
+                  "Potential definition. 'learned' (default, validated by the "
+                  "Sprint-1 grid) = the network's own predicted win-value, "
+                  "i.e. a learned critic potential (requires "
+                  "--value_mode=win). 'banked' = current VP if the game ended "
+                  "now. 'soft' = banked plus in-progress presence terms (colony "
+                  "ships, disks on sectors, orbitals/monoliths, ambassadors) so "
+                  "the shaped reward is non-zero even before any VP is banked. "
+                  "'none' disables shaping.")
 flags.DEFINE_float("phi_w_colony", 0.5,
                    "Soft-Phi weight per colony ship (in VP-equivalent units).")
 flags.DEFINE_float("phi_w_disk", 1.0,
@@ -163,6 +181,11 @@ flags.DEFINE_enum("value_mode", "win", ["win", "vp"],
                   "behaviour).")
 flags.DEFINE_float("aux_coef", 0.1,
                    "Weight of auxiliary-head losses (e.g. final-VP regression).")
+flags.DEFINE_enum(
+    "aux_target_mode", "vp", ["vp", "rank", "none"],
+    "Aux-head regression target. 'vp' = raw final VP / 200 (legacy, saturates "
+    "to 0 on zero-VP games). 'rank' = per-seat rank-utility (nonzero signal "
+    "even when every seat banks ~0 VP). 'none' disables the aux head.")
 flags.DEFINE_float("learning_rate", 2.5e-4, "Learning rate.")
 flags.DEFINE_integer("num_minibatches", 4, "Number of minibatches.")
 flags.DEFINE_integer("update_epochs", 4, "Number of updates epochs.")
@@ -199,6 +222,19 @@ flags.DEFINE_bool(
     "eval_squad", False,
     "At the eval cadence, pit main against a snapshots-only eval squad and "
     "report win rate / avg rank (no heuristics in v1).")
+flags.DEFINE_integer(
+    "verdict_every_sec", 1800,
+    "Minimum wall-clock gap (seconds) between full verdict evals (main "
+    "seats 0,1 vs fixed Random / fixed Greedy / snapshot squad).")
+flags.DEFINE_integer(
+    "max_seconds", 0,
+    "Hard wall-clock cap (seconds) for fail-fast runs: at this deadline emit "
+    "a final verdict + snapshot the roster and exit 0. 0 disables.")
+flags.DEFINE_bool("eval_random", True,
+                  "In the verdict eval, include main vs fixed-Random avg rank.")
+flags.DEFINE_bool("eval_greedy", True,
+                  "In the verdict eval, include main vs fixed priority-Greedy "
+                  "avg rank (random fallback outside the heuristic's coverage).")
 flags.DEFINE_string(
     "exploit_victim", None,
     "Sequential-exploiter mode: train this run's policy ONLY against the "
@@ -314,6 +350,88 @@ def opponent_block_index(seat, viewer):
   return seat - 1
 
 
+# Eclipse flat action-id layout (see eclipse.cc anonymous namespace):
+#   0=PASS, 1=RESEARCH start, 3-26 standard techs, 27-74 rare techs,
+#   75=BUILD start, 83=EXPLORE start, 84/85 place/discard, 86-91 rotations,
+#   92/93 claim yes/no, 94/95 discovery/2VP, 96-99 keep-ish, 100=stop,
+#   101-325 explore zone == galaxy cell, 326-331 TRADE, 332-5731 COLONY_SHIP,
+#   5732=INFLUENCE start, 7539=UPGRADE start, 8502=MOVE start.
+ACTION_EXPLORE_START = 83
+ACTION_EXPLORE_ZONE_START = 101
+ACTION_EXPLORE_ZONE_END = 325
+ACTION_BUILD_START = 75
+ACTION_UPGRADE_START = 7539
+ACTION_RESEARCH_START = 1
+ACTION_INFLUENCE_START = 5732
+ACTION_MOVE_START = 8502
+ACTION_COLONY_START = 332
+ACTION_COLONY_END = 5731
+ACTION_PASS = 0
+
+GALAXY_BASE = 45 + 135 + 125  # obs block C starts after A+B0+5 opponent blocks.
+CELL_STRIDE = 6
+
+
+def _greedy_pick(obs, legal, rng):
+  """Priority-heuristic move for the fixed Greedy baseline.
+
+  Only the action-phase macro starts and the explore sub-pipeline get typed
+  preferences; any state the heuristic has no rule for (chance, combat,
+  upkeep, bankruptcy, diplomacy, reaction, trade, build/upgrade/move choice
+  internals, etc.) falls back to a uniformly random legal action.
+  """
+  s = set(int(a) for a in legal)
+  zone_in = lambda a: ACTION_EXPLORE_ZONE_START <= a <= ACTION_EXPLORE_ZONE_END
+
+  if ACTION_EXPLORE_START in s:
+    return ACTION_EXPLORE_START
+  if 84 in s and 85 in s:
+    return 84  # place over discard
+  rot = next((a for a in range(86, 92) if a in s), None)
+  if rot is not None:
+    return rot
+  if 92 in s and 93 in s:
+    return 92  # take control over decline
+  if 94 in s and 95 in s:
+    return 95  # immediate 2 banked VP over a discovery draw
+  keep = next((a for a in range(96, 100) if a in s), None)
+  if keep is not None:
+    return keep
+  zones = [int(a) for a in legal if zone_in(a)]
+  if zones:
+    return _best_expand_zone(obs, zones)
+  for pid in (ACTION_BUILD_START, ACTION_UPGRADE_START, ACTION_RESEARCH_START,
+              ACTION_INFLUENCE_START, ACTION_MOVE_START):
+    if pid in s:
+      return pid
+  colony = [int(a) for a in legal
+            if ACTION_COLONY_START <= a <= ACTION_COLONY_END]
+  if colony:
+    return int(rng.choice(np.asarray(colony)))
+  if ACTION_PASS in s:
+    return ACTION_PASS
+  return int(rng.choice(np.asarray(legal)))
+
+
+def _best_expand_zone(obs, zones):
+  """Among legal explore-zone cells, prefer empty + uncontested, else lowest.
+
+  No galaxy geometry is decoded here, so this is an approximation: fewer
+  enemy units, tie-break lowest cell index (deterministic).
+  """
+  best = None
+  best_key = None
+  for a in zones:
+    c = a - ACTION_EXPLORE_ZONE_START
+    o = CELL_STRIDE * c
+    enemy = obs[GALAXY_BASE + o + 4] if GALAXY_BASE + o + 4 < len(obs) else 0.0
+    key = (enemy, c)
+    if best_key is None or key < best_key:
+      best_key = key
+      best = a
+  return best
+
+
 def phi_from_obs_slot(obs_full, slot):
   """Banked-VP potential read from a score slot of a full observation."""
   return float(obs_full[slot]) * SCORE_DIVISOR
@@ -397,6 +515,49 @@ def potential_opponent(obs_viewer, block, win_squash=False):
   return _squash_win(v) if (win_squash and mode in ("banked", "soft")) else v
 
 
+def potential_self_vec(obs_batch, win_squash=False):
+  """Vectorized ``potential_self`` over a (num_envs, obs) batch.
+
+  Column reads only, no per-env Python loop (hot shaping path).
+  """
+  mode, (w_col, w_disk, w_struct, w_amb), _ = _phi_cached()
+  if mode == "banked":
+    v = obs_batch[:, SCORE_SELF_SLOT] * SCORE_DIVISOR
+  elif mode == "soft":
+    v = (
+        obs_batch[:, SCORE_SELF_SLOT] * SCORE_DIVISOR + w_col * obs_batch[:, 66] * 12.0
+        + w_disk * obs_batch[:, 67] * 16.0
+        + w_struct * (obs_batch[:, 72] * 10.0 + obs_batch[:, 73] * 6.0)
+        + w_amb * obs_batch[:, 74] * 3.0)
+  else:
+    v = np.zeros(obs_batch.shape[0], dtype=np.float32)
+  if win_squash and mode in ("banked", "soft"):
+    return np.clip(v / SCORE_DIVISOR, -0.5, 1.0)
+  return v
+
+
+def potential_opponent_vec(obs_batch, blocks, win_squash=False):
+  """Vectorized ``potential_opponent``; ``blocks`` is (num_envs,) int of the
+  opponent's obs block start per row."""
+  n = obs_batch.shape[0]
+  ar = np.arange(n)
+  mode, (w_col, w_disk, w_struct, w_amb), _ = _phi_cached()
+  if mode == "banked":
+    v = obs_batch[ar, blocks] * SCORE_DIVISOR
+  elif mode == "soft":
+    v = (
+        obs_batch[ar, blocks] * SCORE_DIVISOR + w_col * obs_batch[ar, blocks + 12] * 12.0
+        + w_disk * obs_batch[ar, blocks + 13] * 16.0
+        + w_struct * (obs_batch[ar, blocks + 14] * 10.0
+                      + obs_batch[ar, blocks + 15] * 6.0)
+        + w_amb * obs_batch[ar, blocks + 11] * 3.0)
+  else:
+    v = np.zeros(n, dtype=np.float32)
+  if win_squash and mode in ("banked", "soft"):
+    return np.clip(v / SCORE_DIVISOR, -0.5, 1.0)
+  return v
+
+
 def _phi_wins(agent, obs_np, device):
   """Win-value (expected rank-utility) of the mover for each row's own obs."""
   with torch.no_grad():
@@ -443,9 +604,9 @@ def _refresh_lineups(agent, matchmaker, roster, agent_fn, num_actions,
     agent.networks[pid] = networks
 
 
-def _maybe_snapshot(agent, roster, update):
+def _maybe_snapshot(agent, roster, update, force=False):
   """Captures the main policy into the roster on the snapshot cadence."""
-  if update > 0 and update % FLAGS.snapshot_every == 0:
+  if force or (update > 0 and update % FLAGS.snapshot_every == 0):
     roster.record_main(agent.network, update)
     roster.add_snapshot(agent.network, update)
     roster.prune(keep_recent=4, keep_spaced=4)
@@ -503,6 +664,88 @@ def _eval_squad(agent, roster, agent_fn, num_actions, input_shape, device,
     main_wins += int(rank == 1)
     ranks.append(rank)
   return main_wins, num_games, ranks
+
+
+def _eval_fixed_opponent(agent, bot_pick, game_str, num_players, num_games,
+                         rng_seed, main_seats=(0, 1)):
+  """Main (argmax) on ``main_seats`` vs one fixed bot policy on every other
+  seat. ``bot_pick(obs, legal) -> int``. Returns (main_wins, num_games,
+  main_ranks); run on the raw argmax policy, no PPO buffers touched."""
+  rng = np.random.RandomState(rng_seed)
+  main_wins = 0
+  ranks = []
+  other = [s for s in range(num_players) if s not in main_seats]
+  for g in range(num_games):
+    env = rl_environment.Environment(
+        game=pyspiel.load_game(game_str),
+        chance_event_sampler=rl_environment.ChanceEventSampler(seed=rng_seed + g),
+        observation_type=rl_environment.ObservationType.OBSERVATION,
+        observations_as_numpy=True)
+    time_step = env.reset(players="current")
+    while not time_step.last():
+      seat = int(time_step.observations["current_player"])
+      obs = time_step.observations["info_state"][seat]
+      legal = time_step.observations["legal_actions"][seat]
+      if seat in main_seats:
+        with torch.no_grad():
+          x = torch.from_numpy(np.asarray(obs, dtype=np.float32))[None].to(
+              agent.device)
+          logits = agent.network.actor(x)
+          mask = torch.full((1, logits.size(1)), -1e6, device=agent.device)
+          la = np.asarray(legal, dtype=np.int64)
+          mask[0, la] = logits[0, la]
+          action = int(mask.argmax().item())
+      else:
+        action = bot_pick(obs, legal)
+      time_step = env.step([action])
+    rewards = np.asarray(time_step.rewards, dtype=np.float32)
+    main_best = max(rewards[s] for s in main_seats)
+    rank = 1 + int(np.sum(rewards > main_best))
+    main_wins += int(rank == 1)
+    ranks.append(rank)
+  return main_wins, num_games, ranks
+
+
+def _run_verdict(agent, roster, agent_fn, num_actions, input_shape, device,
+                 game_str, num_players, writer, step):
+  """Full fail-fast verdict: main {0,1} vs fixed Random, fixed Greedy and the
+  snapshot squad. Emits one line per baseline and writes scalars to ``writer``.
+  """
+  rng = np.random.RandomState(seed=None)
+  bot_rng = np.random.RandomState(12345)
+  out = {}
+  if FLAGS.eval_random:
+    rand_bot = lambda _o, legal: int(
+        bot_rng.choice(np.asarray(legal, dtype=np.int32)))
+    wins, games, ranks = _eval_fixed_opponent(agent, rand_bot, game_str,
+                                              num_players, num_games=8,
+                                              rng_seed=FLAGS.seed + step)
+    avg = float(np.mean(ranks))
+    out["random"] = (wins, games, avg)
+    _emit(f"  [verdict] vs Random   win {wins}/{games}  avg_rank={avg:.2f}")
+    writer.add_scalar("verdict/random_avg_rank", avg, step)
+  if FLAGS.eval_greedy:
+    greedy_bot = lambda obs, legal: _greedy_pick(
+        np.asarray(obs, dtype=np.float32), legal, bot_rng)
+    wins, games, ranks = _eval_fixed_opponent(agent, greedy_bot, game_str,
+                                              num_players, num_games=8,
+                                              rng_seed=FLAGS.seed + step)
+    avg = float(np.mean(ranks))
+    out["greedy"] = (wins, games, avg)
+    _emit(f"  [verdict] vs Greedy   win {wins}/{games}  avg_rank={avg:.2f}")
+    writer.add_scalar("verdict/greedy_avg_rank", avg, step)
+  if roster is not None:
+    res = _eval_squad(agent, roster, agent_fn, num_actions, input_shape,
+                      device, game_str, num_players, num_games=8,
+                      rng_seed=FLAGS.seed + step)
+    if res is not None:
+      wins, games, ranks = res
+      avg = float(np.mean(ranks))
+      out["squad"] = (wins, games, avg)
+      _emit(f"  [verdict] vs Squad    win {wins}/{games}  avg_rank={avg:.2f}")
+      writer.add_scalar("verdict/squad_win_rate", wins / games, step)
+      writer.add_scalar("verdict/squad_avg_rank", avg, step)
+  return out
 
 
 def _eval_head2head(agent, opponent_net, agent_fn, num_actions, input_shape,
@@ -632,17 +875,19 @@ def main(_):
       "cuda" if torch.cuda.is_available() and FLAGS.cuda else "cpu")
 
   run_name = f"{FLAGS.game}__{FLAGS.seed}__{datetime.now().strftime('%Y%m%d%H%M%S')}"
-  if SummaryWriter is None:
+  if SummaryWriter is None or FLAGS.no_tb:
     writer = NullWriter()
   elif FLAGS.track:
     writer = SummaryWriter(os.path.join(FLAGS.run_dir, FLAGS.track))
   else:
     writer = SummaryWriter(os.path.join(FLAGS.run_dir, run_name))
+  # Clean scalar hparam table (absl flag descriptors are not the values).
+  cfg = {k: v for k, v in sorted(FLAGS.flag_values_dict().items())
+         if not k.startswith("_")}
   writer.add_text(
       "hyperparameters",
       "|param|value|\n|-|-|\n%s" %
-      ("\n".join([f"|{key}|{value}|" for key, value in
-                  sorted(vars(FLAGS).items())])),
+      ("\n".join([f"|{key}|{value}|" for key, value in cfg.items()])),
   )
 
   # Each env gets its own seeded game instance (distinct rng_seed) so setup
@@ -701,9 +946,15 @@ def main(_):
       writer=writer,
       agent_fn=make_agent_fn(FLAGS.nn_width, FLAGS.nn_depth),
       value_mode=FLAGS.value_mode,
-      aux_tasks=["final_vp"] if FLAGS.aux_coef > 0 else None,
-      aux_target_fn=(lambda rvec: np.asarray(rvec, dtype=np.float32).reshape(
-          -1, 1) / 200.0),
+      aux_tasks=["final_vp"] if (FLAGS.aux_coef > 0 and
+                                 FLAGS.aux_target_mode != "none") else None,
+      aux_target_fn=(None if FLAGS.aux_target_mode == "none" else
+                     (lambda rvec, m=FLAGS.aux_target_mode:
+                      (np.asarray(rvec, dtype=np.float32).reshape(-1, 1)
+                       if m == "vp" else
+                       np.asarray([
+                           rank_utility(rvec, s) for s in range(len(rvec))
+                       ], dtype=np.float32).reshape(-1, 1)))),
       aux_coef=FLAGS.aux_coef,
   )
 
@@ -813,54 +1064,82 @@ def main(_):
   if use_async:
     _ = envs.reset(players="current")
     step_arrays = envs.reset_np()
+    _tm = (np.zeros(5, dtype=np.float64) if FLAGS.timing else None)
+    _tm_scale = 1.0 / max(1, FLAGS.num_steps)
+    _run_t0 = time.time()
+    _last_verdict_ts = [_run_t0]
+    _deadline = (_run_t0 + FLAGS.max_seconds
+                 if FLAGS.max_seconds and FLAGS.max_seconds > 0 else None)
     for update in range(num_updates):
+      if _deadline is not None and time.time() >= _deadline:
+        _emit(f"[gate] {FLAGS.max_seconds}s hard deadline reached "
+              f"(update {update}, steps={agent.total_steps_done})")
+        if FLAGS.league:
+          _maybe_snapshot(agent, roster, update, force=True)
+        _run_verdict(agent, roster, agent_fn, num_actions, input_shape,
+                     device, _randomized_game_string(FLAGS.game,
+                                                     FLAGS.seed + update * 7),
+                     num_players, writer, agent.total_steps_done)
+        writer.flush()
+        break
+      if _tm is not None:
+        _tm[:] = 0.0
       for step in range(FLAGS.num_steps):
+        t0 = time.perf_counter() if _tm is not None else None
         acts = agent.step_np(step_arrays)
+        t1 = time.perf_counter() if _tm is not None else None
         obs_batch = agent.last_obs_batch
         if FLAGS.shaping and phi_learned:
           phi_prev = _phi_wins(agent, obs_batch, device)
         else:
-          phi_prev = np.fromiter(
-              (potential_self(obs_batch[i], win_squash)
-               for i in range(FLAGS.num_envs)),
-              dtype=np.float32, count=FLAGS.num_envs)
+          phi_prev = potential_self_vec(obs_batch, win_squash)
+        t1b = time.perf_counter() if _tm is not None else None
         step_arrays = envs.step_np(acts, reset_if_done=True)
+        t2 = time.perf_counter() if _tm is not None else None
         if FLAGS.league:
           _refresh_lineups(agent, matchmaker, roster, agent_fn, num_actions,
                            input_shape, device, step_arrays.dones)
         shaped = np.zeros(FLAGS.num_envs, dtype=np.float32)
         if FLAGS.shaping and phi_mode != "none":
-          seats = agent.last_seats
-          new_seats = step_arrays.seats
+          seats = np.asarray(agent.last_seats)
+          new_seats = step_arrays.seats.astype(np.int64)
+          not_done = ~step_arrays.dones
           if phi_learned:
             # Learned potential: win-value of whoever is to act next. Computed
             # from each row's own observation at s' (same-scale as the mover's
             # own obs at s), so the telescope is an approximation.
             phi_next = _phi_wins(agent, step_arrays.obs, device)
-            for i in range(FLAGS.num_envs):
-              if step_arrays.dones[i]:
-                continue
-              shaped[i] = FLAGS.gamma * phi_next[i] - phi_prev[i]
+            shaped[not_done] = FLAGS.gamma * phi_next[not_done] - phi_prev[not_done]
           else:
-            for i in range(FLAGS.num_envs):
-              if step_arrays.dones[i]:
-                continue
-              viewer = int(new_seats[i])
-              seat = seats[i]
-              k = opponent_block_index(seat, viewer)
-              phi_next = potential_opponent(step_arrays.obs[i],
-                                            OPP_BASE + k * 25, win_squash)
-              shaped[i] = FLAGS.gamma * phi_next - phi_prev[i]
+            # Vectorized: one obs gather for all envs' next potential instead
+            # of a per-env Python loop.
+            blocks = OPP_BASE + np.where(seats < new_seats, seats, seats - 1) * 25
+            phi_next = potential_opponent_vec(step_arrays.obs, blocks, win_squash)
+            shaped[not_done] = FLAGS.gamma * phi_next[not_done] - phi_prev[not_done]
+        t2b = time.perf_counter() if _tm is not None else None
         agent.post_step_np(step_arrays.rewards, step_arrays.dones,
                            shaped_reward=shaped)
-        for i in range(FLAGS.num_envs):
-          if step_arrays.dones[i]:
-            ret = float(step_arrays.rewards[i][0])
-            episode_returns[i].append(ret)
-            recent_returns.append(ret)
+        donor_idx = np.flatnonzero(step_arrays.dones)
+        for i in donor_idx:
+          ret = float(step_arrays.rewards[i][0])
+          episode_returns[i].append(ret)
+          recent_returns.append(ret)
+        t3 = time.perf_counter() if _tm is not None else None
+        if _tm is not None:
+          _tm[0] += t1 - t0
+          _tm[1] += t1b - t0
+          _tm[2] += t2 - t1b
+          _tm[3] += t2b - t2
+          _tm[4] += t3 - t2b
       agent.learn_np(step_arrays.obs, step_arrays.seats)
       if FLAGS.anneal_lr:
         agent.anneal_learning_rate(update, num_updates)
+      if _tm is not None and update % FLAGS.timing_every == 0:
+        _emit(f"[timing u{update}] act={_tm[0]*1e3*_tm_scale:.2f}ms/env"
+              f"  act+phi={_tm[1]*1e3*_tm_scale:.2f}  env={_tm[2]*1e3*_tm_scale:.2f}"
+              f"  shape+refresh={_tm[3]*1e3*_tm_scale:.2f}"
+              f"  post={_tm[4]*1e3*_tm_scale:.2f}"
+              f"  total={_tm.sum()*1e3*_tm_scale:.2f}")
       if pbar is not None:
         pbar.update(FLAGS.num_envs * FLAGS.num_steps)
         _pbar_postfix()
@@ -868,6 +1147,17 @@ def main(_):
         _maybe_snapshot(agent, roster, update)
       if update % FLAGS.eval_every == 0:
         _log_update(agent, episode_returns, recent_returns, writer, update)
+        if FLAGS.verdict_every_sec and time.time() - _last_verdict_ts[0] >= \
+            FLAGS.verdict_every_sec:
+          _last_verdict_ts[0] = time.time()
+          _emit(f"[verdict] gate at update {update} "
+                f"(steps={agent.total_steps_done}, "
+                f"elapsed={time.time() - _run_t0:.0f}s)")
+          _run_verdict(agent, roster, agent_fn, num_actions, input_shape,
+                       device,
+                       _randomized_game_string(FLAGS.game,
+                                               FLAGS.seed + update * 7),
+                       num_players, writer, agent.total_steps_done)
         if FLAGS.eval_squad and roster is not None:
           res = _eval_squad(
               agent, roster, agent_fn, num_actions, input_shape, device,
