@@ -46,8 +46,10 @@ import collections
 import multiprocessing as mp
 import multiprocessing.shared_memory as shm
 import os
+import sys
 import threading
 import time
+import traceback
 
 import numpy as np
 
@@ -133,7 +135,16 @@ class AsyncVectorEnv(object):
           f"game_strs must have length num_envs ({self.num_envs}), got "
           f"{len(self._game_strs)}")
     self._sampler_seeds = sampler_seeds
-    self._max_legal = max_legal if max_legal else self._probe_max_legal(envs)
+    # Width of the shared legal-action buffer. Defaults to the full action
+    # space: any smaller value silently truncates legal sets at decision nodes
+    # that happen to be wider than whatever was sampled to pick it, and the
+    # agent then never sees the dropped actions (they are simply absent from
+    # the mask, so nothing errors). The buffer is cheap -- num_envs *
+    # num_distinct_actions * 4 bytes, e.g. 5.7 MB for eclipse at 128 envs --
+    # so there is no reason to guess. Pass max_legal explicitly only if you
+    # have a proof of the true bound for your game.
+    self._max_legal = int(max_legal) if max_legal else int(
+        self.game.num_distinct_actions())
     self.num_workers = num_workers
     if self._sampler_seeds is None:
       self._sampler_seeds = list(range(self.num_envs))
@@ -144,20 +155,6 @@ class AsyncVectorEnv(object):
     self._go = []
     self._done = []
     self._start()
-
-  def _probe_max_legal(self, envs):
-    max_legal = 0
-    for e in envs[:4]:
-      try:
-        if e._state is None:
-          e.reset(players="current")
-        for p in range(self.num_players):
-          la = e._state.legal_actions(p)
-          if la:
-            max_legal = max(max_legal, len(la))
-      except Exception:  # pylint: disable=broad-except
-        pass
-    return max(max_legal, 1)
 
   def _alloc(self, name, shape, dtype):
     block = shm.SharedMemory(
@@ -366,8 +363,17 @@ def _worker_main(start, count, num_players, games, max_legal, obs_size,
       obs_buf[idx, :] = np.asarray(
           ts_new[i].observations["info_state"][seat], dtype=np.float32)
       la = ts_new[i].observations["legal_actions"][seat]
-      n = min(len(la), max_legal)
-      legal_buf[idx, :n] = np.asarray(la[:n], dtype=np.int32)
+      n = len(la)
+      # Never truncate: a dropped legal action is invisible to the agent and
+      # raises no error anywhere downstream (it is simply absent from the
+      # mask), so this must fail loudly rather than silently shrink the
+      # action space.
+      if n > max_legal:
+        raise ValueError(
+            f"legal action set of size {n} exceeds max_legal={max_legal} "
+            f"(env {idx}, seat {seat}); truncating would silently hide "
+            f"{n - max_legal} legal actions from the agent")
+      legal_buf[idx, :n] = np.asarray(la, dtype=np.int32)
       legal_len[idx] = n
       rew_buf[idx, :] = np.asarray(rew_list[i][:num_players],
                                    dtype=np.float32)
@@ -388,10 +394,17 @@ def _worker_main(start, count, num_players, games, max_legal, obs_size,
     outs = []
     for i in range(count):
       outs.append(type("SO", (), {"action": int(action_buf[start + i])})())
-    ts, reward, done_list, _ = vec.step(outs, reset_if_done=True,
-                                        players="current")
-    t2 = time.perf_counter()
-    publish(ts, done_list, reward)
+    try:
+      ts, reward, done_list, _ = vec.step(outs, reset_if_done=True,
+                                          players="current")
+      t2 = time.perf_counter()
+      publish(ts, done_list, reward)
+    except BaseException:
+      # A worker exception otherwise dies unseen and the parent blocks forever
+      # on done.acquire(); surface the cause before going down.
+      traceback.print_exc()
+      sys.stderr.flush()
+      raise
     t3 = time.perf_counter()
     done.release()
     if _PROF:
