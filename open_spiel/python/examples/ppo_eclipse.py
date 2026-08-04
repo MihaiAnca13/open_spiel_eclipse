@@ -179,6 +179,19 @@ flags.DEFINE_enum("value_mode", "win", ["win", "vp"],
                   "per-seat rank utilities (1st/2nd/3rd/4th), so the agent "
                   "optimizes 'finish first'. 'vp' = raw final VP (the original "
                   "behaviour).")
+flags.DEFINE_float(
+    "rank_vp_beta", 0.002,
+    "Slope (utility per VP) of the VP escape bonus added to the terminal "
+    "rank utility in --value_mode=win. Tie-averaged rank utility removes the "
+    "reward for mutual bankruptcy but leaves the objective flat while every "
+    "game still ends all-tied at 0 VP (zero return variance -> zero "
+    "advantage); this term supplies a gradient inside that dead zone. It is "
+    "clamped so it can never reorder two placements. 0 disables it.")
+flags.DEFINE_float(
+    "rank_vp_beta_anneal_to", -1.0,
+    "If >= 0, linearly anneal --rank_vp_beta to this value over the run, "
+    "recovering the pure constant-sum 'finish first' objective once real "
+    "outcomes differ. -1 keeps beta constant.")
 flags.DEFINE_float("aux_coef", 0.1,
                    "Weight of auxiliary-head losses (e.g. final-VP regression).")
 flags.DEFINE_enum(
@@ -914,6 +927,10 @@ def main(_):
         num_workers=FLAGS.num_workers,
         sampler_seeds=[FLAGS.seed + i for i in range(FLAGS.num_envs)],
         game_strs=env_game_strs,
+        # Full action space: Eclipse decision nodes reach ~130 legal actions
+        # mid-game while the initial state has ~13, so any probed/guessed
+        # bound silently drops the high-id action blocks (MOVE, UPGRADE).
+        max_legal=game.num_distinct_actions(),
     )
     game = envs_list[0]._game  # pylint: disable=protected-access
   else:
@@ -956,6 +973,7 @@ def main(_):
                            rank_utility(rvec, s) for s in range(len(rvec))
                        ], dtype=np.float32).reshape(-1, 1)))),
       aux_coef=FLAGS.aux_coef,
+      rank_vp_beta=(FLAGS.rank_vp_beta if FLAGS.value_mode == "win" else 0.0),
   )
 
   # Device + resume telemetry before any training starts.
@@ -1134,6 +1152,9 @@ def main(_):
       agent.learn_np(step_arrays.obs, step_arrays.seats)
       if FLAGS.anneal_lr:
         agent.anneal_learning_rate(update, num_updates)
+      if FLAGS.rank_vp_beta_anneal_to >= 0.0:
+        agent.anneal_rank_vp_beta(update, num_updates,
+                                  FLAGS.rank_vp_beta_anneal_to)
       if _tm is not None and update % FLAGS.timing_every == 0:
         _emit(f"[timing u{update}] act={_tm[0]*1e3*_tm_scale:.2f}ms/env"
               f"  act+phi={_tm[1]*1e3*_tm_scale:.2f}  env={_tm[2]*1e3*_tm_scale:.2f}"
@@ -1234,6 +1255,9 @@ def main(_):
 
       if FLAGS.anneal_lr:
         agent.anneal_learning_rate(update, num_updates)
+      if FLAGS.rank_vp_beta_anneal_to >= 0.0:
+        agent.anneal_rank_vp_beta(update, num_updates,
+                                  FLAGS.rank_vp_beta_anneal_to)
 
       if pbar is not None:
         pbar.update(FLAGS.num_envs * FLAGS.num_steps)

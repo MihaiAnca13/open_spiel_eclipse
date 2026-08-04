@@ -34,6 +34,9 @@ from open_spiel.python import rl_environment
 from open_spiel.python.pytorch.ppo import PPO
 from open_spiel.python.pytorch.ppo import layer_init
 from open_spiel.python.pytorch.ppo import rank_utility
+from open_spiel.python.pytorch.ppo import rank_of
+from open_spiel.python.pytorch.ppo import vp_bonus_cap
+from open_spiel.python.pytorch.ppo import DEFAULT_RANK_UTILITY
 from open_spiel.python.pytorch.ppo import CategoricalMasked
 from open_spiel.python.vector_env import SyncVectorEnv
 
@@ -103,15 +106,70 @@ class RankUtilityTest(absltest.TestCase):
     self.assertEqual(rank_utility(rvec, 1), 0.0)
     self.assertEqual(rank_utility(rvec, 0), -0.5)
 
-  def test_rank_utility_ties(self):
-    # Seats 0 and 2 tie for 1st: no one is strictly above them -> rank 1.
+  def test_rank_utility_ties_share_the_average_slot(self):
+    # Seats 0 and 2 tie for 1st, so they jointly occupy slots 1 and 2 and each
+    # take the mean: (1.0 + 0.5) / 2. Awarding both the *best* slot (1.0) would
+    # make total utility outcome-dependent and, in the all-tied case, hand every
+    # seat the maximum -- see test_all_tied_is_not_the_optimum.
     rvec = [40.0, 20.0, 40.0, 30.0]
-    self.assertEqual(rank_utility(rvec, 0), 1.0)
-    self.assertEqual(rank_utility(rvec, 2), 1.0)
-    # Seat 3 has two strictly above (40, 40) -> rank 3 -> 0.0.
+    self.assertEqual(rank_utility(rvec, 0), 0.75)
+    self.assertEqual(rank_utility(rvec, 2), 0.75)
+    # Seat 3 is alone in 3rd.
     self.assertEqual(rank_utility(rvec, 3), 0.0)
-    # Seat 1 has three strictly above -> rank 4 -> -0.5.
+    # Seat 1 is alone in 4th.
     self.assertEqual(rank_utility(rvec, 1), -0.5)
+
+  def test_all_tied_is_not_the_optimum(self):
+    """A universally-tied outcome must not pay every seat the best utility.
+
+    Regression: with "ties share the best placement", an all-bankrupt Eclipse
+    game ([0,0,0,0], ~95% of unskilled games) paid all four seats +1.0 -- the
+    maximum in the table -- making mutual failure the global optimum of the
+    training objective.
+    """
+    tied = [rank_utility([0.0] * 4, s) for s in range(4)]
+    self.assertEqual(tied, [0.25] * 4)
+    self.assertLess(max(tied), max(DEFAULT_RANK_UTILITY))
+    # A single seat scoring anything at all is strictly better than the tie.
+    scored = [rank_utility([0.0, 0.0, 0.0, 1.0], s) for s in range(4)]
+    self.assertEqual(scored[3], 1.0)
+    self.assertGreater(scored[3], tied[3])
+    self.assertLess(scored[0], tied[0])
+
+  def test_rank_utility_is_constant_sum(self):
+    """Total utility must not depend on the outcome (with the bonus disabled)."""
+    rng = np.random.RandomState(0)
+    expected = sum(DEFAULT_RANK_UTILITY)
+    for _ in range(2000):
+      rvec = rng.randint(0, 12, size=4).astype(float).tolist()
+      total = sum(rank_utility(rvec, s) for s in range(4))
+      self.assertAlmostEqual(total, expected, places=9)
+
+  def test_vp_bonus_never_reorders_placements(self):
+    """The escape bonus may break ties but never invert a real rank gap."""
+    rng = np.random.RandomState(1)
+    for vp_beta in (0.002, 0.05, 1.0, 1e6):
+      for _ in range(2000):
+        rvec = rng.randint(0, 300, size=4).astype(float).tolist()
+        util = [rank_utility(rvec, s, vp_beta=vp_beta) for s in range(4)]
+        for a in range(4):
+          for b in range(4):
+            if rank_of(rvec, a) < rank_of(rvec, b):
+              self.assertGreater(util[a], util[b])
+
+  def test_vp_bonus_breaks_the_dead_zone(self):
+    """The bonus must create return variance where the rank term is flat."""
+    beta = 0.002
+    flat = rank_utility([0.0] * 4, 0, vp_beta=beta)
+    # Scoring while others do not: from a 4-way tie to sole first.
+    self.assertGreater(rank_utility([3.0, 0.0, 0.0, 0.0], 0, vp_beta=beta),
+                       flat + 0.5)
+    # Everyone scoring equally still beats everyone scoring nothing, so the
+    # gradient points out of the all-zero basin even while outcomes stay tied.
+    self.assertGreater(rank_utility([5.0] * 4, 0, vp_beta=beta), flat)
+    # And the bonus is bounded, so it cannot swamp the rank signal.
+    self.assertLessEqual(
+        rank_utility([1e9] * 4, 0, vp_beta=beta) - flat, vp_bonus_cap())
 
   def test_rank_utility_two_player(self):
     rvec = [5.0, 9.0]

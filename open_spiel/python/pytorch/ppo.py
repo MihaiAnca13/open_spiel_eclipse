@@ -51,19 +51,78 @@ INVALID_ACTION_PENALTY = -1e6
 # 4-player general-sum objective: "finish first", not "maximize score".
 DEFAULT_RANK_UTILITY = (1.0, 0.5, 0.0, -0.5)
 
+# Safety margin for the VP escape bonus (see rank_utility): the bonus is capped
+# at this fraction of the smallest gap between adjacent utility slots, so it can
+# never reorder two different placements no matter how large the payoffs get.
+_VP_BONUS_GAP_FRACTION = 0.49
+
 
 def rank_of(per_agent_vp, seat):
-  """Placement (1-based) of `seat` given a per-agent final VP vector.
+  """Competition placement (1-based) of `seat` given a per-agent VP vector.
 
   Ties share the best placement: rank = 1 + (# agents strictly above `seat`).
+  This is the reporting convention; see ``rank_utility`` for the *training*
+  target, which must handle ties differently.
   """
   return 1 + sum(1 for v in per_agent_vp if v > per_agent_vp[seat])
 
 
-def rank_utility(per_agent_vp, seat, utility_table=DEFAULT_RANK_UTILITY):
-  """Utility of `seat`'s placement, given by ``utility_table`` indexed by rank."""
-  idx = min(rank_of(per_agent_vp, seat) - 1, len(utility_table) - 1)
-  return utility_table[idx]
+def min_utility_gap(utility_table=DEFAULT_RANK_UTILITY):
+  """Smallest gap between adjacent slots of ``utility_table``."""
+  if len(utility_table) < 2:
+    return float("inf")
+  return min(utility_table[i] - utility_table[i + 1]
+             for i in range(len(utility_table) - 1))
+
+
+def vp_bonus_cap(utility_table=DEFAULT_RANK_UTILITY):
+  """Largest VP bonus that provably cannot reorder two placements."""
+  return _VP_BONUS_GAP_FRACTION * min_utility_gap(utility_table)
+
+
+def rank_utility(per_agent_vp, seat, utility_table=DEFAULT_RANK_UTILITY,
+                 vp_beta=0.0):
+  """Terminal utility of `seat`, from a per-agent final VP vector.
+
+  Two properties matter here, and the naive "ties share the best placement"
+  rule (what ``rank_of`` does, correct for *reporting*) breaks both:
+
+  1. **Ties get the mean of the slots they occupy** (fractional ranking). With
+     the best-placement rule an all-tied outcome pays *every* seat
+     ``utility_table[0]`` -- the maximum -- which in Eclipse makes "everybody
+     goes bankrupt scoring nothing" the global optimum of the objective, since
+     ~95% of unskilled games end exactly there. Averaging instead makes the
+     rank term exactly constant-sum (it always sums to ``sum(utility_table)``),
+     so no outcome is jointly better for everyone.
+
+  2. **Optional VP escape bonus** ``vp_beta * own_vp``. Fixing (1) removes the
+     *reward* for mutual failure but not the *flatness*: if every game ends
+     all-tied at zero, every seat scores the same constant, the return variance
+     is zero and there is no advantage signal to learn from. A small monotone
+     term in own VP gives the optimizer a direction inside that dead zone.
+     The bonus is clamped to ``vp_bonus_cap()`` so it can never reorder two
+     different placements -- it only ever breaks ties and gradates within them.
+
+  Args:
+    per_agent_vp: per-seat terminal payoff vector.
+    seat: seat whose utility to compute.
+    utility_table: utility by placement, best first.
+    vp_beta: slope of the escape bonus in utility per VP. 0 disables it and
+      restores the pure constant-sum objective.
+
+  Returns:
+    Scalar utility for `seat`.
+  """
+  own = per_agent_vp[seat]
+  above = sum(1 for v in per_agent_vp if v > own)
+  tied = sum(1 for v in per_agent_vp if v == own)
+  lo = min(above, len(utility_table) - 1)
+  hi = min(above + max(tied, 1), len(utility_table))
+  utility = sum(utility_table[lo:hi]) / max(1, hi - lo)
+  if vp_beta:
+    cap = vp_bonus_cap(utility_table)
+    utility += max(-cap, min(cap, vp_beta * float(own)))
+  return utility
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
@@ -240,6 +299,7 @@ class PPO(nn.Module):
       aux_tasks=None,
       aux_target_fn=None,
       aux_coef=0.1,
+      rank_vp_beta=0.0,
   ):
     super().__init__()
 
@@ -278,6 +338,11 @@ class PPO(nn.Module):
     #     rather than raw score. rank_utility() converts a per-agent terminal
     #     payoff vector into each seat's target.
     self.value_mode = value_mode
+    # Slope of the VP escape bonus added to the rank utility (win mode only).
+    # Mutable: callers anneal it to 0 once games stop ending in the degenerate
+    # all-tied-at-zero outcome, recovering the pure constant-sum objective.
+    self.rank_vp_beta = float(rank_vp_beta)
+    self.rank_vp_beta_initial = float(rank_vp_beta)
     self.aux_tasks = list(aux_tasks) if aux_tasks else None
     self.num_aux = len(self.aux_tasks) if self.aux_tasks else 0
     self.aux_target_fn = aux_target_fn
@@ -659,7 +724,8 @@ class PPO(nn.Module):
   def _terminal_target(self, per_agent_reward, seat):
     """Scalar terminal target for `seat` given the per-agent payoff vector."""
     if self.value_mode == "win":
-      return rank_utility(per_agent_reward, seat)
+      return rank_utility(per_agent_reward, seat,
+                          vp_beta=self.rank_vp_beta)
     return per_agent_reward[seat]
 
   def _aux_targets_for(self, per_agent_reward):
@@ -788,7 +854,8 @@ class PPO(nn.Module):
       if done_idx.size:
         if self.value_mode == "win":
           for i in done_idx:
-            terminal[i] = rank_utility(reward_np[i], int(seats[i]))
+            terminal[i] = rank_utility(reward_np[i], int(seats[i]),
+                                       vp_beta=self.rank_vp_beta)
         else:
           for i in done_idx:
             terminal[i] = reward_np[i, int(seats[i])]
@@ -1423,6 +1490,23 @@ class PPO(nn.Module):
     # Update counters
     self.updates_done += 1
     self.cur_batch_idx = 0
+
+  def anneal_rank_vp_beta(self, update, num_total_updates, beta_to=0.0):
+    """Linearly moves the VP escape bonus from its initial slope to ``beta_to``.
+
+    The bonus exists to create return variance in the degenerate all-tied-at-
+    zero regime; once real outcomes differ it is no longer needed, and holding
+    it at a nonzero value leaves the objective mildly general-sum (total utility
+    becomes ``sum(utility_table) + beta * sum(VP)``). Annealing it out restores
+    the pure constant-sum "finish first" objective for the long run.
+    """
+    if num_total_updates <= 0:
+      return self.rank_vp_beta
+    frac = min(1.0, max(0.0, update / num_total_updates))
+    self.rank_vp_beta = (
+        self.rank_vp_beta_initial +
+        (float(beta_to) - self.rank_vp_beta_initial) * frac)
+    return self.rank_vp_beta
 
   def anneal_learning_rate(self, update, num_total_updates):
     # Annealing the rate
