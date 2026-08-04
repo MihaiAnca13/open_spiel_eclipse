@@ -381,6 +381,14 @@ class PPO(nn.Module):
                                   self.player_id, dtype=torch.long)
     self._extra_samples = []
     self._last_decision = [{} for _ in range(self.num_envs)]
+    # First row of the episode currently in progress, per env. Rows before it
+    # belong to an episode that already ended inside this same batch, so they
+    # must not be swept up by terminal attribution or aux back-fill.
+    self._episode_start_row = np.zeros(self.num_envs, dtype=np.int64)
+    # Deferred (row, env, target) terminal writes, applied as one vectorized
+    # scatter in _learn_core. Writing them one scalar at a time would issue a
+    # GPU kernel per (env, seat) per episode in the hot loop.
+    self._closeout_writes = []
 
     # Auxiliary-head buffers (self-play/win mode only): per (step, env) target
     # vectors and availability masks for the aux tasks. Targets are back-filled
@@ -408,6 +416,11 @@ class PPO(nn.Module):
     self.train_pid = None
     self.trainable = torch.zeros(
         (self.steps_per_batch, self.num_envs), dtype=torch.bool).to(device)
+    # CPU mirror: terminal attribution needs the trainability recorded *at act
+    # time*, not a re-query of the lineup (which the caller may already have
+    # re-sampled for the next episode).
+    self.trainable_cpu = torch.zeros(
+        (self.steps_per_batch, self.num_envs), dtype=torch.bool)
 
     # Sparse legal-action storage for the batch: per-row packed column indices
     # (tiny vs. the dense (S, N, num_actions) mask, and the basis of the
@@ -581,9 +594,11 @@ class PPO(nn.Module):
         self.players[row] = torch.tensor(seats, dtype=torch.long).to(
             self.device)
         self.players_cpu[row] = torch.tensor(seats, dtype=torch.long)
-        self.trainable[row] = torch.tensor(
+        trainable_row = torch.tensor(
             [self._acts_trainable(i, seats[i]) for i in range(self.num_envs)],
-            dtype=torch.bool).to(self.device)
+            dtype=torch.bool)
+        self.trainable_cpu[row] = trainable_row
+        self.trainable[row] = trainable_row.to(self.device)
         self.legal_actions_mask[row] = legal_actions_mask
         self.obs[row] = obs
         self.actions[row] = action
@@ -678,9 +693,11 @@ class PPO(nn.Module):
       self.players[row] = torch.from_numpy(
           seats.astype(np.int64)).to(self.device)
       self.players_cpu[row] = torch.from_numpy(seats.astype(np.int64))
-      self.trainable[row] = torch.tensor(
-          [self._acts_trainable(i, int(s)) for i, s in enumerate(seats)],
-          dtype=torch.bool).to(self.device)
+      trainable_row = torch.tensor(
+          [self._acts_trainable(i, int(sv)) for i, sv in enumerate(seats)],
+          dtype=torch.bool)
+      self.trainable_cpu[row] = trainable_row
+      self.trainable[row] = trainable_row.to(self.device)
       self.obs[row] = obs
       self.actions[row] = action
       self.logprobs[row] = logprob
@@ -747,6 +764,64 @@ class PPO(nn.Module):
     except ValueError:
       return None
 
+  def _attribute_terminal(self, env_idx, row, per_agent_reward, acting_seat):
+    """Gives every seat other than the mover its slot of the terminal payoff.
+
+    ``dones`` is one flag per (row, env), so only the seat that happened to make
+    the final move gets a terminal row. Left alone, every *other* seat's last
+    decision keeps ``done=0``, and its per-seat GAE chain therefore bootstraps
+    straight across the episode boundary into the values of the *next* episode
+    (envs auto-reset), so the terminal payoff never reaches the trajectory that
+    earned it. Previously those rows were also re-emitted as independent
+    ``_extra_samples`` carrying the true target, leaving two contradictory
+    targets for the same (obs, action).
+
+    Fix: when the seat's last decision is a row in this batch, overwrite that
+    row's reward with the seat's terminal target and mark it done -- which both
+    attributes the payoff and cuts the chain. Only when the seat last acted in
+    an *earlier* batch (its row is gone) do we fall back to an extra sample.
+    """
+    start = int(self._episode_start_row[env_idx])
+    players_col = self.players_cpu[start:row + 1, env_idx].numpy()
+    trainable_col = self.trainable_cpu[start:row + 1, env_idx].numpy()
+    for seat in range(self.num_players):
+      if seat == acting_seat:
+        continue
+      target = self._terminal_target(per_agent_reward, seat)
+      rows_seat = np.flatnonzero((players_col == seat) & trainable_col)
+      if rows_seat.size:
+        self._closeout_writes.append(
+            (start + int(rows_seat[-1]), env_idx, float(target)))
+        continue
+      # No row in this batch: the seat last acted before the batch boundary, so
+      # carry its stored decision as an independent terminal sample.
+      if not self._acts_trainable(env_idx, seat):
+        continue
+      pair = self._resolve_last_decision(env_idx, seat)
+      if pair is None:
+        continue
+      obs_, cols_, action_, logprob_, value_ = pair
+      ex_aux, ex_aux_mask = self._extras_aux(per_agent_reward, seat)
+      self._extra_samples.append(
+          (env_idx, seat, obs_, cols_, int(action_), logprob_, value_,
+           target, ex_aux, ex_aux_mask))
+
+  def _apply_closeout_writes(self):
+    """Flushes deferred terminal rewards/dones as one vectorized scatter."""
+    if not self._closeout_writes:
+      return
+    rows = np.fromiter((w[0] for w in self._closeout_writes), dtype=np.int64,
+                       count=len(self._closeout_writes))
+    envs = np.fromiter((w[1] for w in self._closeout_writes), dtype=np.int64,
+                       count=len(self._closeout_writes))
+    tgts = np.fromiter((w[2] for w in self._closeout_writes), dtype=np.float32,
+                       count=len(self._closeout_writes))
+    rows_t = torch.from_numpy(rows).to(self.device)
+    envs_t = torch.from_numpy(envs).to(self.device)
+    self.rewards[rows_t, envs_t] = torch.from_numpy(tgts).to(self.device)
+    self.dones[rows_t, envs_t] = 1.0
+    self._closeout_writes = []
+
   def _backfill_aux(self, env_idx, row, per_agent_reward):
     """Fills aux targets for every stored row (<=row) of each seat in `env_idx`.
 
@@ -759,14 +834,15 @@ class PPO(nn.Module):
     tgt = self._aux_targets_for(per_agent_reward)
     if tgt is None:
       return
-    players_col = self.players_cpu[:row + 1, env_idx]
+    start = int(self._episode_start_row[env_idx])
+    players_col = self.players_cpu[start:row + 1, env_idx]
+    trainable_col = self.trainable_cpu[start:row + 1, env_idx].numpy()
     for s in range(self.num_players):
-      if not self._acts_trainable(env_idx, s):
-        continue
-      rows_s = np.flatnonzero(players_col == s)
+      rows_s = np.flatnonzero((players_col.numpy() == s) & trainable_col)
       if rows_s.size == 0:
         continue
-      rows_t = torch.from_numpy(rows_s.astype(np.int64)).to(self.device)
+      rows_t = torch.from_numpy(
+          (rows_s + start).astype(np.int64)).to(self.device)
       target_t = torch.from_numpy(tgt[s]).to(self.device)
       self.aux_targets[rows_t, env_idx, :] = target_t
       self.aux_mask[rows_t, env_idx, :] = 1.0
@@ -808,19 +884,9 @@ class PPO(nn.Module):
         done_row[i] = 1.0 if is_done else 0.0
         if is_done:
           self._backfill_aux(i, row, rvec)
-          for s in range(self.num_players):
-            if s == seat:
-              continue
-            pair = self._resolve_last_decision(i, s)
-            if pair is None:
-              continue
-            obs_, cols_, action_, logprob_, value_ = pair
-            # Independent closed-out sample: target = seat's terminal payoff.
-            ex_aux, ex_aux_mask = self._extras_aux(rvec, s)
-            self._extra_samples.append(
-                (i, s, obs_, cols_, int(action_), logprob_, value_,
-                 self._terminal_target(rvec, s), ex_aux, ex_aux_mask))
+          self._attribute_terminal(i, row, rvec, seat)
           self._last_decision[i].clear()
+          self._episode_start_row[i] = row + 1
       self.rewards[row] = torch.from_numpy(rew_row).to(self.device)
       self.dones[row] = torch.from_numpy(done_row).to(self.device)
     else:
@@ -866,18 +932,9 @@ class PPO(nn.Module):
         rvec = reward_np[i]
         seat = int(seats[i])
         self._backfill_aux(i, row, rvec)
-        for s in range(self.num_players):
-          if s == seat:
-            continue
-          pair = self._resolve_last_decision(i, s)
-          if pair is None:
-            continue
-          obs_, cols_, action_, logprob_, value_ = pair
-          ex_aux, ex_aux_mask = self._extras_aux(rvec, s)
-          self._extra_samples.append(
-              (i, s, obs_, cols_, int(action_), logprob_, value_,
-               self._terminal_target(rvec, s), ex_aux, ex_aux_mask))
+        self._attribute_terminal(int(i), row, rvec, seat)
         self._last_decision[i].clear()
+        self._episode_start_row[i] = row + 1
       self.rewards[row] = torch.from_numpy(rew_row).to(self.device)
       self.dones[row] = torch.from_numpy(done_row).to(self.device)
     else:
@@ -1207,6 +1264,10 @@ class PPO(nn.Module):
     return net.critic[-1](features).view(-1)
 
   def _learn_core(self, next_obs):
+    # Terminal attribution for non-acting seats, deferred during the rollout to
+    # keep it off the hot loop. Must land before returns are computed.
+    self._apply_closeout_writes()
+
     # bootstrap value if not done
     with torch.no_grad():
       next_value_per_env = self.get_value(next_obs).reshape(-1)
@@ -1490,6 +1551,9 @@ class PPO(nn.Module):
     # Update counters
     self.updates_done += 1
     self.cur_batch_idx = 0
+    # Rows are overwritten from 0 next batch, so every env's in-progress episode
+    # now starts at row 0 again.
+    self._episode_start_row[:] = 0
 
   def anneal_rank_vp_beta(self, update, num_total_updates, beta_to=0.0):
     """Linearly moves the VP escape bonus from its initial slope to ``beta_to``.
