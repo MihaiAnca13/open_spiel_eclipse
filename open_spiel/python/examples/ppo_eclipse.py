@@ -218,6 +218,13 @@ flags.DEFINE_float(
     "recovering the pure constant-sum 'finish first' objective once real "
     "outcomes differ. -1 keeps beta constant.")
 flags.DEFINE_float(
+    "rank_ce_coef", 0.0,
+    "Weight of a cross-entropy loss on the *realized* placement, supervising "
+    "the 4-output rank critic as the distributional head it is. Without it those "
+    "4 logits are trained only through the MSE of the scalar expected utility "
+    "they collapse to, which discards the placement distribution. 0 = off; the "
+    "C3 A/B turns it on.")
+flags.DEFINE_float(
     "aux_coef", 0.1,
     "Weight of auxiliary-head losses. Measured at this value on a minibatch of "
     "rows carrying aux targets, the gradient-norm share is aux 82% / policy 11% "
@@ -257,6 +264,21 @@ flags.DEFINE_float("max_grad_norm", 0.5, "Max gradient norm.")
 flags.DEFINE_float("target_kl", None, "Target KL divergence threshold.")
 
 flags.DEFINE_integer("nn_width", 64, "Hidden width of actor/critic MLPs.")
+flags.DEFINE_bool(
+    "nn_norm", False,
+    "LayerNorm after each hidden layer. Note running *observation* "
+    "normalization is deliberately absent: the Eclipse observation tensor was "
+    "measured to lie entirely within [0,1] (one-hots and write_frac ratios), so "
+    "there is no input-scale problem for it to fix.")
+flags.DEFINE_enum("nn_activation", "tanh", ["tanh", "gelu"],
+                  "Hidden activation. Tanh saturates; gelu is the C1 default "
+                  "for the wider trunk.")
+flags.DEFINE_bool(
+    "separate_critic", False,
+    "Give the value/aux heads their own trunk. With one shared 64-wide trunk "
+    "the measured gradient split on aux-bearing rows was aux 82% / policy 11% / "
+    "value 6%, so the representation the policy reads was shaped mostly by the "
+    "regression heads.")
 flags.DEFINE_integer("nn_depth", 2, "Number of hidden layers in each MLP.")
 
 flags.DEFINE_bool(
@@ -339,28 +361,54 @@ class EclipsePPOAgent(nn.Module):
   # Rank-utility table (1st..4th), matching ppo.rank_utility's default.
   RANK_UTILITY = (1.0, 0.5, 0.0, -0.5)
 
-  def __init__(self, num_actions, observation_shape, device, width=64,
-               depth=2, aux_tasks=("final_vp",)):
-    super().__init__()
+  @staticmethod
+  def _trunk(in_features, width, depth, norm, activation):
+    """MLP trunk. LayerNorm + GELU by default.
+
+    Tanh saturates and, at width 64, the original trunk had to serve the policy,
+    a 4-way rank critic and the aux heads simultaneously. Note that running
+    observation normalization is deliberately *not* added: the Eclipse
+    observation tensor was measured to lie entirely within [0, 1] (every slot is
+    a one-hot or a write_frac ratio), so there is no input-scale problem to fix,
+    and LayerNorm handles the rest.
+    """
     layers = []
-    in_features = np.array(observation_shape).prod()
     for _ in range(depth):
       layers.append(layer_init(nn.Linear(in_features, width)))
-      layers.append(nn.Tanh())
+      if norm:
+        layers.append(nn.LayerNorm(width))
+      layers.append(nn.GELU() if activation == "gelu" else nn.Tanh())
       in_features = width
-    self.shared = nn.Sequential(*layers)
+    return nn.Sequential(*layers)
+
+  def __init__(self, num_actions, observation_shape, device, width=64,
+               depth=2, aux_tasks=("final_vp",), norm=False,
+               activation="tanh", separate_critic=False):
+    super().__init__()
+    in_features = int(np.array(observation_shape).prod())
+    self.shared = self._trunk(in_features, width, depth, norm, activation)
+    self.separate_critic = separate_critic
+
+    if separate_critic:
+      # An independent trunk for the value/aux objectives. With a shared trunk
+      # the measured gradient split on aux-bearing rows was aux 82% / policy 11%
+      # / value 6%, i.e. the representation the policy reads was being shaped
+      # mostly by the regression heads.
+      self.critic_trunk = self._trunk(in_features, width, depth, norm,
+                                      activation)
+    else:
+      self.critic_trunk = self.shared
 
     self.critic = nn.Sequential(
-        self.shared,
+        self.critic_trunk,
         layer_init(nn.Linear(width, 4), std=1.0),
     )
     self.actor = nn.Sequential(
         self.shared,
         layer_init(nn.Linear(width, num_actions), std=0.01),
     )
-    # Auxiliary heads: predict terminal quantities from the shared trunk. Which
-    # heads exist is driven by --aux_target_mode so the head set and the target
-    # matrix always agree in width.
+    # Auxiliary heads hang off the critic trunk (they are terminal-outcome
+    # regressions, same job as the value head).
     self.aux_heads = nn.ModuleDict({
         name: layer_init(nn.Linear(width, 1), std=1.0)
         for name in (aux_tasks or ())
@@ -371,6 +419,22 @@ class EclipsePPOAgent(nn.Module):
 
   def get_value(self, x):
     return self.rank_value(self.critic(x))
+
+  def rank_logits_from_obs(self, x):
+    """(B, 4) rank logits -- the distributional critic's raw output."""
+    return self.critic(x)
+
+  def value_from_obs(self, x):
+    """Scalar value straight from observations.
+
+    Required when the critic has its own trunk: the sparse paths compute actor
+    features once and would otherwise feed those to the value head.
+    """
+    return self.rank_value(self.critic(x))
+
+  def aux_from_obs(self, x):
+    feats = self.critic_trunk(x)
+    return {name: head(feats) for name, head in self.aux_heads.items()}
 
   def rank_value(self, rank_logits):
     """Expected rank-utility from (..., 4) rank logits."""
@@ -411,10 +475,13 @@ class EclipsePPOAgent(nn.Module):
         x), probs.probs
 
 
-def make_agent_fn(width, depth, aux_tasks=("final_vp",)):
+def make_agent_fn(width, depth, aux_tasks=("final_vp",), norm=False,
+                  activation="tanh", separate_critic=False):
   def agent_fn(num_actions, observation_shape, device):
     return EclipsePPOAgent(num_actions, observation_shape, device,
-                           width=width, depth=depth, aux_tasks=aux_tasks)
+                           width=width, depth=depth, aux_tasks=aux_tasks,
+                           norm=norm, activation=activation,
+                           separate_critic=separate_critic)
 
   return agent_fn
 
@@ -1459,19 +1526,27 @@ def main(_):
       target_kl=FLAGS.target_kl,
       device=device,
       writer=writer,
-      agent_fn=make_agent_fn(FLAGS.nn_width, FLAGS.nn_depth, tuple(aux_tasks or ())),
+      agent_fn=make_agent_fn(
+        FLAGS.nn_width, FLAGS.nn_depth, tuple(aux_tasks or ()),
+        norm=FLAGS.nn_norm, activation=FLAGS.nn_activation,
+        separate_critic=FLAGS.separate_critic),
       value_mode=FLAGS.value_mode,
       aux_tasks=aux_tasks,
       aux_target_fn=aux_target_fn,
       aux_coef=FLAGS.aux_coef,
       rank_vp_beta=(FLAGS.rank_vp_beta if FLAGS.value_mode == "win" else 0.0),
+      rank_ce_coef=(FLAGS.rank_ce_coef if FLAGS.value_mode == "win"
+                    else 0.0),
   )
 
   # Device + resume telemetry before any training starts.
   _emit(f"device={device}  game={FLAGS.game}  num_envs={FLAGS.num_envs}"
         f"  num_workers={FLAGS.num_workers}")
   if FLAGS.resume:
-    agent_fn_r = make_agent_fn(FLAGS.nn_width, FLAGS.nn_depth, tuple(aux_tasks or ()))
+    agent_fn_r = make_agent_fn(
+        FLAGS.nn_width, FLAGS.nn_depth, tuple(aux_tasks or ()),
+        norm=FLAGS.nn_norm, activation=FLAGS.nn_activation,
+        separate_critic=FLAGS.separate_critic)
     resume_src = FLAGS.resume
     sd = None
     # Resolve roster ids ("main", "snap_u100", ...) whenever the roster dir
@@ -1539,7 +1614,10 @@ def main(_):
 
 
   # League (population self-play) setup: roster + matchmaker + lineups.
-  agent_fn = make_agent_fn(FLAGS.nn_width, FLAGS.nn_depth, tuple(aux_tasks or ()))
+  agent_fn = make_agent_fn(
+        FLAGS.nn_width, FLAGS.nn_depth, tuple(aux_tasks or ()),
+        norm=FLAGS.nn_norm, activation=FLAGS.nn_activation,
+        separate_critic=FLAGS.separate_critic)
   num_actions = game.num_distinct_actions()
   roster = None
   matchmaker = None

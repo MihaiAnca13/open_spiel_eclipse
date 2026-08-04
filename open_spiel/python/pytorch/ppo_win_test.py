@@ -178,6 +178,58 @@ class RankUtilityTest(absltest.TestCase):
     self.assertEqual(rank_utility(rvec, 0), 0.5)
 
 
+class DistributionalCriticTest(absltest.TestCase):
+  """The 4 rank logits should be supervised on the realized placement.
+
+  Without --rank_ce_coef they are trained only through the MSE of the scalar
+  expected utility they collapse to, which discards the placement distribution.
+  """
+
+  def _agent(self, rank_ce_coef):
+    from open_spiel.python.examples.ppo_eclipse import make_agent_fn
+    return PPO(input_shape=(6,), num_actions=3, num_players=2, num_envs=2,
+               steps_per_batch=8, num_minibatches=2, device="cpu",
+               agent_fn=make_agent_fn(8, 1, ()), value_mode="win",
+               rank_ce_coef=rank_ce_coef)
+
+  def _run_batch(self, agent):
+    for row in range(8):
+      seats = torch.tensor([row % 2, (row + 1) % 2])
+      agent.players_cpu[row] = seats
+      agent.players[row] = seats
+      agent.trainable_cpu[row] = True
+      agent.trainable[row] = True
+      agent.cur_batch_idx = row
+      done = np.array([row == 7, row == 7])
+      rewards = np.zeros((2, 2), dtype=np.float32)
+      if row == 7:
+        rewards[:] = [[5.0, 1.0], [1.0, 5.0]]
+      agent.post_step_np(rewards, done)
+    agent.learn_np(np.zeros((2, 6), dtype=np.float32), np.zeros(2, np.int32))
+    return agent.last_metrics
+
+  def test_rank_labels_are_realized_placements(self):
+    agent = self._agent(0.5)
+    for vec in ([10, 20, 30, 40], [0, 0, 0, 0], [40, 40, 10, 5]):
+      got = [agent._terminal_rank(vec, s) for s in range(4)]
+      expected = [min(rank_of(vec, s) - 1, 3) for s in range(4)]
+      self.assertEqual(got, expected)
+
+  def test_cross_entropy_only_active_when_enabled(self):
+    off = self._run_batch(self._agent(0.0))
+    self.assertEqual(off["rank_ce"], 0.0)
+    on = self._run_batch(self._agent(0.5))
+    # An untrained 4-way head sits at the uniform prior, ln(4) ~ 1.386.
+    self.assertGreater(on["rank_ce"], 1.0)
+    self.assertLess(on["rank_ce"], 1.6)
+
+  def test_labels_are_consumed_each_batch(self):
+    agent = self._agent(0.5)
+    self._run_batch(agent)
+    # Rows are overwritten next batch, so stale labels must not survive.
+    self.assertEqual(float(agent.rank_label_mask.sum()), 0.0)
+
+
 class PPOWinValueTest(absltest.TestCase):
 
   def _make_agent(self, num_envs, env, game, value_mode="win", aux=None):
