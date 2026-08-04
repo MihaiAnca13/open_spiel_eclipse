@@ -274,6 +274,14 @@ flags.DEFINE_enum("nn_activation", "tanh", ["tanh", "gelu"],
                   "Hidden activation. Tanh saturates; gelu is the C1 default "
                   "for the wider trunk.")
 flags.DEFINE_bool(
+    "factored_actions", False,
+    "Replace the flat Linear(width, 11117) actor head with a sum of factor "
+    "embeddings recovered from the engine's own action layout. The flat head is "
+    "80-86% of all parameters and shares nothing between, say, the 5400 "
+    "colony-ship actions; the factored head uses 1420 rows (12.8%) and lets "
+    "knowledge about a galaxy cell transfer to every action targeting it. The "
+    "decode is injective, so no two actions become indistinguishable.")
+flags.DEFINE_bool(
     "separate_critic", False,
     "Give the value/aux heads their own trunk. With one shared 64-wide trunk "
     "the measured gradient split on aux-bearing rows was aux 82% / policy 11% / "
@@ -348,6 +356,44 @@ flags.DEFINE_float("exploit_lr", 1e-3,
                    "Learning rate used in exploiter mode (higher than main).")
 
 
+class FactoredActorHead(nn.Module):
+  """Actor head whose per-action weight is a sum of factor embeddings.
+
+  ``W[a] = sum_slot E[decode[a, slot]]``, so the 5,400 colony-ship actions share
+  225 cell rows, 8 slot rows and 3 track rows instead of carrying 5,400
+  independent weight vectors. See eclipse/action_factors.py for how the decode
+  table is recovered from the engine.
+
+  Interface-compatible with the ``nn.Linear`` it replaces: ``forward`` yields all
+  logits (needed for dense/eval paths) and ``rows_for`` yields just the rows the
+  sparse path asks for, which is the point -- it never materializes the full
+  (num_actions, width) matrix during training.
+  """
+
+  def __init__(self, decode, num_rows, num_actions, width):
+    super().__init__()
+    self.num_actions = num_actions
+    self.out_features = num_actions
+    self.width = width
+    # Same scale as the flat head's layer_init(std=0.01), divided over the slots
+    # that sum into each action's weight so the resulting logits keep that scale.
+    slots = decode.shape[1]
+    self.embedding = nn.Parameter(
+        torch.randn(num_rows, width) * (0.01 / np.sqrt(slots)))
+    self.bias = nn.Parameter(torch.zeros(num_actions))
+    self.register_buffer("decode", torch.from_numpy(decode.astype(np.int64)))
+
+  def rows_for(self, idx):
+    """(len(idx), width) weight rows for the given action ids."""
+    return self.embedding[self.decode[idx]].sum(dim=1)
+
+  def full_weight(self):
+    return self.embedding[self.decode].sum(dim=1)
+
+  def forward(self, features):
+    return features @ self.full_weight().t() + self.bias
+
+
 class EclipsePPOAgent(nn.Module):
   """MLP actor-critic for Eclipse's flat observation vector.
 
@@ -383,7 +429,8 @@ class EclipsePPOAgent(nn.Module):
 
   def __init__(self, num_actions, observation_shape, device, width=64,
                depth=2, aux_tasks=("final_vp",), norm=False,
-               activation="tanh", separate_critic=False):
+               activation="tanh", separate_critic=False,
+               factored_actions=None):
     super().__init__()
     in_features = int(np.array(observation_shape).prod())
     self.shared = self._trunk(in_features, width, depth, norm, activation)
@@ -403,10 +450,13 @@ class EclipsePPOAgent(nn.Module):
         self.critic_trunk,
         layer_init(nn.Linear(width, 4), std=1.0),
     )
-    self.actor = nn.Sequential(
-        self.shared,
-        layer_init(nn.Linear(width, num_actions), std=0.01),
-    )
+    if factored_actions is None:
+      actor_head = layer_init(nn.Linear(width, num_actions), std=0.01)
+    else:
+      actor_head = FactoredActorHead(
+          factored_actions.decode, factored_actions.num_rows, num_actions,
+          width)
+    self.actor = nn.Sequential(self.shared, actor_head)
     # Auxiliary heads hang off the critic trunk (they are terminal-outcome
     # regressions, same job as the value head).
     self.aux_heads = nn.ModuleDict({
@@ -476,12 +526,14 @@ class EclipsePPOAgent(nn.Module):
 
 
 def make_agent_fn(width, depth, aux_tasks=("final_vp",), norm=False,
-                  activation="tanh", separate_critic=False):
+                  activation="tanh", separate_critic=False,
+                  factored_actions=None):
   def agent_fn(num_actions, observation_shape, device):
     return EclipsePPOAgent(num_actions, observation_shape, device,
                            width=width, depth=depth, aux_tasks=aux_tasks,
                            norm=norm, activation=activation,
-                           separate_critic=separate_critic)
+                           separate_critic=separate_critic,
+                           factored_actions=factored_actions)
 
   return agent_fn
 
@@ -1487,6 +1539,12 @@ def main(_):
   input_shape = tuple(game.observation_tensor_shape())
   num_players = game.num_players()
 
+  factored = None
+  if FLAGS.factored_actions:
+    from open_spiel.python.eclipse.action_factors import factorization_from_game
+    factored = factorization_from_game(game)
+    _emit(f"factored actor head: {factored.summary()}")
+
   aux_tasks, aux_target_fn = build_aux_targets(
       FLAGS.aux_target_mode if FLAGS.aux_coef > 0 else "none",
       FLAGS.aux_vp_scale)
@@ -1529,7 +1587,7 @@ def main(_):
       agent_fn=make_agent_fn(
         FLAGS.nn_width, FLAGS.nn_depth, tuple(aux_tasks or ()),
         norm=FLAGS.nn_norm, activation=FLAGS.nn_activation,
-        separate_critic=FLAGS.separate_critic),
+        separate_critic=FLAGS.separate_critic, factored_actions=factored),
       value_mode=FLAGS.value_mode,
       aux_tasks=aux_tasks,
       aux_target_fn=aux_target_fn,
@@ -1546,7 +1604,7 @@ def main(_):
     agent_fn_r = make_agent_fn(
         FLAGS.nn_width, FLAGS.nn_depth, tuple(aux_tasks or ()),
         norm=FLAGS.nn_norm, activation=FLAGS.nn_activation,
-        separate_critic=FLAGS.separate_critic)
+        separate_critic=FLAGS.separate_critic, factored_actions=factored)
     resume_src = FLAGS.resume
     sd = None
     # Resolve roster ids ("main", "snap_u100", ...) whenever the roster dir
@@ -1617,7 +1675,7 @@ def main(_):
   agent_fn = make_agent_fn(
         FLAGS.nn_width, FLAGS.nn_depth, tuple(aux_tasks or ()),
         norm=FLAGS.nn_norm, activation=FLAGS.nn_activation,
-        separate_critic=FLAGS.separate_critic)
+        separate_critic=FLAGS.separate_critic, factored_actions=factored)
   num_actions = game.num_distinct_actions()
   roster = None
   matchmaker = None

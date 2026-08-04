@@ -256,6 +256,16 @@ def legal_actions_to_mask(legal_actions_list, num_actions, device="cpu"):
   return mask
 
 
+def head_rows(head, idx):
+  """Weight rows for action ids ``idx``, for either head type.
+
+  A factored head exposes ``rows_for`` and never materializes the full
+  (num_actions, width) matrix; a plain nn.Linear is indexed directly.
+  """
+  rows_for = getattr(head, "rows_for", None)
+  return rows_for(idx) if rows_for is not None else head.weight[idx]
+
+
 class PPO(nn.Module):
   """PPO Agent implementation in PyTorch.
 
@@ -1154,9 +1164,11 @@ class PPO(nn.Module):
     log_prob / entropy only over the ~legal actions instead of all 11117.
     """
     net = self.network
-    return (hasattr(net, "shared") and isinstance(net.actor, nn.Sequential)
-            and isinstance(net.actor[-1], nn.Linear)
-            and net.actor[-1].out_features == self.num_actions)
+    if not (hasattr(net, "shared") and isinstance(net.actor, nn.Sequential)):
+      return False
+    head = net.actor[-1]
+    return (getattr(head, "out_features", None) == self.num_actions
+            and (isinstance(head, nn.Linear) or hasattr(head, "rows_for")))
 
   def _pack_legal_batch(self, n_extra, remap=None, extra_base=None):
     """Builds (rows, cols, counts) over the whole flattened batch.
@@ -1232,7 +1244,7 @@ class PPO(nn.Module):
               torch.zeros(b, device=self.device))
     rows_gpu = torch.from_numpy(rows).to(self.device)
     cols_gpu = torch.from_numpy(cols).to(self.device)
-    w = weight[cols_gpu]             # (M, H)
+    w = head_rows(weight, cols_gpu)  # (M, H)
     f = features[rows_gpu]           # (M, H)
     logits_e = (f * w).sum(-1) + bias[cols_gpu]   # (M,)
     # segment reductions per block (entries of a sample are contiguous)
@@ -1250,7 +1262,7 @@ class PPO(nn.Module):
     lse = torch.where(empty, torch.zeros_like(m), m + safe_s.log())
     entropy = torch.where(empty, torch.zeros_like(m), lse - num / safe_s)
     # log_prob of the chosen action: logit_a = features @ W[action] + b[action]
-    wa = weight[actions_mb]          # (B_mb, H)
+    wa = head_rows(weight, actions_mb)   # (B_mb, H)
     logit_a = (features * wa).sum(-1) + bias[actions_mb]
     logprob = logit_a - lse
     return logprob, entropy
@@ -1260,7 +1272,7 @@ class PPO(nn.Module):
     row's entries contiguous); ``cols`` the legal action ids; ``features`` the
     shared features for the batch. Returns (M,) logits and the (M,) rows torch
     tensor for downstream segment ops."""
-    w = weight[cols]                 # (M, H)
+    w = head_rows(weight, cols)      # (M, H)
     f = features[rows]               # (M, H)
     return (f * w).sum(-1) + bias[cols]
 
@@ -1311,7 +1323,7 @@ class PPO(nn.Module):
   def _log_prob_chosen(self, features, chosen, lse, weight, bias):
     """(B,) log_prob of ``chosen`` under the masked distribution with known
     per-row logsumexp ``lse``."""
-    wa = weight[chosen]
+    wa = head_rows(weight, chosen)
     logit_a = (features * wa).sum(-1) + bias[chosen]
     return logit_a - lse
 
@@ -1362,11 +1374,11 @@ class PPO(nn.Module):
       cols = torch.from_numpy(mask_cols[keep].astype(np.int64)).to(self.device)
       rows = torch.from_numpy(rows_np.astype(np.int64)).to(self.device)
       logits_e = self._pack_logits(features, rows, cols,
-                                   net.actor[-1].weight, net.actor[-1].bias)
+                                   net.actor[-1], net.actor[-1].bias)
       chosen = self._gumbel_sample(logits_e, rows, cols, n)
       lse, ent = self._segment_lse_entropy(logits_e, rows, n)
       lp = self._log_prob_chosen(features, chosen, lse,
-                                 net.actor[-1].weight, net.actor[-1].bias)
+                                 net.actor[-1], net.actor[-1].bias)
       if hasattr(net, "value_from_obs"):
         v = net.value_from_obs(obs[idx]).view(-1)
       elif hasattr(net, "value_from_features"):
@@ -1569,7 +1581,7 @@ class PPO(nn.Module):
             col_idx = np.repeat(starts, cnt_mb) + within
             logprob, entropy = self._sparse_minibatch(
                 features, rep, sparse_cols[col_idx],
-                b_actions.long()[mb_inds], self.network.actor[-1].weight,
+                b_actions.long()[mb_inds], self.network.actor[-1],
                 self.network.actor[-1].bias)
           else:
             # Degenerate empty minibatch: uniform, zero-entropy losses.
