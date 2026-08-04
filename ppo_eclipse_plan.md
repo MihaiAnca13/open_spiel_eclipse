@@ -146,3 +146,98 @@ Prior to this plan, `open_spiel/python/algorithms/alpha_zero/*` was extended to 
 It's being kept because: (1) Stage 4 above (wrapping a trained PPO policy with a light MCTS at play time) could directly reuse the AlphaZero evaluator/model/MCTS integration work; (2) if PPO self-play underperforms after real tuning, AlphaZero is a validated fallback.
 
 **To avoid confusing future sessions about which path is active**: a follow-up (non-implementation) task should add a short pointer — e.g. a note at the top of `open_spiel/python/algorithms/alpha_zero/alpha_zero.py` or a small README in that directory — stating that PPO self-play (`open_spiel/python/pytorch/ppo.py`) is the active Eclipse training path, and linking back to this plan/decision. Not done in this session per instruction (docs-only, no code edits this session).
+
+---
+
+# Sprint A corrections (2026-08-04) — READ THIS BEFORE TRUSTING ANYTHING ABOVE
+
+Several conclusions recorded above were measured through a saturated metric, on a
+truncated action space, against a degenerate objective. They are corrected here
+rather than edited in place, so the reasoning trail stays intact.
+
+## What was actually wrong
+
+1. **The objective's global optimum was mutual bankruptcy.** `rank_utility` gave
+   tied seats the *best* placement slot, so `[0,0,0,0]` paid every seat +1.0 --
+   the maximum. Since ~95% of unskilled games ended with all four players
+   eliminated by bankruptcy in round 1-2, training began at the objective's
+   maximum. The grid's "scoring decreases under training" (`phi=none` 5.3 -> 1.67,
+   `phi=banked` 0.30 -> 0.05) was this, working as specified.
+2. **Every strength metric shared the same tie rule.** `rank = 1 + sum(rewards >
+   main_best)` scores a 0-0-0-0 game as rank 1 for main. Hence
+   `squad/main_win_rate` = 0.97 at 1.7M steps and 0.95 at 408M, and four of six
+   grid cells reporting an identical 8/8 against both fixed baselines. **The
+   fixed-baseline columns in the Sprint-1 table carry no information.** Only
+   `nonzero_episodes` and the own-squad column did.
+3. **The async env silently dropped ~2/3 of every legal action set.**
+   `_probe_max_legal` sized the shared buffer from *initial* states only (13-15)
+   while real states reach 133, and `publish` truncated with `min(...)`. Measured:
+   20% of decisions truncated, 68% of legal entries dropped, systematically the
+   highest id blocks -- MOVE and UPGRADE. Every league and grid run used
+   `--num_workers>0`, so **the agent could not move fleets or upgrade ships.**
+   This also explains why the early 16-env *sync* pilots reached ~4.6 mean VP
+   while the 128-env async runs sat at 0.33 with 4000x the compute.
+4. **`--phi=learned` is not a potential function.** It differences the critic's
+   value at the *next acting seat's* state against the mover's own -- two
+   different players' values in a competitive game. The Sprint-1 verdict that
+   selected it as default was produced by (2) on top of (3).
+5. **The aux head was both dead and gradient-eating.** Its `/200` normalization
+   was dropped, so the target was raw VP: ~0 (aux_loss 1e-5) in the 408M run, and
+   8-11 against pg_loss ~1e-3 in the grid, where global grad-norm clipping then
+   rescaled the policy gradient toward zero.
+6. **Non-acting seats' GAE chains crossed episode boundaries.** Only the seat that
+   made the final move got `done=1`; the other three bootstrapped into the next
+   episode's values *and* were duplicated as extra samples with a contradictory
+   target.
+7. **The engine violated the rulebook on elimination.** Eliminated players scored
+   0.0 although the rulebook says they count their score, making "died in round
+   2" indistinguishable from "solvent through round 8".
+
+## What changed (all committed, all tested)
+
+Tie-averaged (fractional-rank) utility, exactly constant-sum, plus a clamped
+`--rank_vp_beta` escape bonus that can only break ties; `max_legal` defaults to
+the full action space and truncation now raises; `--phi=telescope` (new default)
+differences a banked-VP potential across each seat's *own* consecutive decisions,
+which is the only variant that telescopes against the per-own-decision gamma in
+the self-play GAE; aux targets bounded and scale-guarded at startup, with a new
+`losses/aux_share` diagnostic; terminal attribution rewritten (write-or-extra,
+never both); eliminated players score their snapshot VP; and a batch of smaller
+fixes (sync-path NaN from a leaked loop variable, `--exploit_lr` being reverted by
+LR annealing, no checkpointing without `--league`, `--resume` losing optimizer
+state, 182MB of unused mask buffer, `ACTION_MOVE_START` off by 640).
+
+## Measured effect
+
+Random play, 30 games, after the objective + engine fixes:
+
+| | before | after |
+|---|---|---|
+| games with all four seats at 0 | 19/20 (95%) | 3/30 (10%) |
+| episodes with no gradient at all | ~95% | 10% |
+| within-game utility spread | 0 for 95% of games | 1.008 mean |
+| sum of utilities per game | outcome-dependent (up to 4.0) | exactly 1.0 |
+
+First short training run (128 envs / 16 workers, telescope phi, 0.8M steps) --
+compare against the 408M-step run's terminal values:
+
+| | 408M-step run | this run @0.8M |
+|---|---|---|
+| `nonzero_episodes` (of 200) | 23 | 197 |
+| `mean_episode_return` (seat-0 VP) | 0.33 | 10.22 |
+| `explained_variance` | 0.69 (on a constant) | 0.42 and rising |
+| SPS | ~10k | 16-19k |
+
+## Still open
+
+- `losses/aux_share` reads ~0.71, i.e. the aux term is most of the loss
+  magnitude and (via global grad-norm clipping) is still suppressing the policy
+  gradient: `approx_kl` 0.002 and `clipfrac` 0.004 remain well below healthy PPO
+  bands (~0.01-0.03 / ~0.05-0.2). `--aux_coef` wants lowering by ~10x; this is
+  the first thing Sprint B should settle.
+- Sprint B (batched evaluator over a fixed held-out seed set, Elo, the
+  elimination-rate / rounds-survived / per-action-family diagnostics) and the
+  re-adjudication of the six grid cells are **not done**. The Sprint-1 ranking
+  should not be reused until then.
+- Sprint C (capacity, factored action head, distributional rank critic,
+  play-time search) is untouched.
