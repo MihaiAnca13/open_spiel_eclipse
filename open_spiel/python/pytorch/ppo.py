@@ -439,6 +439,8 @@ class PPO(nn.Module):
     self.updates_done = 0
     self.start_time = time.time()
 
+    self._aux_unsupported_warned = False
+
     # Per-update loss diagnostics (filled by _learn_core), so outer loops can
     # report value/policy/entropy/aux loss + KL/clip/explained-variance without
     # pulling them from a tensorboard writer.
@@ -1478,6 +1480,15 @@ class PPO(nn.Module):
         # are masked out, so the loss is over the available fraction.
         aux_loss = torch.zeros((), device=self.device)
         aux_hit = 0
+        if self.num_aux and features is None:
+          # Aux heads need the shared trunk features, which only the sparse path
+          # produces. Silently training no aux head while aux_coef > 0 hid a dead
+          # head for an entire 408M-step run; say so once.
+          if not self._aux_unsupported_warned:
+            self._aux_unsupported_warned = True
+            print("WARNING: aux_coef>0 but this network has no shared-feature "
+                  "path (needs `shared` + `get_aux`); aux heads are NOT being "
+                  "trained.")
         if self.num_aux and features is not None:
           pred = self.network.get_aux(features)
           tgt = b_aux[mb_inds]
@@ -1508,12 +1519,24 @@ class PPO(nn.Module):
     explained_var = np.nan if var_y == 0 else 1 - np.var(y_true -
                                                           y_pred) / var_y
 
+    # Share of the total loss magnitude contributed by the auxiliary term. The
+    # gradient is clipped globally (max_grad_norm over all parameters), so an
+    # aux term that dwarfs the policy term rescales the policy gradient toward
+    # zero. Observed in the Sprint-1 grid: aux_loss ~8-11 (unnormalized raw-VP
+    # targets) against pg_loss ~1e-3, i.e. the optimizer was almost entirely
+    # doing VP regression. Anything sustained above ~0.5 here wants attention.
+    _pg = abs(float(pg_loss.detach()))
+    _vf = self.value_coef * abs(float(v_loss.detach()))
+    _aux = self.aux_coef * abs(float(aux_loss.detach())) if aux_hit else 0.0
+    aux_share = _aux / (_pg + _vf + _aux + 1e-12)
+
     # Per-update diagnostics for the outer loop (tqdm progress / console).
     self.last_metrics = {
         "policy_loss": float(pg_loss.detach()),
         "value_loss": float(v_loss.detach()),
         "entropy": float(entropy_loss.detach()),
         "aux_loss": float(aux_loss.detach()),
+        "aux_share": aux_share,
         "clipfrac": float(np.mean(clipfracs)),
         "old_kl": float(old_approx_kl.detach()),
         "kl": float(approx_kl.detach()),
@@ -1534,6 +1557,8 @@ class PPO(nn.Module):
                              self.total_steps_done)
       if self.num_aux and features is not None:
         self.writer.add_scalar("losses/aux_loss", aux_loss.item(),
+                               self.total_steps_done)
+        self.writer.add_scalar("losses/aux_share", aux_share,
                                self.total_steps_done)
       self.writer.add_scalar("losses/old_approx_kl", old_approx_kl.item(),
                              self.total_steps_done)

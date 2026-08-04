@@ -198,10 +198,19 @@ flags.DEFINE_float(
 flags.DEFINE_float("aux_coef", 0.1,
                    "Weight of auxiliary-head losses (e.g. final-VP regression).")
 flags.DEFINE_enum(
-    "aux_target_mode", "vp", ["vp", "rank", "none"],
-    "Aux-head regression target. 'vp' = raw final VP / 200 (legacy, saturates "
-    "to 0 on zero-VP games). 'rank' = per-seat rank-utility (nonzero signal "
-    "even when every seat banks ~0 VP). 'none' disables the aux head.")
+    "aux_target_mode", "rank", ["vp", "rank", "both", "none"],
+    "Aux-head regression target. 'rank' (default) = per-seat tie-aware rank "
+    "utility: bounded in [-0.5, 1] by construction, so it can neither vanish "
+    "nor dominate. 'vp' = final VP / --aux_vp_scale. 'both' supervises a "
+    "normalized-VP head and a rank head. 'none' disables aux heads. Note the "
+    "target must be O(1): raw VP targets gave aux_loss ~8-11 against pg_loss "
+    "~1e-3, and because the gradient is clipped globally that rescaled the "
+    "policy gradient toward zero.")
+flags.DEFINE_float(
+    "aux_vp_scale", 30.0,
+    "Divisor for the 'vp' aux target. A contested Eclipse game scores ~20-40 "
+    "VP, so /30 keeps the target O(1); the old /200 (and, after a regression, "
+    "no divisor at all) made it either invisible or overwhelming.")
 flags.DEFINE_float("learning_rate", 2.5e-4, "Learning rate.")
 flags.DEFINE_integer("num_minibatches", 4, "Number of minibatches.")
 flags.DEFINE_integer("update_epochs", 4, "Number of updates epochs.")
@@ -288,7 +297,7 @@ class EclipsePPOAgent(nn.Module):
   RANK_UTILITY = (1.0, 0.5, 0.0, -0.5)
 
   def __init__(self, num_actions, observation_shape, device, width=64,
-               depth=2):
+               depth=2, aux_tasks=("final_vp",)):
     super().__init__()
     layers = []
     in_features = np.array(observation_shape).prod()
@@ -306,9 +315,12 @@ class EclipsePPOAgent(nn.Module):
         self.shared,
         layer_init(nn.Linear(width, num_actions), std=0.01),
     )
-    # Auxiliary heads: predict terminal quantities from the shared trunk.
+    # Auxiliary heads: predict terminal quantities from the shared trunk. Which
+    # heads exist is driven by --aux_target_mode so the head set and the target
+    # matrix always agree in width.
     self.aux_heads = nn.ModuleDict({
-        "final_vp": layer_init(nn.Linear(width, 1), std=1.0),
+        name: layer_init(nn.Linear(width, 1), std=1.0)
+        for name in (aux_tasks or ())
     })
     self.num_actions = num_actions
     self.device = device
@@ -345,12 +357,49 @@ class EclipsePPOAgent(nn.Module):
         x), probs.probs
 
 
-def make_agent_fn(width, depth):
+def make_agent_fn(width, depth, aux_tasks=("final_vp",)):
   def agent_fn(num_actions, observation_shape, device):
     return EclipsePPOAgent(num_actions, observation_shape, device,
-                           width=width, depth=depth)
+                           width=width, depth=depth, aux_tasks=aux_tasks)
 
   return agent_fn
+
+
+# Aux-head names by --aux_target_mode, and the per-seat target each produces.
+_AUX_TASKS_BY_MODE = {
+    "vp": ("final_vp",),
+    "rank": ("final_rank",),
+    "both": ("final_vp", "final_rank"),
+    "none": (),
+}
+
+
+def build_aux_targets(mode, vp_scale):
+  """(task names, target fn) for ``--aux_target_mode``.
+
+  The target fn maps a terminal per-seat payoff vector to a
+  (num_players, num_tasks) matrix. Targets must be O(1): the gradient is clipped
+  globally, so an aux term far larger than the policy term rescales the policy
+  gradient toward zero. Raw-VP targets (the state this replaces) reached
+  aux_loss ~8-11 against pg_loss ~1e-3.
+  """
+  tasks = _AUX_TASKS_BY_MODE[mode]
+  if not tasks:
+    return None, None
+
+  def target_fn(rvec):
+    arr = np.asarray(rvec, dtype=np.float32)
+    cols = []
+    for task in tasks:
+      if task == "final_vp":
+        cols.append(arr / float(vp_scale))
+      else:  # final_rank: bounded in [-0.5, 1] by construction.
+        cols.append(np.asarray(
+            [rank_utility(arr, s) for s in range(arr.shape[0])],
+            dtype=np.float32))
+    return np.stack(cols, axis=1)
+
+  return list(tasks), target_fn
 
 
 # Win-mode potential squash: raw VP-unit potentials are mapped onto the
@@ -905,6 +954,10 @@ def _log_update(agent, episode_returns, recent_returns, writer, update, eval_eve
     ]
     if metrics.get("aux_loss") is not None:
       parts.append(f"aux_loss={metrics['aux_loss']:.4f}")
+    if metrics.get("aux_share") is not None:
+      # Fraction of the total loss magnitude that is the aux term. The grad-norm
+      # clip is global, so a large share silently shrinks the policy gradient.
+      parts.append(f"aux_share={metrics['aux_share']:.2f}")
     parts.append(f"approx_kl={metrics['kl']:.4f}")
     parts.append(f"clipfrac={metrics['clipfrac']:.3f}")
     parts.append(f"explained_var={metrics['explained_variance']:.3f}")
@@ -1024,6 +1077,23 @@ def main(_):
   input_shape = tuple(game.observation_tensor_shape())
   num_players = game.num_players()
 
+  aux_tasks, aux_target_fn = build_aux_targets(
+      FLAGS.aux_target_mode if FLAGS.aux_coef > 0 else "none",
+      FLAGS.aux_vp_scale)
+  if aux_target_fn is not None:
+    # Sanity-check the target scale against a plausibly-high Eclipse result
+    # before spending GPU hours: an O(10) target with aux_coef=0.1 crowds the
+    # policy gradient out of the global grad-norm clip.
+    probe = aux_target_fn(np.array([40.0, 25.0, 10.0, 0.0], dtype=np.float32))
+    biggest = float(np.max(np.abs(probe)))
+    _emit(f"aux_tasks={aux_tasks} target_mode={FLAGS.aux_target_mode} "
+          f"max|target| at 40 VP = {biggest:.3f}")
+    if biggest > 3.0:
+      raise ValueError(
+          f"aux target magnitude {biggest:.2f} is too large to sit next to a "
+          f"policy loss of order 1e-2 under a global grad-norm clip; lower "
+          f"--aux_coef or raise --aux_vp_scale")
+
   agent = PPO(
       input_shape=input_shape,
       num_actions=game.num_distinct_actions(),
@@ -1046,17 +1116,10 @@ def main(_):
       target_kl=FLAGS.target_kl,
       device=device,
       writer=writer,
-      agent_fn=make_agent_fn(FLAGS.nn_width, FLAGS.nn_depth),
+      agent_fn=make_agent_fn(FLAGS.nn_width, FLAGS.nn_depth, tuple(aux_tasks or ())),
       value_mode=FLAGS.value_mode,
-      aux_tasks=["final_vp"] if (FLAGS.aux_coef > 0 and
-                                 FLAGS.aux_target_mode != "none") else None,
-      aux_target_fn=(None if FLAGS.aux_target_mode == "none" else
-                     (lambda rvec, m=FLAGS.aux_target_mode:
-                      (np.asarray(rvec, dtype=np.float32).reshape(-1, 1)
-                       if m == "vp" else
-                       np.asarray([
-                           rank_utility(rvec, s) for s in range(len(rvec))
-                       ], dtype=np.float32).reshape(-1, 1)))),
+      aux_tasks=aux_tasks,
+      aux_target_fn=aux_target_fn,
       aux_coef=FLAGS.aux_coef,
       rank_vp_beta=(FLAGS.rank_vp_beta if FLAGS.value_mode == "win" else 0.0),
   )
@@ -1065,7 +1128,7 @@ def main(_):
   _emit(f"device={device}  game={FLAGS.game}  num_envs={FLAGS.num_envs}"
         f"  num_workers={FLAGS.num_workers}")
   if FLAGS.resume:
-    agent_fn_r = make_agent_fn(FLAGS.nn_width, FLAGS.nn_depth)
+    agent_fn_r = make_agent_fn(FLAGS.nn_width, FLAGS.nn_depth, tuple(aux_tasks or ()))
     resume_src = FLAGS.resume
     sd = None
     if FLAGS.league or FLAGS.exploit_victim:
@@ -1080,7 +1143,14 @@ def main(_):
       raise ValueError(
           f"--resume={resume_src}: not a roster id in {FLAGS.roster_dir} and "
           f"not an existing .pt path")
-    agent.network.load_state_dict(sd)
+    # Tolerant load: --aux_target_mode determines which aux heads exist, so a
+    # checkpoint written under a different mode has different head names. The
+    # trunk/actor/critic still transfer; report exactly what did not.
+    incompatible = agent.network.load_state_dict(sd, strict=False)
+    if incompatible.missing_keys or incompatible.unexpected_keys:
+      _emit(f"resume: partial load from {resume_src} — "
+            f"freshly initialized {list(incompatible.missing_keys)}, "
+            f"ignored {list(incompatible.unexpected_keys)}")
     _emit(f"resumed network weights from {resume_src}")
 
   batch_size = FLAGS.num_envs * FLAGS.num_steps
@@ -1116,7 +1186,7 @@ def main(_):
 
 
   # League (population self-play) setup: roster + matchmaker + lineups.
-  agent_fn = make_agent_fn(FLAGS.nn_width, FLAGS.nn_depth)
+  agent_fn = make_agent_fn(FLAGS.nn_width, FLAGS.nn_depth, tuple(aux_tasks or ()))
   num_actions = game.num_distinct_actions()
   roster = None
   matchmaker = None
