@@ -289,6 +289,15 @@ flags.DEFINE_integer(
     "max_seconds", 0,
     "Hard wall-clock cap (seconds) for fail-fast runs: at this deadline emit "
     "a final verdict + snapshot the roster and exit 0. 0 disables.")
+flags.DEFINE_bool(
+    "eval_batched", True,
+    "Run verdict evals through AsyncVectorEnv instead of one fresh single-game "
+    "environment per game. The old path did one 1-sample forward per decision, "
+    "which is why --eval_games stayed at 8 (+-0.18 on a win rate, unable to "
+    "separate any two configurations).")
+flags.DEFINE_integer(
+    "eval_envs", 64,
+    "Parallel environments used by the batched evaluator.")
 flags.DEFINE_integer(
     "eval_games", 32,
     "Games per baseline in the verdict eval. 8 (the old value) gives a +-0.18 "
@@ -939,6 +948,103 @@ def _fmt_eval(label, res, num_players):
           f"{beats}")
 
 
+def _argmax_over_legal(net, obs_np, legal_rows, legal_cols, idx, device):
+  """Greedy action per row of ``idx``, restricted to that row's legal set.
+
+  One batched forward for the whole group; illegal logits are masked to -inf
+  before the argmax. The dense mask is affordable here (eval batches are small
+  and this runs at eval cadence, not in the rollout hot loop).
+  """
+  with torch.no_grad():
+    x = torch.from_numpy(obs_np[idx]).to(device)
+    logits = net.actor(x)
+    mask = torch.full_like(logits, float("-inf"))
+    local = np.full(obs_np.shape[0], -1, dtype=np.int64)
+    local[idx] = np.arange(len(idx))
+    keep = local[legal_rows] >= 0
+    rows = torch.from_numpy(local[legal_rows[keep]]).to(device)
+    cols = torch.from_numpy(legal_cols[keep].astype(np.int64)).to(device)
+    mask[rows, cols] = logits[rows, cols]
+    return mask.argmax(dim=1).detach().cpu().numpy()
+
+
+def evaluate_batched(policies, lineup, game_strs, num_players, num_games,
+                     num_workers, device, main_seats, max_legal):
+  """Plays ``num_games`` complete games in parallel and scores main's outcomes.
+
+  Replaces the per-game single-env evaluators, which built a fresh
+  ``rl_environment`` per game and ran one 1-sample forward per decision. At 8
+  games that gave a +-0.18 standard error on a win rate -- unable to separate any
+  two configurations -- and it was ~100x slower than it needed to be, which is
+  precisely why the number stayed at 8.
+
+  ``policies`` maps a policy id to either an ``nn.Module`` (driven greedily) or a
+  ``bot(obs, legal) -> action`` callable. ``lineup`` is (num_envs, num_players)
+  of policy ids. ``game_strs`` fixes the boards, so repeated calls at different
+  points in training are paired on the same galaxies.
+
+  Returns an EvalResult whose ``utils`` are per-game mean tie-aware rank
+  utilities over ``main_seats``, plus an EpisodeDiagnostics for the eval games.
+  """
+  num_envs = len(game_strs)
+  envs = [
+      rl_environment.Environment(
+          game=pyspiel.load_game(game_strs[i]),
+          chance_event_sampler=rl_environment.ChanceEventSampler(seed=1 + i),
+          observation_type=rl_environment.ObservationType.OBSERVATION,
+          observations_as_numpy=True)
+      for i in range(num_envs)
+  ]
+  vec = AsyncVectorEnv(envs, num_workers=min(num_workers, num_envs),
+                       sampler_seeds=[1 + i for i in range(num_envs)],
+                       game_strs=game_strs, max_legal=max_legal)
+  diag = EpisodeDiagnostics(num_envs, num_players, history=max(num_games, 1))
+  utils, ranks, wins = [], [], 0
+  try:
+    vec.reset(players="current")
+    arrays = vec.reset_np()
+    # Bounded: a game is ~150 decisions, so this cannot spin forever if some env
+    # stalls -- it exits and reports however many games completed.
+    max_steps = 400 * (num_games // max(1, num_envs) + 2)
+    for _ in range(max_steps):
+      if len(utils) >= num_games:
+        break
+      seats = arrays.seats.astype(np.int64)
+      diag.observe(arrays.obs, seats)
+      pids = np.array([lineup[i][seats[i]] for i in range(num_envs)],
+                      dtype=object)
+      actions = np.zeros(num_envs, dtype=np.int32)
+      counts = np.bincount(arrays.legal_rows.astype(np.int64),
+                           minlength=num_envs)
+      offsets = np.zeros(num_envs, dtype=np.int64)
+      np.cumsum(counts[:-1], out=offsets[1:])
+      for pid in set(pids.tolist()):
+        idx = np.flatnonzero(pids == pid)
+        policy = policies[pid]
+        if isinstance(policy, nn.Module):
+          actions[idx] = _argmax_over_legal(
+              policy, arrays.obs, arrays.legal_rows, arrays.legal_cols, idx,
+              device)
+        else:
+          for i in idx:
+            legal = arrays.legal_cols[offsets[i]:offsets[i] + counts[i]]
+            actions[i] = policy(arrays.obs[i], legal)
+      arrays = vec.step_np(actions, reset_if_done=True)
+      done_idx = np.flatnonzero(arrays.dones)
+      if done_idx.size:
+        diag.close_episodes(done_idx, arrays.rewards)
+        for i in done_idx:
+          if len(utils) >= num_games:
+            break
+          utility, rank = main_outcome(arrays.rewards[i], main_seats)
+          utils.append(utility)
+          ranks.append(rank)
+          wins += int(rank == 1)
+  finally:
+    vec.close()
+  return EvalResult(wins, len(utils), ranks, utils), diag
+
+
 def _eval_squad(agent, roster, agent_fn, num_actions, input_shape, device,
                 game_str, num_players, num_games, rng_seed, main_seats=(0, 1)):
   """Plays main (argmax) against a snapshots-only squad.
@@ -1063,15 +1169,45 @@ def _run_verdict(agent, roster, agent_fn, num_actions, input_shape, device,
   # moved with the step count added board variance to every comparison.
   eval_seed = FLAGS.seed + FLAGS.eval_seed_offset
   writer.add_scalar("verdict/chance_utility", chance_utility(num_players), step)
+  rand_bot = lambda _o, legal: int(
+      bot_rng.choice(np.asarray(legal, dtype=np.int32)))
+  greedy_bot = lambda obs, legal: _greedy_pick(
+      np.asarray(obs, dtype=np.float32), legal, bot_rng)
+
+  if FLAGS.eval_batched:
+    # Fixed held-out boards, so evals at different points in training are paired.
+    eval_strs = [_randomized_game_string(FLAGS.game, eval_seed + j)
+                 for j in range(FLAGS.eval_envs)]
+    main_seats = (0, 1)
+    def _batched(bot):
+      lineup = [[("main" if s in main_seats else "bot")
+                 for s in range(num_players)] for _ in range(FLAGS.eval_envs)]
+      res, diag = evaluate_batched(
+          {"main": agent.network, "bot": bot}, lineup, eval_strs, num_players,
+          FLAGS.eval_games, max(1, FLAGS.num_workers), device, main_seats,
+          num_actions)
+      return res, diag
+    if FLAGS.eval_random:
+      res, edg = _batched(rand_bot)
+      _record("Random", "random", res)
+      dstats = edg.summary()
+      if dstats:
+        _emit(f"    eval-game health: wipeout={dstats['wipeout_rate']:.2f} "
+              f"elim_round={dstats['mean_elim_round']:.2f}/8 "
+              f"vp_all={dstats['vp_all_seats_mean']:.2f}")
+        for k, v in dstats.items():
+          if k != "episodes":
+            writer.add_scalar(f"verdict_health/{k}", v, step)
+    if FLAGS.eval_greedy:
+      res, _ = _batched(greedy_bot)
+      _record("Greedy", "greedy", res)
+    return out
+
   if FLAGS.eval_random:
-    rand_bot = lambda _o, legal: int(
-        bot_rng.choice(np.asarray(legal, dtype=np.int32)))
     _record("Random", "random",
             _eval_fixed_opponent(agent, rand_bot, game_str, num_players,
                                  num_games=num_games, rng_seed=eval_seed))
   if FLAGS.eval_greedy:
-    greedy_bot = lambda obs, legal: _greedy_pick(
-        np.asarray(obs, dtype=np.float32), legal, bot_rng)
     _record("Greedy", "greedy",
             _eval_fixed_opponent(agent, greedy_bot, game_str, num_players,
                                  num_games=num_games, rng_seed=eval_seed))

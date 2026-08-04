@@ -249,9 +249,21 @@ compare against the 408M-step run's terminal values:
   (a candidate for raising `--learning_rate`) rather than at broken updates.
   Contrast the 408M-step run, where entropy was *flat* at 0.53 -- that was the
   real no-learning signature, not the clipfrac value.
-- Sprint B (batched evaluator over a fixed held-out seed set, Elo, the
-  elimination-rate / rounds-survived / per-action-family diagnostics) and the
-  re-adjudication of the six grid cells are **not done**. The Sprint-1 ranking
-  should not be reused until then.
+- **Sprint B partially done.** B2 (episode-health diagnostics) and B1 (batched
+  evaluator) have landed; the re-adjudication of the six grid cells (B3) and Elo
+  over the roster have **not**. The Sprint-1 ranking should not be reused until
+  B3 runs.
+  - Correction to the B1 estimate above: the old per-game evaluator was assumed
+    to be ~100x slower than necessary. Measured, it is **2.3x** per game (20 ms
+    vs 9 ms) -- Eclipse env stepping is cheap enough that the per-decision
+    1-sample forward was not the dominant cost. The real win is that 64+ games
+    per eval is now routine (0.6 s) instead of 8 being the practical ceiling, so
+    the reported interval is narrow enough to separate configurations.
+  - Sanity check that the metric now behaves: an *untrained* network scores
+    utility +0.254 against a chance level of +0.250, CI [+0.172, +0.332] --
+    correctly inconclusive. Under the old tie rule the same situation reported
+    wins.
+  - `mean_elim_round` is the metric to watch. Random play sits at 1.25/8 with a
+    wipeout rate of 1.00; a 17k-step smoke already moves it to 1.95 and 0.94.
 - Sprint C (capacity, factored action head, distributional rank critic,
   play-time search) is untouched.
