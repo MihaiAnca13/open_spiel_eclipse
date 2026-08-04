@@ -357,9 +357,14 @@ class PPO(nn.Module):
     self.optimizer = optim.Adam(
         self.parameters(), lr=self.learning_rate, eps=1e-5)
 
-    # Initialize training buffers
+    # Initialize training buffers. The dense legal-action mask is only read by
+    # the dense learn path; when the sparse path is active the packed
+    # rows/cols drive the loss instead, so allocating it wastes real memory --
+    # (steps, envs, num_actions) bool is 182 MB at 128 envs for Eclipse's 11117
+    # actions, and scales linearly with num_envs.
+    mask_steps = 0 if self._sparse_supported() else self.steps_per_batch
     self.legal_actions_mask = torch.zeros(
-        (self.steps_per_batch, self.num_envs, self.num_actions),
+        (mask_steps, self.num_envs, self.num_actions),
         dtype=torch.bool).to(device)
     self.obs = torch.zeros((self.steps_per_batch, self.num_envs) +
                            self.input_shape).to(device)
@@ -606,7 +611,8 @@ class PPO(nn.Module):
             dtype=torch.bool)
         self.trainable_cpu[row] = trainable_row
         self.trainable[row] = trainable_row.to(self.device)
-        self.legal_actions_mask[row] = legal_actions_mask
+        if self.legal_actions_mask.shape[0]:
+          self.legal_actions_mask[row] = legal_actions_mask
         self.obs[row] = obs
         self.actions[row] = action
         self.logprobs[row] = logprob
@@ -700,7 +706,8 @@ class PPO(nn.Module):
             self.num_envs, mask_rows, mask_cols)
         action, logprob, _, value, _ = self._act_batch(
             obs, legal_actions_mask, seats)
-        self.legal_actions_mask[row] = legal_actions_mask
+        if self.legal_actions_mask.shape[0]:
+          self.legal_actions_mask[row] = legal_actions_mask
 
       self.players[row] = torch.from_numpy(
           seats.astype(np.int64)).to(self.device)
@@ -1685,10 +1692,23 @@ class PPO(nn.Module):
         (float(beta_to) - self.rank_vp_beta_initial) * frac)
     return self.rank_vp_beta
 
+  def set_learning_rate(self, learning_rate):
+    """Sets the base LR that annealing decays from, and applies it now.
+
+    Callers that override the LR after construction (exploiter mode) must go
+    through this: ``anneal_learning_rate`` recomputes from ``self.learning_rate``,
+    so writing ``param_groups[0]["lr"]`` directly was silently reverted by the
+    first anneal call, and the override never took effect for the run.
+    """
+    self.learning_rate = float(learning_rate)
+    for group in self.optimizer.param_groups:
+      group["lr"] = self.learning_rate
+
   def anneal_learning_rate(self, update, num_total_updates):
     # Annealing the rate
     frac = 1.0 - (update / num_total_updates)
     if frac <= 0:
       raise ValueError("Annealing learning rate to <= 0")
     lrnow = frac * self.learning_rate
-    self.optimizer.param_groups[0]["lr"] = lrnow
+    for group in self.optimizer.param_groups:
+      group["lr"] = lrnow

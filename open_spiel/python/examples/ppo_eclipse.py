@@ -479,7 +479,7 @@ ACTION_BUILD_START = 75
 ACTION_UPGRADE_START = 7539
 ACTION_RESEARCH_START = 1
 ACTION_INFLUENCE_START = 5732
-ACTION_MOVE_START = 8502
+ACTION_MOVE_START = 9142  # verified via action_to_string; 8502 is an UPGRADE part
 ACTION_COLONY_START = 332
 ACTION_COLONY_END = 5731
 ACTION_PASS = 0
@@ -720,12 +720,56 @@ def _refresh_lineups(agent, matchmaker, roster, agent_fn, num_actions,
     agent.networks[pid] = networks
 
 
+def _train_state_path(roster_dir):
+  return os.path.join(roster_dir, "train_state.pt")
+
+
+def _save_train_state(agent, roster_dir):
+  """Persists optimizer state and counters alongside the weights.
+
+  ``record_main`` stores only ``net.state_dict()``, so resuming restarted Adam
+  from scratch and reset the step counter -- which also restarted the LR
+  annealing schedule at full LR. The Sprint-1 grid resumed twice, so every cell
+  in it ran on a sawtooth LR schedule.
+  """
+  torch.save({
+      "optimizer": agent.optimizer.state_dict(),
+      "total_steps_done": agent.total_steps_done,
+      "updates_done": agent.updates_done,
+      "rank_vp_beta": agent.rank_vp_beta,
+      "learning_rate": agent.learning_rate,
+  }, _train_state_path(roster_dir))
+
+
+def _load_train_state(agent, roster_dir):
+  """Restores optimizer/counters if a train_state.pt is present."""
+  path = _train_state_path(roster_dir)
+  if not os.path.exists(path):
+    return False
+  state = torch.load(path, map_location=agent.device, weights_only=False)
+  agent.optimizer.load_state_dict(state["optimizer"])
+  agent.total_steps_done = int(state.get("total_steps_done", 0))
+  agent.updates_done = int(state.get("updates_done", 0))
+  if "rank_vp_beta" in state:
+    agent.rank_vp_beta = float(state["rank_vp_beta"])
+    agent.rank_vp_beta_initial = agent.rank_vp_beta
+  return True
+
+
 def _maybe_snapshot(agent, roster, update, force=False):
-  """Captures the main policy into the roster on the snapshot cadence."""
+  """Captures the main policy into the roster on the snapshot cadence.
+
+  Reachable without --league too: a plain self-play run previously trained for
+  hours and wrote no weights at all, because this was only ever called from the
+  league branch.
+  """
+  if roster is None or FLAGS.snapshot_every <= 0:
+    return
   if force or (update > 0 and update % FLAGS.snapshot_every == 0):
     roster.record_main(agent.network, update)
     roster.add_snapshot(agent.network, update)
     roster.prune(keep_recent=4, keep_spaced=4)
+    _save_train_state(agent, str(roster.save_dir))
 
 
 # Result of an evaluation match set. ``utils`` is the per-game mean tie-aware
@@ -1172,7 +1216,10 @@ def main(_):
     agent_fn_r = make_agent_fn(FLAGS.nn_width, FLAGS.nn_depth, tuple(aux_tasks or ()))
     resume_src = FLAGS.resume
     sd = None
-    if FLAGS.league or FLAGS.exploit_victim:
+    # Resolve roster ids ("main", "snap_u100", ...) whenever the roster dir
+    # exists, not only in league mode -- snapshots are written unconditionally
+    # now, so `--resume=main` must work for a plain self-play run too.
+    if os.path.isdir(FLAGS.roster_dir):
       roster_r = PolicyRoster(FLAGS.roster_dir)
       net_r = roster_r.load_net(resume_src, agent_fn_r, game.num_distinct_actions(),
                                 input_shape, device)
@@ -1193,6 +1240,13 @@ def main(_):
             f"freshly initialized {list(incompatible.missing_keys)}, "
             f"ignored {list(incompatible.unexpected_keys)}")
     _emit(f"resumed network weights from {resume_src}")
+    if _load_train_state(agent, FLAGS.roster_dir):
+      _emit(f"resumed optimizer + counters: steps={agent.total_steps_done} "
+            f"updates={agent.updates_done} lr_base={agent.learning_rate:.2e} "
+            f"rank_vp_beta={agent.rank_vp_beta:.4g}")
+    else:
+      _emit("no train_state.pt found: Adam moments and step counters start "
+            "fresh, so the LR anneal schedule restarts at full LR")
 
   batch_size = FLAGS.num_envs * FLAGS.num_steps
   num_updates = FLAGS.total_timesteps // batch_size
@@ -1232,7 +1286,9 @@ def main(_):
   roster = None
   matchmaker = None
   exploit_victim_net = None
-  if FLAGS.league or FLAGS.exploit_victim:
+  # A roster is created whenever there is anything to checkpoint, not only in
+  # league mode: without this a plain self-play run wrote no weights at all.
+  if FLAGS.league or FLAGS.exploit_victim or FLAGS.snapshot_every > 0:
     roster = PolicyRoster(FLAGS.roster_dir)
   if FLAGS.league:
     matchmaker = Matchmaker(
@@ -1255,8 +1311,10 @@ def main(_):
       starter = exploit_victim_net
     agent.network.load_state_dict(starter.state_dict())
     if FLAGS.exploit_lr > 0:
-      for group in agent.optimizer.param_groups:
-        group["lr"] = FLAGS.exploit_lr
+      # Must update the *base* LR: anneal_learning_rate recomputes from it, so
+      # writing param_groups directly was reverted after the first update and
+      # the exploiter never actually trained at its intended rate.
+      agent.set_learning_rate(FLAGS.exploit_lr)
     lineup = np.tile(
         np.asarray(["main"] + [victim_id] * (num_players - 1), dtype=object),
         (FLAGS.num_envs, 1))
@@ -1295,8 +1353,7 @@ def main(_):
       if _deadline is not None and time.time() >= _deadline:
         _emit(f"[gate] {FLAGS.max_seconds}s hard deadline reached "
               f"(update {update}, steps={agent.total_steps_done})")
-        if FLAGS.league:
-          _maybe_snapshot(agent, roster, update, force=True)
+        _maybe_snapshot(agent, roster, update, force=True)
         _run_verdict(agent, roster, agent_fn, num_actions, input_shape,
                      device, _randomized_game_string(FLAGS.game,
                                                      FLAGS.seed + update * 7),
@@ -1317,9 +1374,6 @@ def main(_):
         t1b = time.perf_counter() if _tm is not None else None
         step_arrays = envs.step_np(acts, reset_if_done=True)
         t2 = time.perf_counter() if _tm is not None else None
-        if FLAGS.league:
-          _refresh_lineups(agent, matchmaker, roster, agent_fn, num_actions,
-                           input_shape, device, step_arrays.dones)
         shaped = np.zeros(FLAGS.num_envs, dtype=np.float32)
         if FLAGS.shaping and phi_mode not in ("none", "telescope"):
           seats = np.asarray(agent.last_seats)
@@ -1354,6 +1408,11 @@ def main(_):
         agent.post_step_np(
             step_arrays.rewards, step_arrays.dones, shaped_reward=shaped,
             phi=(phi_prev if (FLAGS.shaping and phi_telescope) else None))
+        # After post_step: terminal closeout for the finished episode must see
+        # the lineup that generated it, not the one sampled for the next.
+        if FLAGS.league:
+          _refresh_lineups(agent, matchmaker, roster, agent_fn, num_actions,
+                           input_shape, device, step_arrays.dones)
         donor_idx = np.flatnonzero(step_arrays.dones)
         for i in donor_idx:
           ret = float(step_arrays.rewards[i][0])
@@ -1381,8 +1440,7 @@ def main(_):
       if pbar is not None:
         pbar.update(FLAGS.num_envs * FLAGS.num_steps)
         _pbar_postfix()
-      if FLAGS.league:
-        _maybe_snapshot(agent, roster, update)
+      _maybe_snapshot(agent, roster, update)
       if update % FLAGS.eval_every == 0:
         _log_update(agent, episode_returns, recent_returns, writer, update)
         if FLAGS.verdict_every_sec and time.time() - _last_verdict_ts[0] >= \
@@ -1434,10 +1492,6 @@ def main(_):
 
         time_step, reward, done, unreset = envs.step(
             agent_output, reset_if_done=True, players="current")
-        if FLAGS.league:
-          _refresh_lineups(agent, matchmaker, roster, agent_fn, num_actions,
-                           input_shape, device, done)
-
         shaped = np.zeros(FLAGS.num_envs, dtype=np.float32)
         if FLAGS.shaping and phi_mode not in ("none", "telescope"):
           seats = agent.last_seats
@@ -1471,6 +1525,10 @@ def main(_):
         agent.post_step(
             reward, done, shaped_reward=shaped.tolist(),
             phi=(phi_prev if (FLAGS.shaping and phi_telescope) else None))
+        # See the async loop: refresh only after terminal bookkeeping.
+        if FLAGS.league:
+          _refresh_lineups(agent, matchmaker, roster, agent_fn, num_actions,
+                           input_shape, device, done)
 
         # Episode return logging.
         for i, ts in enumerate(unreset):
@@ -1491,8 +1549,7 @@ def main(_):
         pbar.update(FLAGS.num_envs * FLAGS.num_steps)
         _pbar_postfix()
 
-      if FLAGS.league:
-        _maybe_snapshot(agent, roster, update)
+      _maybe_snapshot(agent, roster, update)
 
       if update % FLAGS.eval_every == 0:
         _log_update(agent, episode_returns, recent_returns, writer, update)
