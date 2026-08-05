@@ -38,6 +38,7 @@ expert/human demonstration data.
 
 import collections
 from datetime import datetime
+import json
 import os
 import random
 import time
@@ -997,6 +998,30 @@ def _load_train_state(agent, roster_dir):
   return True
 
 
+def _write_arch(roster_dir, num_actions, input_shape, aux_tasks):
+  """Persists the network architecture beside the roster.
+
+  ``roster.json`` stores only weights and indices, not how the network was
+  built, so an off-line consumer (roster_ladder.py) could not reload
+  checkpoints without re-deriving the arch from the run's command line.
+  ``arch.json`` makes rosters self-describing going forward; consumers fall
+  back to the caller's arch flags when it is absent (pre-roster-ladder runs).
+  """
+  arch = {
+      "width": FLAGS.nn_width,
+      "depth": FLAGS.nn_depth,
+      "norm": FLAGS.nn_norm,
+      "activation": FLAGS.nn_activation,
+      "separate_critic": FLAGS.separate_critic,
+      "factored_actions": bool(FLAGS.factored_actions),
+      "aux_tasks": list(aux_tasks or ()),
+      "num_actions": int(num_actions),
+      "input_shape": list(input_shape),
+  }
+  with open(os.path.join(str(roster_dir), "arch.json"), "w") as f:
+    json.dump(arch, f, indent=2)
+
+
 def _maybe_snapshot(agent, roster, update, force=False):
   """Captures the main policy into the roster on the snapshot cadence.
 
@@ -1096,7 +1121,8 @@ def _argmax_over_legal(net, obs_np, legal_rows, legal_cols, idx, device):
 
 
 def evaluate_batched(policies, lineup, game_strs, num_players, num_games,
-                     num_workers, device, main_seats, max_legal):
+                     num_workers, device, main_seats, max_legal,
+                     return_seat_utils=False):
   """Plays ``num_games`` complete games in parallel and scores main's outcomes.
 
   Replaces the per-game single-env evaluators, which built a fresh
@@ -1127,6 +1153,7 @@ def evaluate_batched(policies, lineup, game_strs, num_players, num_games,
                        game_strs=game_strs, max_legal=max_legal)
   diag = EpisodeDiagnostics(num_envs, num_players, history=max(num_games, 1))
   utils, ranks, wins = [], [], 0
+  seat_utils = []  # (per-game, num_players) rank utilities when requested.
   try:
     vec.reset(players="current")
     arrays = vec.reset_np()
@@ -1167,9 +1194,15 @@ def evaluate_batched(policies, lineup, game_strs, num_players, num_games,
           utils.append(utility)
           ranks.append(rank)
           wins += int(rank == 1)
+          if return_seat_utils:
+            seat_utils.append([rank_utility(arrays.rewards[i], s)
+                               for s in range(num_players)])
   finally:
     vec.close()
-  return EvalResult(wins, len(utils), ranks, utils), diag
+  res = EvalResult(wins, len(utils), ranks, utils)
+  if return_seat_utils:
+    return res, diag, np.asarray(seat_utils, dtype=np.float64)
+  return res, diag
 
 
 def _eval_squad(agent, roster, agent_fn, num_actions, input_shape, device,
@@ -1692,6 +1725,7 @@ def main(_):
   # league mode: without this a plain self-play run wrote no weights at all.
   if FLAGS.league or FLAGS.exploit_victim or FLAGS.snapshot_every > 0:
     roster = PolicyRoster(FLAGS.roster_dir)
+    _write_arch(roster.save_dir, num_actions, input_shape, aux_tasks)
   if FLAGS.league:
     matchmaker = Matchmaker(
         roster, FLAGS.num_envs, num_players,
