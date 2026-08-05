@@ -318,3 +318,77 @@ conclusions from **one** seed and 8 eval games.
   1.00 for random play, `vp_all` 4-13 against ~1.3). That is Sprint A's objective
   and action-space fixes, not the shaping choice -- no cell is anywhere near the
   old degenerate basin.
+
+---
+
+# Sprint C result (2026-08-05): architecture A/B
+
+5 cells x 2 seeds, 18 min each on equal wall clock, `--phi=banked` as the control
+(chosen because B3 showed it to be the most seed-stable shaping, so architecture
+effects are not swamped by shaping variance). Chance utility is +0.250.
+
+| cell | Greedy mean | Greedy spread | Random mean | survivors | elim_round | vp_all | wipeout |
+|---|---|---|---|---|---|---|---|
+| base (64/2 tanh, flat head) | +0.540 | 0.260 | +0.680 | 3.00 | 6.96 | 11.79 | 0.00 |
+| C1 capacity (512/3 LN+GELU, split trunk) | +0.504 | 0.043 | +0.655 | 2.05 | 4.85 | 8.78 | 0.01 |
+| C2 factored head | +0.488 | 0.082 | +0.621 | 2.67 | 6.21 | 11.07 | 0.01 |
+| C3 distributional critic | +0.004 | 0.249 | +0.378 | 1.78 | 5.07 | 6.59 | **0.33** |
+| **all three** | **+0.607** | **0.021** | **+0.730** | **3.75** | **7.91** | **14.21** | 0.00 |
+
+## What is robust
+
+- **C3 alone is harmful.** `--rank_ce_coef=0.5` on the narrow Tanh trunk drives
+  the wipeout rate from 0.00 to 0.29-0.38 and utility to ~chance or below
+  (+0.128, **-0.121**), with the lowest vp_all in both seeds. Do not enable it by
+  itself. In combination it is fine, so the coefficient is simply too strong for
+  the small trunk to absorb.
+- **The combination beats the baseline on every low-variance metric, in both
+  seeds: 6/6.** survivors 3.96/3.54 vs 2.80/3.19, elim_round 7.99/7.83 vs
+  6.46/7.47, vp_all 14.92/13.50 vs 10.79/12.80. These averages come from
+  thousands of training episodes per cell, so unlike the 64-game eval utility
+  they are not dominated by run-to-run noise. This is the finding to act on.
+- **The combination is also far more stable**: Greedy spread 0.021 across seeds
+  versus the baseline's 0.260. Its worst seed (+0.596) still beats the baseline's
+  worst (+0.410).
+- **The utility column cannot separate the cells.** Seed 2 has base at +0.670,
+  above the combination; seed 1 has base at +0.410, well below. Same lesson as
+  B3: 2 seeds are not enough for a 64-game eval metric against a weak bot.
+- **Individually C1 and C2 show no benefit** (means slightly below base). The
+  combination is superadditive relative to each part in both seeds. Plausible
+  reading: the factored head needs the wider normalized trunk to exploit the
+  shared factor structure, and the wider trunk needs the distributional critic's
+  denser supervision to fit its extra capacity -- but that is a hypothesis, not
+  something these 10 runs establish.
+
+## Recommended configuration
+
+```
+--phi=soft --aux_target_mode=rank \
+--nn_width=512 --nn_depth=3 --nn_norm --nn_activation=gelu --separate_critic \
+--factored_actions --rank_ce_coef=0.5
+```
+Left off by default so the change is explicit; the C-flags' help text records the
+evidence. `--rank_ce_coef` must not be enabled without the wider trunk.
+
+## Still open
+
+- **Elo over the roster** (the last B1 item) is not implemented. Every strength
+  number here is against fixed Random/Greedy bots, and Greedy is a thin shell over
+  Random. Without a self-play ladder there is no way to measure improvement once
+  the agent saturates those two -- and the combination is already at +0.73/+0.61.
+  This is the single most valuable next piece of work.
+- **Absolute strength is still modest.** vp_all ~14 with the best config, against
+  a contested human game's 20-40, and elim_round 7.9/8 means seats survive but the
+  game is not being played to a high standard. Beating Random and a
+  mostly-random Greedy is a low bar.
+- **C4 (play-time MCTS) is deferred, but not for the reason the plan gave.** I had
+  listed the shared-`Game` RNG in `Clone()` as a blocker; checked, and mid-game
+  chance outcomes are encoded in the action id (explore draws, combat rolls), so
+  search is well-defined -- the shared RNG only affects `initial_setup`, which
+  play-time search never re-resolves. The real reason to defer is that search
+  multiplies an existing policy/value, and with vp_all ~14 and no strength ladder
+  to measure a gain against, training scale is the better next increment.
+- **More seeds.** Both grids were budget-limited to 2 seeds and both were
+  inconclusive on their headline metric because of it. Any future cell comparison
+  should either use ~8-10 seeds or be judged on the health metrics, which are far
+  cheaper to resolve.
