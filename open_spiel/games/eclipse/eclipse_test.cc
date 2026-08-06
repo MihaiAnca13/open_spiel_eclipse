@@ -1819,6 +1819,51 @@ void ObservationLayoutTest() {
   const int amb1_self = obs::PlayerBlockStart(0) + obs::kPlayerRepTrackOffset +
                         obs::kRepSlotAmbassadorFromOffset;
   SPIEL_CHECK_EQ(t1[amb1_self - 1], 0.0f);
+
+  // ── warped universe: layout kind + warp link destination must be visible ──
+  // Hand-build a pair of warp-linked cells (as RebuildWarpLinks would) and
+  // assert the per-cell layout tag and the link destination cell/dir are
+  // readable from the tensor instead of being discarded.
+  const int wcell = hex_to_index(-1, 0);
+  const int wdest = hex_to_index(1, -1);
+  raw.warped_universe = true;
+  raw.layout_kinds.fill(255);                       // clear to "unset"
+  raw.layout_kinds[hex_to_index(0, 0)] = static_cast<uint8_t>(SectorType::CENTER);
+  raw.layout_kinds[wcell] = static_cast<uint8_t>(SectorType::INNER);
+  raw.layout_kinds[wdest] = static_cast<uint8_t>(SectorType::INNER);
+  raw.warp_link_dest_cell.fill(255);
+  raw.warp_link_dest_dir.fill(255);
+  raw.warp_link_dest_cell[wcell * 6 + 3] = static_cast<uint8_t>(wdest);
+  raw.warp_link_dest_dir[wcell * 6 + 3] = 1;
+
+  std::vector<float> tw(n, 0.0f);
+  state->ObservationTensor(0, absl::MakeSpan(tw));
+  SPIEL_CHECK_EQ(n, obs::kTotalSize);
+
+  // layout_kinds one-hot: INNER is index 1 (OUTER=0, INNER=1, MIDDLE=2, ...).
+  const int lk_base = obs::CellStart(wcell) + obs::kCellLayoutKind;
+  SPIEL_CHECK_EQ(tw[lk_base + 0], 0.0f);
+  SPIEL_CHECK_EQ(tw[lk_base + 1], 1.0f);
+  const int lk_center = obs::CellStart(hex_to_index(0, 0)) + obs::kCellLayoutKind;
+  SPIEL_CHECK_EQ(tw[lk_center + 4], 1.0f);  // CENTER -> SectorType index 4
+
+  // Warp link on direction 3: existence flag set, destination cell + dir
+  // normalised to the raw array values.
+  SPIEL_CHECK_EQ(tw[obs::CellStart(wcell) + obs::kCellWarpLink + 3], 1.0f);
+  SPIEL_CHECK_EQ(tw[obs::CellStart(wcell) + obs::kCellWarpLink + 0], 0.0f);
+  const float dest_frac = static_cast<float>(wdest) / obs::kGalaxyCells;
+  SPIEL_CHECK_FLOAT_EQ(
+      tw[obs::CellStart(wcell) + obs::kCellWarpDestCell + 3], dest_frac);
+  SPIEL_CHECK_EQ(tw[obs::CellStart(wcell) + obs::kCellWarpDestDir + 3], 1.0f / 6.0f);
+  // Directions without a link read 0 for both destination representations.
+  SPIEL_CHECK_EQ(tw[obs::CellStart(wcell) + obs::kCellWarpDestCell + 0], 0.0f);
+  SPIEL_CHECK_EQ(tw[obs::CellStart(wcell) + obs::kCellWarpDestDir + 0], 0.0f);
+  // Every warp channel on a cell that is never a warp source stays 0.
+  const int far_cell = hex_to_index(-3, 1);
+  if (in_galaxy_bounds(-3, 1)) {
+    SPIEL_CHECK_EQ(tw[obs::CellStart(far_cell) + obs::kCellWarpDestCell + 2], 0.0f);
+    SPIEL_CHECK_EQ(tw[obs::CellStart(far_cell) + obs::kCellWarpDestDir + 2], 0.0f);
+  }
 }
 
 // Forces a two-player ship battle, then drives the whole combat phase through

@@ -65,7 +65,7 @@ GALAXY_CELLS = GALAXY_DIM * GALAXY_DIM   # 225
 # ── block sizes ───────────────────────────────────────────────────────────
 GLOBAL_SIZE = 146
 PLAYER_SIZE = 547
-CELL_CHANNELS = 69
+CELL_CHANNELS = 88
 GALAXY_SIZE = GALAXY_CELLS * CELL_CHANNELS
 TECH_MARKET_SIZE = 88
 COMBAT_SIZE = 940
@@ -157,6 +157,9 @@ C_INFLUENCE_UNCONTROLLED = 60
 C_MOVE_ACTIVE_UNIT = 61
 C_EXPLORE_ZONE = 62
 C_WARP_LINK = 63                 # + HEX_DIRECTIONS
+C_LAYOUT_KIND = 69               # + SECTOR_TYPE_COUNT (warped only)
+C_WARP_DEST_CELL = 76            # + HEX_DIRECTIONS (warped only)
+C_WARP_DEST_DIR = 82             # + HEX_DIRECTIONS (warped only)
 
 
 def player_block_start(slot):
@@ -224,8 +227,8 @@ def _self_check():
   assert P_REP_TRACK == P_PARTS_INV + SHIP_PART_COUNT + 1
   assert P_AMBASSADOR_HELD == P_REP_TRACK + REP_SLOTS * REP_SLOT_SIZE
   assert P_BUILD_COST + BUILD_TYPE_COUNT <= PLAYER_SIZE
-  assert C_WARP_LINK + HEX_DIRECTIONS == CELL_CHANNELS
-  assert TOTAL == 20439, TOTAL
+  assert C_WARP_DEST_DIR + HEX_DIRECTIONS == CELL_CHANNELS
+  assert TOTAL == 24714, TOTAL
 
 
 _self_check()

@@ -448,11 +448,21 @@ void WriteObservationTensor(const ::State& state, int player, int num_players,
 
         if (state.warped_universe) {
           const int lk = static_cast<int>(state.layout_kinds[cell]);
+          OneHot(values, b + kCellLayoutKind, lk, kSectorTypeCount);
           for (int d = 0; d < kHexDirections; ++d) {
-            Flag(values, b + kCellWarpLink + d,
-                 state.warp_link_dest_cell[cell * 6 + d] != 255);
+            const int idx = cell * 6 + d;
+            const uint8_t dc = state.warp_link_dest_cell[idx];
+            Flag(values, b + kCellWarpLink + d, dc != 255);
+            if (dc != 255) {
+              Frac(values, b + kCellWarpDestCell + d,
+                   static_cast<float>(dc), static_cast<float>(kGalaxyCells));
+              Frac(values, b + kCellWarpDestDir + d,
+                   static_cast<float>(state.warp_link_dest_dir[idx]), 6.0f);
+            } else {
+              values[b + kCellWarpDestCell + d] = 0.0f;
+              values[b + kCellWarpDestDir + d] = 0.0f;
+            }
           }
-          (void)lk;
         }
         // Units are reported even on an unplaced cell (they cannot be there,
         // but the write is harmless and keeps the loop branch-free).

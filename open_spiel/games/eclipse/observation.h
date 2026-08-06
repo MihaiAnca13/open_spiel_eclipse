@@ -289,7 +289,16 @@ enum CellChannel : int {
   kCellMoveActiveUnit,          // move_state.active_unit_idx sits here
   kCellExploreZone,             // explore_state's chosen zone hex
   kCellWarpLink,                                // + kHexDirections (warped only)
-  kCellChannels = kCellWarpLink + kHexDirections,
+  kCellLayoutKind = kCellWarpLink + kHexDirections,   // + kSectorTypeCount (warped
+                                                      // only: layout_kinds[cell], the
+                                                      // per-cell inner/mid/outer/warp
+                                                      // tag that gates explorability)
+  kCellWarpDestCell = kCellLayoutKind + kSectorTypeCount,   // + kHexDirections (warped
+                                                            // only: normalised warp
+                                                            // destination cell, 0 if none)
+  kCellWarpDestDir = kCellWarpDestCell + kHexDirections,    // + kHexDirections (warped
+                                                            // only: arrival edge, 0 if none)
+  kCellChannels = kCellWarpDestDir + kHexDirections,
 };
 constexpr int kGalaxySize = kGalaxyCells * kCellChannels;
 
