@@ -22,6 +22,7 @@ import pyspiel
 from open_spiel.python.eclipse.action_factors import build_action_factorization
 from open_spiel.python.eclipse.action_factors import factorization_from_game
 from open_spiel.python.eclipse.action_factors import NUM_SLOTS
+from open_spiel.python.eclipse import obs_layout
 from open_spiel.python.examples.ppo_eclipse import EclipsePPOAgent
 from open_spiel.python.pytorch.ppo import CategoricalMasked
 from open_spiel.python.pytorch.ppo import PPO
@@ -66,61 +67,86 @@ class FactoredActorHeadTest(absltest.TestCase):
     super().setUp()
     self.game = pyspiel.load_game("eclipse(players=4)")
     self.num_actions = self.game.num_distinct_actions()
+    self.obs_size = obs_layout.validate(self.game)
     self.fz = factorization_from_game(self.game)
-    self.net = EclipsePPOAgent(
-        self.num_actions, (1785,), "cpu", width=64, depth=2,
-        aux_tasks=("final_rank",), factored_actions=self.fz)
-    self.head = self.net.actor[-1]
 
-  def test_rows_for_matches_materialized_weight(self):
-    idx = torch.tensor([0, 332, 5731, 7541, 9142, self.num_actions - 1])
-    self.assertTrue(torch.allclose(self.head.rows_for(idx),
-                                   self.head.full_weight()[idx], atol=1e-6))
+  def _flat_net(self):
+    return EclipsePPOAgent(
+        self.num_actions, (self.obs_size,), "cpu", width=64, depth=2,
+        aux_tasks=("final_rank",), factored_actions=self.fz, encoder="flat")
 
-  def test_forward_is_the_implied_linear_map(self):
-    x = torch.randn(3, 1785)
-    feats = self.net.shared(x)
-    expected = feats @ self.head.full_weight().t() + self.head.bias
-    self.assertTrue(torch.allclose(self.net.actor(x), expected, atol=1e-5))
+  def _sparse_agent(self, net):
+    return PPO(input_shape=(self.obs_size,), num_actions=self.num_actions,
+               num_players=4, num_envs=3, steps_per_batch=4, device="cpu",
+               agent_fn=lambda n, s, d: net, value_mode="win")
 
-  def test_sparse_path_matches_dense_logits_and_entropy(self):
-    """The whole point: masking and the distribution must be unchanged."""
-    agent = PPO(input_shape=(1785,), num_actions=self.num_actions,
-                num_players=4, num_envs=3, steps_per_batch=4, device="cpu",
-                agent_fn=lambda n, s, d: self.net, value_mode="win")
-    self.assertTrue(agent._sparse_supported())
-
-    x = torch.randn(3, 1785)
-    feats = self.net.shared(x)
+  def _assert_sparse_matches_dense(self, net, agent, batch):
+    feats = net.shared(batch)
     legal = [sorted(np.random.RandomState(k).choice(
-        self.num_actions, size=40, replace=False).tolist()) for k in range(3)]
+        self.num_actions, size=40, replace=False).tolist())
+        for k in range(batch.shape[0])]
     rows = np.concatenate([[i] * len(l) for i, l in enumerate(legal)])
     cols = np.concatenate(legal).astype(np.int64)
 
     packed = agent._pack_logits(feats, torch.from_numpy(rows.astype(np.int64)),
-                               torch.from_numpy(cols), self.head,
-                               self.head.bias)
-    dense = self.net.actor(x)
+                               torch.from_numpy(cols), net.actor[-1],
+                               net.actor[-1].bias)
+    dense = net.actor(batch)
     reference = dense[torch.from_numpy(rows.astype(np.int64)),
                       torch.from_numpy(cols)]
-    self.assertLess(float((packed - reference).abs().max()), 1e-5)
+    self.assertLess(float((packed - reference).abs().max().detach()), 1e-5)
 
-    mask = torch.zeros(3, self.num_actions, dtype=torch.bool)
+    mask = torch.zeros(batch.shape[0], self.num_actions, dtype=torch.bool)
     for i, l in enumerate(legal):
       mask[i, l] = True
     dist = CategoricalMasked(logits=dense, masks=mask,
                              mask_value=torch.tensor(-1e6))
     _, entropy = agent._segment_lse_entropy(
-        packed, torch.from_numpy(rows.astype(np.int64)), 3)
-    self.assertLess(float((entropy - dist.entropy()).abs().max()), 1e-4)
+        packed, torch.from_numpy(rows.astype(np.int64)), batch.shape[0])
+    self.assertLess(float((entropy - dist.entropy()).abs().max().detach()), 1e-4)
+
+  def test_rows_for_matches_materialized_weight(self):
+    net = self._flat_net()
+    head = net.actor[-1]
+    idx = torch.tensor([0, 332, 5731, 7541, 9142, self.num_actions - 1])
+    self.assertTrue(torch.allclose(head.rows_for(idx),
+                                   head.full_weight()[idx], atol=1e-6))
+
+  def test_forward_is_the_implied_linear_map(self):
+    """Flat encoder: logits are exactly features @ W^T + b."""
+    net = self._flat_net()
+    x = torch.randn(3, self.obs_size)
+    feats = net.shared(x)
+    expected = feats @ net.actor[-1].full_weight().t() + net.actor[-1].bias
+    self.assertTrue(torch.allclose(net.actor(x), expected, atol=1e-5))
+
+  def test_sparse_path_matches_dense_logits_and_entropy(self):
+    """The whole point: masking and the distribution must be unchanged."""
+    net = self._flat_net()
+    agent = self._sparse_agent(net)
+    self.assertTrue(agent._sparse_supported())
+    self._assert_sparse_matches_dense(net, agent, torch.randn(3, self.obs_size))
+
+  def test_spatial_encoder_sparse_and_shape(self):
+    """The spatial encoder (the default run path) must also feed the sparse
+    factored head, and must slice the real flat tensor without a shape error."""
+    net = EclipsePPOAgent(
+        self.num_actions, (self.obs_size,), "cpu", width=64, depth=2,
+        aux_tasks=("final_rank",), factored_actions=self.fz, encoder="spatial")
+    agent = self._sparse_agent(net)
+    self.assertTrue(agent._sparse_supported())
+    latent = net.shared(torch.randn(3, self.obs_size))
+    self.assertEqual(latent.shape, (3, 64))
+    self._assert_sparse_matches_dense(net, agent, torch.randn(3, self.obs_size))
 
   def test_gradient_reaches_shared_factor_rows(self):
     """A cell row must receive gradient from every action targeting that cell."""
-    x = torch.randn(2, 1785)
-    logits = self.net.actor(x)
+    net = self._flat_net()
+    x = torch.randn(2, self.obs_size)
+    logits = net.actor(x)
     # Two colony-ship actions on the same cell differ only in slot/track.
     logits[:, 332].sum().backward()
-    grad = self.head.embedding.grad
+    grad = net.actor[-1].embedding.grad
     touched = set(self.fz.decode[332].tolist())
     self.assertTrue(all(float(grad[r].abs().sum()) > 0 for r in touched))
     untouched = set(range(self.fz.num_rows)) - touched

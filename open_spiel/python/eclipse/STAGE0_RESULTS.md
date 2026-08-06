@@ -1,5 +1,13 @@
 # Stage 0 — Setup + Profiling Results
 
+> **Superseded.** This record dates 2026-07-31, when the Eclipse observation
+> tensor was the original 1,785-float flat layout and the benchmarked net was
+> the obsolete dense MLP. The observation tensor has since been rewritten to a
+> seat-relative, fully-covered 24,714-float layout, and the flat MLP was
+> replaced by the `SpatialEclipseEncoder`. `benchmark_forward.py` now times
+> `OBS = obs_layout.TOTAL` (24,714). The figures below are kept as the historical
+> Stage-0 measurements, not current numbers.
+
 Date: 2026-07-31. Machine: NVIDIA GeForce RTX 4080 Laptop GPU (12 GB), driver
 CUDA 13.2, PyTorch 2.11.0+cu128, Python 3.12.
 

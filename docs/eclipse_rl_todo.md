@@ -44,7 +44,7 @@ every step** (`scoring.cpp:107-155`) — it is now exposed, giving 9 free dense 
 `open_spiel/games/eclipse/observation.{h,cpp}` is new and is the single source of truth.
 `ObservationTensor` in `eclipse.cc` is now a thin call into it.
 
-- **1,785 → 20,439 floats**, all values in [0,1], 79.8 KB per observation.
+- **1,785 → 24,714 floats**, all values in [0,1], ~99 KB per observation.
 - **One identical block schema for all six seats** (547 floats each), seat-relative with slot 0
   always the viewer, replacing the fat-self-135 / thin-opponent-25 asymmetry. Every player id in
   the tensor (combat attacker, `ambassador_from`, upkeep player, …) is remapped to be
@@ -54,7 +54,7 @@ every step** (`scoring.cpp:107-155`) — it is now exposed, giving 9 free dense 
   only while the upkeep sub-state ran), all 40 tech bits, all four blueprints with mounted parts,
   the full 5-slot reputation track, parts inventory, minor species, per-`BuildType` build costs,
   turn/pass order, and the 9-category VP breakdown.
-- Newly visible per galaxy cell (69 channels): planet slots **printed and populated** by
+- Newly visible per galaxy cell (88 channels): planet slots **printed and populated** by
   `PlanetType`, sector VP, **rotated** wormhole edges, ring kind, buildings, per-ship-type unit
   counts for self / enemy / NPC, damage, anchor, and combat/move/explore markers.
 - **Combat in full** — initiative order, battle queue, the **dice actually rolled** and the units
@@ -88,11 +88,11 @@ planets, discovery-tile secrecy). The writer self-checks its cursor against the 
 | config | envstep/s |
 |---|---|
 | old 1,785-float obs, production arch (512/3, separate critic) | ~15,300 |
-| new 20,439-float obs, **narrow** net (64/2, shared trunk) | **13,635** |
-| new 20,439-float obs, production arch (512/3, separate critic) | **2,655** |
+| new 24,714-float obs, **narrow** net (64/2, shared trunk) | **13,635** |
+| new 24,714-float obs, production arch (512/3, separate critic) | **2,655** |
 
-The 11.5× wider tensor costs only ~11% on its own. The 5.1× collapse is the **flat trunk**:
-`Linear(20439, 512)` twice (separate critic) is ~21M params in the first layers, over a
+The ~14× wider tensor costs only ~11% on its own. The 5.1× collapse is the **flat trunk**:
+`Linear(24714, 512)` twice (separate critic) is ~21M params in the first layers, over a
 16,384-row batch per update. `ObservationTensor` is 0.141 ms/call — 97% of raw engine
 per-decision cost, but only ~1.1 ms/worker/step at 8 envs/worker, so not binding.
 
@@ -103,33 +103,28 @@ Rollout buffer at 128×128 is 1.34 GB (fine on 12 GB; fp16 storage is a later op
 
 ## TODO
 
-### 0. Finish the observation — warped-universe module is only PARTLY covered
+### 0. Finish the observation — DONE (warped universe fully exposed + leftovers fixed)
 
-Honest status: the global `warped_universe` flag and **whether** a warp link exists per direction
-(`kCellWarpLink`, 6 channels from `warp_link_dest_cell != 255`) are exposed. Still missing:
+The warp-linked / layout-kind coverage is committed and engine-tested:
 
-- **`state.layout_kinds[cell]`** — currently read into a local at `observation.cpp:450` and then
-  discarded with `(void)lk`. This is the per-cell INNER/MIDDLE/OUTER/WARP tag that gates
-  explorability in warped games (`IsExplorableSlot`, `warped_universe/adjacency.h:34-41`).
-  Note `kCellRing` is **not** a substitute: it comes from `def->type` and so is only written for
-  *placed* sectors, whereas `layout_kinds` tags **empty** cells with the ring they belong to —
-  which is what tells the agent which bag an explore there would draw from. In the standard game
-  that is derivable from hex distance; in a warped universe it is not.
-- **`warp_link_dest_cell` value** — only existence is exposed, not the destination cell.
-- **`warp_link_dest_dir`** — the arrival edge, not exposed at all.
+- **`state.layout_kinds[cell]`** one-hot per cell (INNER/MIDDLE/OUTER/WARP/…) is written from
+  `layout_kinds[cell]` (`observation.cpp:450-451`), not discarded — the per-cell ring tag that
+  gates explorability (`IsExplorableSlot`, `warped_universe/adjacency.h:34-41`) and tells the
+  agent which bag an explore would draw from.
+- **`warp_link_dest_cell`** per direction (destination cell as a normalised 0..224 scalar) and
+  **`warp_link_dest_dir`** (arrival edge) are both exposed (`observation.cpp:452-465`).
+- Mirrored in `obs_layout.py` as `C_WARP_LINK`/`C_LAYOUT_KIND`/`C_WARP_DEST_CELL`/`C_WARP_DEST_DIR`
+  (channels 63-87), `CELL_CHANNELS=88`, `TOTAL=24714`; `validate(game)` asserts the match.
+- Verified in `eclipse_test.cc` warp test (layout one-hot, dest cell frac, dest dir, no-link=0).
 
-This matters because `--randomize_warped` is **on by default** in training, so roughly half of
-all training games currently have partly-invisible topology. Add ~4 channels for the layout-kind
-one-hot plus a representation of link destinations (a per-direction destination-cell scalar is
-cheapest; a full 6×225 adjacency is not affordable).
-
-Other leftovers hardcoding the old size or arch:
-- `open_spiel/python/eclipse/action_factors_test.py:71,81,88,93,119` — hardcodes `(1785,)`.
-- `open_spiel/python/eclipse/benchmark_forward.py:23` — `OBS = 1785`.
-- `roster_ladder.py` — `_resolve_arch`/`_write_arch` must persist and pass `encoder` and
-  `num_players` (see Phase 2), else the ladder cannot rebuild a spatial net and
-  `_load_net_tolerant` fails on a shape mismatch instead of a clear error.
-- **Every existing checkpoint is invalid** (expected and accepted).
+Leftovers hardcoding the old size or arch — fixed:
+- `open_spiel/python/eclipse/action_factors_test.py` — was hardcoding `(1785,)`; now derives the
+  real size from `obs_layout.validate(game)` and adds a `spatial`-encoder sparse-path test (the
+  default run path), alongside the flat factored-head math tests.
+- `open_spiel/python/eclipse/benchmark_forward.py` — `OBS = 1785` → `obs_layout.TOTAL` (24714).
+- `roster_ladder.py` — `_resolve_arch` already persists and passes `encoder` and `input_shape`
+  (falls back to `flat` for pre-existing checkpoints), so the ladder rebuilds the right net.
+- **Every existing checkpoint is invalid** (expected and accepted) — no backward compat.
 - Consider exposing the reserve slots' purpose or shrinking them once the layout settles.
 
 ### 0b. Three resume/metric bugs — DONE

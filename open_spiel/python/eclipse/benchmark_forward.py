@@ -1,7 +1,7 @@
 # Copyright 2026 The OpenSpiel Authors. All rights reserved.
 #
 # Stage 0 profiling: microbenchmark of NN forward-pass latency for the
-# Eclipse-sized network (obs=1785, actions=11117), CPU vs GPU, batched over
+# Eclipse-sized network (obs=24714, actions=11117), CPU vs GPU, batched over
 # num_envs parallel game environments.
 #
 # Mirrors the PPOAgent MLP structure (open_spiel/python/pytorch/ppo.py) but at
@@ -18,9 +18,11 @@ import torch
 from torch import nn
 from torch.distributions.categorical import Categorical
 
+from open_spiel.python.eclipse import obs_layout
+
 INVALID_ACTION_PENALTY = -1e6
 
-OBS = 1785  # Eclipse observation_tensor size (confirmed)
+OBS = obs_layout.TOTAL  # Eclipse observation_tensor size
 NUM_ACTIONS = 11117  # Eclipse num_distinct_actions (confirmed)
 N_PLAYERS = 4
 
@@ -45,7 +47,7 @@ class CategoricalMasked(Categorical):
 
 
 class EclipseNet(nn.Module):
-  """MLP sized to Eclipse: obs=1785, 2**10-wide, actor out=11117."""
+  """MLP sized to Eclipse (obs=OBS), 2**10-wide, actor out=11117."""
 
   def __init__(self, obs=OBS, width=2**10, depth=4, num_actions=NUM_ACTIONS):
     super().__init__()

@@ -27,13 +27,13 @@ Layout shape, seat-relative from the viewing player:
 
     A  global                        146
     B  6 x player block (547)       3282   slot 0 is ALWAYS the viewer
-    C  galaxy 225 cells x 69       15525   cell-major, channel-minor
+    C  galaxy 225 cells x 88       19800   cell-major, channel-minor
     D  tech market                    88
     E  combat                        940
     F  upkeep                          91
     G  action sub-states              367
                                   ------
-                                   20439
+                                   24714
 """
 
 # ── cardinalities ─────────────────────────────────────────────────────────
