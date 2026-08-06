@@ -132,41 +132,45 @@ Other leftovers hardcoding the old size or arch:
 - **Every existing checkpoint is invalid** (expected and accepted).
 - Consider exposing the reserve slots' purpose or shrinking them once the layout settles.
 
-### 0b. Three resume/metric bugs — NOT STARTED, and Phase 4 depends on the third
+### 0b. Three resume/metric bugs — DONE
 
-All verified in code:
-- `_load_train_state` never restores `agent.learning_rate` (`ppo_eclipse.py:982` saves it,
-  `:992-996` does not read it). Mirror the `rank_vp_beta` restore just below.
-- The anneal is driven by the per-process loop counter instead of `agent.updates_done`
-  (`:1872`, `:1994`). Pass `agent.updates_done`, already incremented inside `learn`/`learn_np`.
-- `last_metrics["kl"]`, `old_approx_kl` and `entropy_loss` are the **last minibatch's** values,
-  not per-update means — computed inside the minibatch loop (`ppo.py:1604`, `:1635`) and falling
-  through after both loops end (`:1736`, `:1729`). Only `clipfrac` is averaged (`:1734`).
-  Accumulate per-epoch means. **Must land before Phase 4** or the controllers react to noise.
+All three fixed and verified (resume round-trip test + `ppo_win_test` 13/13):
+- `_load_train_state` now restores `agent.learning_rate` via `set_learning_rate`
+  (mirrors the `rank_vp_beta` restore), so a resumed anneal continues decaying
+  instead of restarting at the base rate.
+- The anneals are driven by `agent.updates_done` (restored on resume) instead of
+  the per-process loop counter. The LR anneal is clamped to `num_updates - 1` so it
+  never trips `anneal_learning_rate`'s `frac <= 0` guard on the final update; the
+  beta anneal clamps internally, so both stay aligned and resume-continue.
+- `last_metrics["kl"]` / `old_kl` / `entropy` are now per-update means
+  (accumulated across minibatches) rather than the final minibatch's values.
+  Only `clipfrac` was already a mean.
 
-Verify with a resume round-trip test (save, rebuild, load, assert LR and the *next* anneal
-continue rather than restart) and by re-running `ppo_win_test.py`.
+### 1. Spatial + relational encoder — DONE (default)
 
-### 1. Spatial + relational encoder — now the highest priority
+Implemented as `SpatialEclipseEncoder` in `ppo_eclipse.py`, gated by
+`--encoder=flat|spatial` (default **spatial**), so the new encoder is now the
+default run path rather than an opt-in control.
 
-Proven necessary by the measurement above, not just a quality upgrade.
-
-- Slice the flat tensor into `(69,15,15)` + global/self/tail + 6 seat blocks; small residual conv
-  tower over the spatial part. `obs_layout.galaxy_view()` already does the reshape/permute.
-- Per-seat **shared** encoder with permutation-invariant masked mean+max pooling — opponents as a
-  set, which also makes one net serve 4/5/6 players. Slot validity from the `occupied` bit
-  (already in the tensor); **never** infer it from block content.
-- Fuse to the existing width-`width` latent so the 4-logit rank critic, `aux_heads` and
-  `FactoredActorHead` keep working untouched — they only ever see `(B, width)`.
-- **`ppo.py` needs no changes**: its sparse act/learn paths call `net.shared(x)` on the flat
-  tensor (`ppo.py:1368`, `:1567`) and `_sparse_supported()` only checks `hasattr(net, "shared")`
-  (`:1158-1171`), so all slicing lives inside the encoder's `forward()`.
-- `--encoder=flat|spatial`, default `flat`, so current behaviour is preserved as a control.
-- Use `GroupNorm`/`LayerNorm`, **not** `BatchNorm2d` — rollout `act()` sees small
-  temporally-correlated batches while `learn()` reshuffles.
-- Slices of a 2-D tensor are non-contiguous: use `.reshape()`, not `.view()`.
-- Watch conv activation memory at large minibatch (4096 rows × 64ch × 225 ≈ 236 MB per tensor);
-  use more minibatches and/or AMP.
+- Flat tensor sliced internally in `forward()` into:
+  - galaxy block -> small residual Conv2d tower over `(88, 15, 15)` via
+    `obs_layout.galaxy_view()`, GroupNorm (not BatchNorm), global avg pool;
+  - viewer self block (slot 0) -> MLP;
+  - tail blocks (tech market / combat / upkeep / action states) -> MLP;
+  - the 6 seat blocks -> a shared per-seat MLP with permutation-invariant
+    masked **mean+max** pooling, validity from the `P_OCCUPIED` bit (never
+    block content), so one net serves 4/5/6 players.
+- All branches fused to a single `(B, width)` latent with `.reshape()` (never
+  `.view()` on non-contiguous slices).
+- **`ppo.py` unchanged**: its sparse act/learn paths call `net.shared(x)` on
+  the flat tensor and `_sparse_supported()` only checks `hasattr(net,"shared")`
+  + a `Sequential` actor, all satisfied. Verified `_sparse_supported()==True`,
+  `_act_sparse` runs, and a full CPU training run completes cleanly (exit 0).
+- `--encoder` persisted in `arch.json` (`_write_arch`) and threaded through
+  `roster_ladder._resolve_arch`/`_load_net_tolerant` (falls back to `flat` for
+  pre-existing checkpoints).
+- **`cnorm`/`aux_heads`/`FactoredActorHead` untouched** — they only ever see
+  `(B, width)`.
 
 ### 2. Free dense aux targets — cheap, do alongside
 

@@ -120,6 +120,7 @@ def _resolve_arch(num_actions, input_shape):
       "aux_tasks": list(tasks or ()),
       "num_actions": int(num_actions),
       "input_shape": [int(s) for s in input_shape],
+      "encoder": FLAGS.encoder,
   }
 
 
@@ -237,12 +238,14 @@ def main(_):
       int(arch["width"]), int(arch["depth"]), tuple(arch.get("aux_tasks") or ()),
       norm=bool(arch["norm"]), activation=arch["activation"],
       separate_critic=bool(arch["separate_critic"]),
-      factored_actions=factored)
+      factored_actions=factored,
+      encoder=str(arch.get("encoder", "flat")))
   print(f"rating roster      : {FLAGS.ladder_roster_dir}")
   print(f"arch (arch.json?)  : width={arch['width']} depth={arch['depth']} "
         f"norm={arch['norm']} act={arch['activation']} "
         f"sep_critic={arch['separate_critic']} "
-        f"factored={arch['factored_actions']} aux={arch.get('aux_tasks')}")
+        f"factored={arch['factored_actions']} aux={arch.get('aux_tasks')} "
+        f"encoder={arch.get('encoder')}")
   print(f"device={device}  games/dir={FLAGS.ladder_games_per_dir}  "
         f"eval_envs={FLAGS.eval_envs}  workers={FLAGS.num_workers}")
 

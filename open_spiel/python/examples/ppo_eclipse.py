@@ -298,6 +298,12 @@ flags.DEFINE_bool(
     "value 6%, so the representation the policy reads was shaped mostly by the "
     "regression heads.")
 flags.DEFINE_integer("nn_depth", 2, "Number of hidden layers in each MLP.")
+flags.DEFINE_enum(
+    "encoder", "spatial", ["flat", "spatial"],
+    "Observation encoder. 'spatial' slices the flat tensor into a galaxy conv "
+    "tower + viewer self block + tail blocks + a relational masked mean+max "
+    "seat pool (the flat Linear(24714, width) first layer was a ~5.1x "
+    "throughput collapse). 'flat' preserves the old dense trunk as a control.")
 
 flags.DEFINE_bool(
     "league", False,
@@ -364,6 +370,121 @@ flags.DEFINE_bool("exploit_promote", False,
                   "as an exploiter entry when it beats the victim.")
 flags.DEFINE_float("exploit_lr", 1e-3,
                    "Learning rate used in exploiter mode (higher than main).")
+
+
+class SpatialEclipseEncoder(nn.Module):
+  """Spatial + relational encoder for the flat Eclipse observation tensor.
+
+  The flat ``Linear(24714, width)`` trunk measured a 5.1x collapse (2,655 vs
+  13,635 envstep/s) because the first layers held ~21M params. This encoder
+  instead slices the flat tensor into semantically meaningful pieces inside its
+  own ``forward``, so ``ppo.py`` keeps working unchanged -- it only ever calls
+  ``net.shared(x)`` and reads ``(B, width)``:
+
+  - galaxy block -> a small residual conv tower over ``(88, 15, 15)``,
+  - viewer's own seat block (slot 0) -> MLP,
+  - the tail blocks (tech market / combat / upkeep / action states) -> MLP,
+  - the 6 seat blocks -> a SHARED per-seat MLP with permutation-invariant
+    masked mean+max pooling, validity from the ``P_OCCUPIED`` bit (never from
+    block content), so one net serves 4/5/6 players.
+
+  All branch latents are fused to a single ``(B, width)`` vector that the rank
+  critic, aux heads and FactoredActorHead consume exactly as before.
+
+  GroupNorm/LayerNorm are used instead of BatchNorm2d: rollout ``act()`` sees
+  small temporally-correlated batches while ``learn()`` reshuffles, so running
+  batch stats would be wrong in one path or the other.
+  """
+
+  def __init__(self, width, depth=1, activation="gelu", device=None):
+    super().__init__()
+    self.device = device
+    act = nn.GELU if activation == "gelu" else nn.Tanh
+
+    # ── Galaxy branch: (B, 88, 15, 15) conv tower ───────────────────────────
+    self.conv = nn.Sequential(
+        layer_init(nn.Conv2d(obs_layout.CELL_CHANNELS, 64, 3, padding=1)),
+        nn.GroupNorm(8, 64),
+        act(),
+    )
+    self.conv_res = nn.Sequential(
+        layer_init(nn.Conv2d(64, 64, 3, padding=1)),
+        nn.GroupNorm(8, 64),
+        act(),
+    )
+    self.galaxy_fc = layer_init(nn.Linear(64, width))
+
+    # ── Viewer self block: (547,) MLP ───────────────────────────────────────
+    self.self_mlp = self._mlp(obs_layout.PLAYER_SIZE, width, depth, act)
+
+    # ── Tail blocks (tech market + combat + upkeep + action states) ─────────
+    tail_size = (obs_layout.TECH_MARKET_SIZE + obs_layout.COMBAT_SIZE
+                 + obs_layout.UPKEEP_SIZE + obs_layout.ACTION_STATES_SIZE)
+    self.tail_mlp = self._mlp(tail_size, width, depth, act)
+
+    # ── Relational: shared per-seat MLP -> masked mean+max pool ─────────────
+    self.seat_mlp = self._mlp(obs_layout.PLAYER_SIZE, width, depth, act)
+    self.rel_fc = layer_init(nn.Linear(2 * width, width))
+
+    # ── Fuse the four branch latents to (B, width) ──────────────────────────
+    self.fuse = layer_init(nn.Linear(4 * width, width))
+
+  def _mlp(self, in_features, width, depth, act):
+    layers = []
+    cur = in_features
+    for _ in range(depth):
+      layers.append(layer_init(nn.Linear(cur, width)))
+      layers.append(act())
+      cur = width
+    return nn.Sequential(*layers)
+
+  def forward(self, x):
+    b = x.shape[0]
+    x = x.reshape(b, -1)
+
+    # Galaxy: (B, CELL_CHANNELS, 15, 15).
+    gal = obs_layout.galaxy_view(x)
+    h = self.conv(gal)
+    h = h + self.conv_res(h)
+    h = h.mean(dim=(2, 3))                       # global avg pool -> (B,64)
+    gal_lat = self.galaxy_fc(h)
+
+    # Viewer self block (slot 0 is always the viewer).
+    self_start = obs_layout.PLAYERS_START
+    self_lat = self.self_mlp(x[:, self_start:self_start +
+                               obs_layout.PLAYER_SIZE])
+
+    # Tail blocks.
+    tail = torch.cat([
+        x[:, obs_layout.TECH_MARKET_START:
+          obs_layout.TECH_MARKET_START + obs_layout.TECH_MARKET_SIZE],
+        x[:, obs_layout.COMBAT_START:
+          obs_layout.COMBAT_START + obs_layout.COMBAT_SIZE],
+        x[:, obs_layout.UPKEEP_START:
+          obs_layout.UPKEEP_START + obs_layout.UPKEEP_SIZE],
+        x[:, obs_layout.ACTION_STATES_START:
+          obs_layout.ACTION_STATES_START + obs_layout.ACTION_STATES_SIZE],
+    ], dim=1)
+    tail_lat = self.tail_mlp(tail)
+
+    # Relational pool over the 6 seat blocks. Occupied bits gate validity --
+    # for a 4-player game slots 4-5 are marked empty and masked out.
+    seats = x[:, obs_layout.PLAYERS_START:
+              obs_layout.PLAYERS_START +
+              obs_layout.SEAT_SLOTS * obs_layout.PLAYER_SIZE
+              ].reshape(b, obs_layout.SEAT_SLOTS, obs_layout.PLAYER_SIZE)
+    seat_h = self.seat_mlp(seats)                # (B, 6, width)
+    occ = seats[:, :, obs_layout.P_OCCUPIED] >= 0.5   # (B, 6)
+    mask = occ.unsqueeze(-1)
+    denom = occ.float().sum(dim=1, keepdim=True).clamp(min=1.0)
+    mean = (seat_h * mask).sum(dim=1) / denom    # (B, width)
+    neg = -1e9
+    masked_max = torch.where(
+        mask, seat_h, torch.full_like(seat_h, neg)).max(dim=1).values
+    rel_lat = self.rel_fc(torch.cat([mean, masked_max], dim=1))
+
+    return self.fuse(torch.cat(
+        [gal_lat, self_lat, tail_lat, rel_lat], dim=1))
 
 
 class FactoredActorHead(nn.Module):
@@ -440,10 +561,16 @@ class EclipsePPOAgent(nn.Module):
   def __init__(self, num_actions, observation_shape, device, width=64,
                depth=2, aux_tasks=("final_vp",), norm=False,
                activation="tanh", separate_critic=False,
-               factored_actions=None):
+               factored_actions=None, encoder="flat"):
     super().__init__()
     in_features = int(np.array(observation_shape).prod())
-    self.shared = self._trunk(in_features, width, depth, norm, activation)
+    self.encoder = encoder
+
+    if encoder == "spatial":
+      self.shared = SpatialEclipseEncoder(
+          width, depth=max(1, depth), activation=activation, device=device)
+    else:
+      self.shared = self._trunk(in_features, width, depth, norm, activation)
     self.separate_critic = separate_critic
 
     if separate_critic:
@@ -451,8 +578,12 @@ class EclipsePPOAgent(nn.Module):
       # the measured gradient split on aux-bearing rows was aux 82% / policy 11%
       # / value 6%, i.e. the representation the policy reads was being shaped
       # mostly by the regression heads.
-      self.critic_trunk = self._trunk(in_features, width, depth, norm,
-                                      activation)
+      if encoder == "spatial":
+        self.critic_trunk = SpatialEclipseEncoder(
+            width, depth=max(1, depth), activation=activation, device=device)
+      else:
+        self.critic_trunk = self._trunk(in_features, width, depth, norm,
+                                        activation)
     else:
       self.critic_trunk = self.shared
 
@@ -537,13 +668,14 @@ class EclipsePPOAgent(nn.Module):
 
 def make_agent_fn(width, depth, aux_tasks=("final_vp",), norm=False,
                   activation="tanh", separate_critic=False,
-                  factored_actions=None):
+                  factored_actions=None, encoder="flat"):
   def agent_fn(num_actions, observation_shape, device):
     return EclipsePPOAgent(num_actions, observation_shape, device,
                            width=width, depth=depth, aux_tasks=aux_tasks,
                            norm=norm, activation=activation,
                            separate_critic=separate_critic,
-                           factored_actions=factored_actions)
+                           factored_actions=factored_actions,
+                           encoder=encoder)
 
   return agent_fn
 
@@ -1011,6 +1143,10 @@ def _load_train_state(agent, roster_dir):
   if "rank_vp_beta" in state:
     agent.rank_vp_beta = float(state["rank_vp_beta"])
     agent.rank_vp_beta_initial = agent.rank_vp_beta
+  if "learning_rate" in state:
+    # Restore the *base* LR so the anneal continues from where it stopped
+    # instead of restarting at the full base rate every resume.
+    agent.set_learning_rate(float(state["learning_rate"]))
   return True
 
 
@@ -1033,6 +1169,7 @@ def _write_arch(roster_dir, num_actions, input_shape, aux_tasks):
       "aux_tasks": list(aux_tasks or ()),
       "num_actions": int(num_actions),
       "input_shape": list(input_shape),
+      "encoder": FLAGS.encoder,
   }
   with open(os.path.join(str(roster_dir), "arch.json"), "w") as f:
     json.dump(arch, f, indent=2)
@@ -1644,7 +1781,8 @@ def main(_):
       agent_fn=make_agent_fn(
         FLAGS.nn_width, FLAGS.nn_depth, tuple(aux_tasks or ()),
         norm=FLAGS.nn_norm, activation=FLAGS.nn_activation,
-        separate_critic=FLAGS.separate_critic, factored_actions=factored),
+        separate_critic=FLAGS.separate_critic, factored_actions=factored,
+        encoder=FLAGS.encoder),
       value_mode=FLAGS.value_mode,
       aux_tasks=aux_tasks,
       aux_target_fn=aux_target_fn,
@@ -1661,7 +1799,8 @@ def main(_):
     agent_fn_r = make_agent_fn(
         FLAGS.nn_width, FLAGS.nn_depth, tuple(aux_tasks or ()),
         norm=FLAGS.nn_norm, activation=FLAGS.nn_activation,
-        separate_critic=FLAGS.separate_critic, factored_actions=factored)
+        separate_critic=FLAGS.separate_critic, factored_actions=factored,
+        encoder=FLAGS.encoder)
     resume_src = FLAGS.resume
     sd = None
     # Resolve roster ids ("main", "snap_u100", ...) whenever the roster dir
@@ -1732,7 +1871,8 @@ def main(_):
   agent_fn = make_agent_fn(
         FLAGS.nn_width, FLAGS.nn_depth, tuple(aux_tasks or ()),
         norm=FLAGS.nn_norm, activation=FLAGS.nn_activation,
-        separate_critic=FLAGS.separate_critic, factored_actions=factored)
+        separate_critic=FLAGS.separate_critic, factored_actions=factored,
+        encoder=FLAGS.encoder)
   num_actions = game.num_distinct_actions()
   roster = None
   matchmaker = None
@@ -1877,9 +2017,14 @@ def main(_):
           _tm[4] += t3 - t2b
       agent.learn_np(step_arrays.obs, step_arrays.seats)
       if FLAGS.anneal_lr:
-        agent.anneal_learning_rate(update, num_updates)
+        # Drive the anneal off the agent's own counter: it is restored on
+        # resume, so a continued run keeps decaying from where it stopped
+        # instead of restarting at the base rate from the local loop counter.
+        # Clamp below num_updates so anneal never hits its frac<=0 guard.
+        agent.anneal_learning_rate(
+            min(agent.updates_done, num_updates - 1), num_updates)
       if FLAGS.rank_vp_beta_anneal_to >= 0.0:
-        agent.anneal_rank_vp_beta(update, num_updates,
+        agent.anneal_rank_vp_beta(agent.updates_done, num_updates,
                                   FLAGS.rank_vp_beta_anneal_to)
       if _tm is not None and update % FLAGS.timing_every == 0:
         _emit(f"[timing u{update}] act={_tm[0]*1e3*_tm_scale:.2f}ms/env"
@@ -1996,9 +2141,10 @@ def main(_):
       agent.learn(time_step)
 
       if FLAGS.anneal_lr:
-        agent.anneal_learning_rate(update, num_updates)
+        agent.anneal_learning_rate(
+            min(agent.updates_done, num_updates - 1), num_updates)
       if FLAGS.rank_vp_beta_anneal_to >= 0.0:
-        agent.anneal_rank_vp_beta(update, num_updates,
+        agent.anneal_rank_vp_beta(agent.updates_done, num_updates,
                                   FLAGS.rank_vp_beta_anneal_to)
 
       if pbar is not None:

@@ -1555,6 +1555,13 @@ class PPO(nn.Module):
     # Optimizing the policy and value network
     b_inds = np.arange(batch_size)
     clipfracs = []
+    # Per-update accumulators: kl / old_kl / entropy are computed inside the
+    # minibatch loop; without these, last_metrics fell through with the FINAL
+    # minibatch's values, so controllers and TB saw noise instead of the mean.
+    _mb_count = 0
+    _kl_acc = 0.0
+    _old_kl_acc = 0.0
+    _entropy_acc = 0.0
     for _ in range(self.update_epochs):
       np.random.shuffle(b_inds)
       for start in range(0, batch_size, minibatch_size):
@@ -1602,6 +1609,9 @@ class PPO(nn.Module):
           # calculate approx_kl http://joschu.net/blog/kl-approx.html
           old_approx_kl = (-logratio).mean()
           approx_kl = ((ratio - 1) - logratio).mean()
+          _kl_acc += float(approx_kl.detach())
+          _old_kl_acc += float(old_approx_kl.detach())
+          _mb_count += 1
           clipfracs += [
               ((ratio - 1.0).abs() > self.clip_coef).float().mean().item()
           ]
@@ -1633,6 +1643,7 @@ class PPO(nn.Module):
           v_loss = 0.5 * ((newvalue - b_returns[mb_inds])**2).mean()
 
         entropy_loss = entropy.mean()
+        _entropy_acc += float(entropy_loss.detach())
         loss = pg_loss - self.entropy_coef * entropy_loss + v_loss * self.value_coef
 
         # Auxiliary-head loss: supervise the trunk's auxiliary predictors
@@ -1723,17 +1734,18 @@ class PPO(nn.Module):
     aux_share = _aux / (_pg + _vf + _aux + 1e-12)
 
     # Per-update diagnostics for the outer loop (tqdm progress / console).
+    # _mb_count >= 1 whenever batch_size > 0, so it is safe as the divisor.
     self.last_metrics = {
         "policy_loss": float(pg_loss.detach()),
         "value_loss": float(v_loss.detach()),
-        "entropy": float(entropy_loss.detach()),
+        "entropy": _entropy_acc / _mb_count,
         "aux_loss": float(aux_loss.detach()),
         "aux_share": aux_share,
         "returns_out_of_band": out_of_band,
         "rank_ce": float(rank_ce.detach()),
         "clipfrac": float(np.mean(clipfracs)),
-        "old_kl": float(old_approx_kl.detach()),
-        "kl": float(approx_kl.detach()),
+        "old_kl": _old_kl_acc / _mb_count,
+        "kl": _kl_acc / _mb_count,
         "explained_variance": float(explained_var),
     }
 
