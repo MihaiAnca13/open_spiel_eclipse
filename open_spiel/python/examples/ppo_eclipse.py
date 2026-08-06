@@ -1897,6 +1897,10 @@ def main(_):
                        _randomized_game_string(FLAGS.game,
                                                FLAGS.seed + update * 7),
                        num_players, writer, agent.total_steps_done)
+          # The async loop otherwise flushes the writer only at a hard exit;
+          # a mid-run flush makes verdict utility observable live in TFEvents
+          # instead of appearing only when the process ends.
+          writer.flush()
         if FLAGS.eval_squad and roster is not None:
           eval_seed = FLAGS.seed + FLAGS.eval_seed_offset
           res = _eval_squad(
