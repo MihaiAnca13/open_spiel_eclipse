@@ -84,6 +84,8 @@ set(GAME_SOURCES
   dou_dizhu/dou_dizhu_utils.h
   eclipse/eclipse.cc
   eclipse/eclipse.h
+  eclipse/observation.cpp
+  eclipse/observation.h
   eclipse/systems/combat.cpp
   eclipse/systems/combat.h
   eclipse/systems/setup.cpp

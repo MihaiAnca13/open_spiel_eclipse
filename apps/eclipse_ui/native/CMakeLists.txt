@@ -13,6 +13,7 @@ endif()
 set(ECLIPSE_UI_NATIVE_SOURCES
   api.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../../../open_spiel/games/eclipse/eclipse.cc
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../../open_spiel/games/eclipse/observation.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../../../open_spiel/games/eclipse/systems/setup.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../../../open_spiel/games/eclipse/systems/combat.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../../../open_spiel/games/eclipse/systems/upkeep.cpp

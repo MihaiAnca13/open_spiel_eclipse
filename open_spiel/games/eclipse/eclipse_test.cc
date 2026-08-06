@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "open_spiel/games/eclipse/observation.h"
 #include "open_spiel/games/eclipse/systems/actions/explore.h"
 #include "open_spiel/games/eclipse/systems/actions/research.h"
 #include "open_spiel/games/eclipse/systems/actions/build.h"
@@ -1668,23 +1669,156 @@ void UpkeepObservationTensorTest() {
   std::vector<float> tensor(game->ObservationTensorShape()[0], 0.0f);
   state->ObservationTensor(0, absl::MakeSpan(tensor));
 
-  // Fixed layout always uses 5 opponent blocks: Global(45) + B0(135) + B1..B5(125) = 305.
-  constexpr int kUpkeepStart = 305 + 1350 + 40 + 40;  // 1735
-  SPIEL_CHECK_EQ(tensor[kUpkeepStart + 0], 1.0f);                    // upkeep active
-  // Upkeep step is one-hot at F+1+step_value, so choose_return_track (value 4) goes to F+5.
-  SPIEL_CHECK_EQ(tensor[kUpkeepStart + 5], 1.0f);                    // step=choose_return_track
-  SPIEL_CHECK_EQ(tensor[kUpkeepStart + 4], 0.0f);                    // step slot 3 (bankruptcy) empty
-  // player_id (normalized by / 7)
-  SPIEL_CHECK_FLOAT_EQ(tensor[kUpkeepStart + 6], 1.0f / 7.0f);
-  SPIEL_CHECK_EQ(tensor[kUpkeepStart + 7], 1.0f / 20.0f);  // pending_returns.size()=1
-  // pending_return.type (normalized by / 2)
-  SPIEL_CHECK_FLOAT_EQ(tensor[kUpkeepStart + 8],
-                       static_cast<float>(static_cast<int>(PlanetType::MONEY)) / 2.0f);
-  SPIEL_CHECK_EQ(tensor[kUpkeepStart + 9], 1.0f);  // is_orbital
-  // Graveyard counts (now in B0 self block at +17..19)
-  SPIEL_CHECK_EQ(tensor[45 + 17], 1.0f / 12.0f);   // graveyard[0]=1 / 12
-  SPIEL_CHECK_EQ(tensor[45 + 18], 2.0f / 12.0f);   // graveyard[1]=2 / 12
-  SPIEL_CHECK_EQ(tensor[45 + 19], 3.0f / 12.0f);   // graveyard[2]=3 / 12
+  namespace obs = open_spiel::eclipse::obs;
+  SPIEL_CHECK_EQ(game->ObservationTensorShape()[0], obs::kTotalSize);
+
+  int o = obs::kUpkeepStart;
+  SPIEL_CHECK_EQ(tensor[o], 1.0f);  // upkeep active
+  ++o;
+  // step one-hot: choose_return_track == 4.
+  SPIEL_CHECK_EQ(tensor[o + 4], 1.0f);
+  SPIEL_CHECK_EQ(tensor[o + 2], 0.0f);  // bankruptcy slot empty
+  o += obs::kUpkeepStepCount;
+  // player_id is now a SEAT-RELATIVE one-hot: seat 1 seen from seat 0 is rel 1.
+  SPIEL_CHECK_EQ(tensor[o + 1], 1.0f);
+  SPIEL_CHECK_EQ(tensor[o + 0], 0.0f);
+  o += obs::kRelSeatWidth;
+  SPIEL_CHECK_EQ(tensor[o], 1.0f / 20.0f);  // pending_returns.size() == 1
+  ++o;
+  // First pending return: PlanetType one-hot, then is_orbital.
+  SPIEL_CHECK_EQ(tensor[o + static_cast<int>(PlanetType::MONEY)], 1.0f);
+  SPIEL_CHECK_EQ(tensor[o + obs::kPlanetTypeCount], 1.0f);  // is_orbital
+}
+
+// The observation must expose every seat identically and must NEVER leak the
+// identity of a face-down discovery tile.
+void ObservationLayoutTest() {
+  namespace obs = open_spiel::eclipse::obs;
+  std::shared_ptr<const Game> game = LoadEclipseGame(2, 7);
+  std::unique_ptr<State> state = game->NewInitialState();
+  state->ApplyAction(0);
+  EclipseState* eclipse_state = static_cast<EclipseState*>(state.get());
+  ::State& raw = const_cast<::State&>(eclipse_state->RawState());
+
+  const int n = game->ObservationTensorShape()[0];
+  SPIEL_CHECK_EQ(n, obs::kTotalSize);
+
+  // ── seat blocks: viewer is always slot 0, unused slots stay zero ─────────
+  for (int viewer = 0; viewer < 2; ++viewer) {
+    std::vector<float> t(n, 0.0f);
+    state->ObservationTensor(viewer, absl::MakeSpan(t));
+    SPIEL_CHECK_EQ(t[obs::PlayerBlockStart(0) + 0], 1.0f);  // occupied
+    SPIEL_CHECK_EQ(t[obs::PlayerBlockStart(0) + 1], 1.0f);  // is the viewer
+    SPIEL_CHECK_EQ(t[obs::PlayerBlockStart(1) + 0], 1.0f);  // occupied
+    SPIEL_CHECK_EQ(t[obs::PlayerBlockStart(1) + 1], 0.0f);  // not the viewer
+    for (int slot = 2; slot < obs::kSeatSlots; ++slot) {
+      for (int i = 0; i < obs::kPlayerSize; ++i) {
+        SPIEL_CHECK_EQ(t[obs::PlayerBlockStart(slot) + i], 0.0f);
+      }
+    }
+  }
+
+  // ── a face-down discovery tile's IDENTITY must not reach the tensor ──────
+  // Find a sector that still carries an unclaimed tile, then check that
+  // rewriting the tile's identity leaves the observation bit-identical.
+  Sector* with_tile = nullptr;
+  for (int q = -GALAXY_RADIUS; q <= GALAXY_RADIUS && with_tile == nullptr; ++q) {
+    for (int r = -GALAXY_RADIUS; r <= GALAXY_RADIUS; ++r) {
+      if (!in_galaxy_bounds(q, r)) continue;
+      Sector& sec = raw.galaxy.at(q, r);
+      if (sec.sector_id != 0 && sec.discovery_tile_present) {
+        with_tile = &sec;
+        break;
+      }
+    }
+  }
+  if (with_tile != nullptr) {
+    with_tile->discovery_tile = DiscoveryBit::ANCIENT_MONOLITH;
+    std::vector<float> a(n, 0.0f);
+    state->ObservationTensor(0, absl::MakeSpan(a));
+    with_tile->discovery_tile = DiscoveryBit::WARP_PORTAL;
+    std::vector<float> b(n, 0.0f);
+    state->ObservationTensor(0, absl::MakeSpan(b));
+    for (int i = 0; i < n; ++i) {
+      SPIEL_CHECK_EQ(a[i], b[i]);  // identity leaked into the tensor
+    }
+    // ... but its presence IS visible.
+    const int cell = hex_to_index(with_tile->coords.q, with_tile->coords.r);
+    SPIEL_CHECK_EQ(a[obs::CellStart(cell) + obs::kCellDiscoveryPresent], 1.0f);
+  }
+
+  // ── wormhole edges are written ROTATED ──────────────────────────────────
+  Sector* placed = nullptr;
+  for (int q = -GALAXY_RADIUS; q <= GALAXY_RADIUS && placed == nullptr; ++q) {
+    for (int r = -GALAXY_RADIUS; r <= GALAXY_RADIUS; ++r) {
+      if (!in_galaxy_bounds(q, r)) continue;
+      Sector& sec = raw.galaxy.at(q, r);
+      if (sec.sector_id != 0 && get_sector_definition(sec.sector_id) != nullptr) {
+        placed = &sec;
+        break;
+      }
+    }
+  }
+  SPIEL_CHECK_TRUE(placed != nullptr);
+  const SectorDefinition* def = get_sector_definition(placed->sector_id);
+  const int cell = hex_to_index(placed->coords.q, placed->coords.r);
+  for (uint8_t rot = 0; rot < 6; ++rot) {
+    placed->rotation = rot;
+    std::vector<float> t(n, 0.0f);
+    state->ObservationTensor(0, absl::MakeSpan(t));
+    const uint8_t expect = rotate_edge_mask(def->wormholes_mask, rot);
+    for (int d = 0; d < 6; ++d) {
+      SPIEL_CHECK_EQ(t[obs::CellStart(cell) + obs::kCellWormhole + d],
+                     ((expect >> d) & 1u) ? 1.0f : 0.0f);
+    }
+  }
+
+  // ── planet slots: printed vs populated, incl. the virtual orbital slot ───
+  if (!def->slots.empty()) {
+    placed->occupied_slots_mask = 1u;  // slot 0 colonised
+    placed->orbital_built = false;
+    std::vector<float> t(n, 0.0f);
+    state->ObservationTensor(0, absl::MakeSpan(t));
+    const int type0 = static_cast<int>(def->slots[0].type);
+    SPIEL_CHECK_GT(t[obs::CellStart(cell) + obs::kCellPlanetPrinted + type0], 0.0f);
+    SPIEL_CHECK_GT(t[obs::CellStart(cell) + obs::kCellPlanetPopulated + type0], 0.0f);
+    // Sector VP value is visible.
+    SPIEL_CHECK_GT(t[obs::CellStart(cell) + obs::kCellPoints], 0.0f);
+  }
+
+  // ── diplomacy: WHO a relation is with is now readable ────────────────────
+  raw.players[0].reputation_track.clear();
+  ReputationSlot slot{};
+  slot.kind = open_spiel::eclipse::ReputationSlotKind::AMBASSADOR_OR_REP;
+  slot.holds_ambassador = true;
+  slot.ambassador_from = 1;
+  raw.players[0].reputation_track.push_back(slot);
+  std::vector<float> t(n, 0.0f);
+  state->ObservationTensor(0, absl::MakeSpan(t));
+  // Seat 0's reputation slot 0 holds an ambassador from seat 1, which from
+  // seat 0's own view is relative seat 1.
+  const int amb = obs::PlayerBlockStart(0) + obs::kPlayerRepTrackOffset +
+                  obs::kRepSlotAmbassadorFromOffset;
+  SPIEL_CHECK_EQ(t[amb + 1], 1.0f);
+  SPIEL_CHECK_EQ(t[amb + 0], 0.0f);
+  // holds_ambassador sits just before the partner one-hot.
+  SPIEL_CHECK_EQ(t[amb - 1], 1.0f);
+
+  // Seen from seat 1 the SAME relation moves to slot 1 (seat 0 is the viewer's
+  // first opponent) and its partner becomes relative seat 0 -- seat 1 itself.
+  // That round trip is what proves the whole tensor is canonicalised to the
+  // viewer rather than carrying absolute seat ids.
+  std::vector<float> t1(n, 0.0f);
+  state->ObservationTensor(1, absl::MakeSpan(t1));
+  const int amb1 = obs::PlayerBlockStart(1) + obs::kPlayerRepTrackOffset +
+                   obs::kRepSlotAmbassadorFromOffset;
+  SPIEL_CHECK_EQ(t1[amb1 + 0], 1.0f);
+  SPIEL_CHECK_EQ(t1[amb1 + 1], 0.0f);
+  SPIEL_CHECK_EQ(t1[amb1 - 1], 1.0f);  // holds_ambassador
+  // Seat 1's own block (slot 0) has no relation recorded.
+  const int amb1_self = obs::PlayerBlockStart(0) + obs::kPlayerRepTrackOffset +
+                        obs::kRepSlotAmbassadorFromOffset;
+  SPIEL_CHECK_EQ(t1[amb1_self - 1], 0.0f);
 }
 
 // Forces a two-player ship battle, then drives the whole combat phase through
@@ -3117,6 +3251,7 @@ int main(int argc, char** argv) {
   RUN_TEST(CleanupDrawsNewTechTilesTest);
   RUN_TEST(RoundEightCleanupEndsGameTest);
   RUN_TEST(UpkeepObservationTensorTest);
+  RUN_TEST(ObservationLayoutTest);
   RUN_TEST(CombatDiceChanceFlowTest);
   RUN_TEST(TiedInitiativeOrderTest);
   RUN_TEST(TiedInitiativeMissileEdgeTest);

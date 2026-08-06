@@ -4,6 +4,8 @@
 
 #include "open_spiel/games/eclipse/eclipse.h"
 
+#include "open_spiel/games/eclipse/observation.h"
+
 #include <algorithm>
 #include <bitset>
 #include <sstream>
@@ -575,9 +577,9 @@ int EclipseGame::NumPlayers() const { return ParameterValue<int>("players"); }
 int EclipseGame::MaxGameLength() const { return 1000; }
 
 std::vector<int> EclipseGame::ObservationTensorShape() const {
-  // Fixed size for max players (6), smaller games zero-pad trailing opponent blocks.
-  constexpr int total = 45 + 135 + 5 * 25 + 1350 + 40 + 40 + 15 + 35;
-  return {total};
+  // Fixed size for max players (6); smaller games zero-pad the trailing seat
+  // blocks (each carries an `occupied` bit). See observation.h for the layout.
+  return {open_spiel::eclipse::obs::kTotalSize};
 }
 
 std::unique_ptr<State> EclipseGame::NewInitialState() const {
@@ -1711,341 +1713,20 @@ std::string EclipseState::ObservationString(Player player) const {
   return ss.str();
 }
 
-// ── Per-player tensor encoding helpers ──────────────────────────────────────
-namespace {
-
-// Write `count` binary bits starting at `base` from a uint64_t mask.
-// Only the lowest `count` bits of `mask` are used.
-void write_bits(absl::Span<float> values, int base, uint64_t mask, int count) {
-  for (int b = 0; b < count && b < 64; ++b) {
-    values[base + b] = (mask & (1ULL << b)) ? 1.0f : 0.0f;
-  }
-}
-
-// One-hot encode `index` into `count` slots at `base`.
-void write_one_hot(absl::Span<float> values, int base, int index, int count) {
-  if (index >= 0 && index < count) values[base + index] = 1.0f;
-}
-
-// Normalize `val` to [0,1] by dividing by `max_v`.
-void write_frac(absl::Span<float> values, int idx, float val, float max_v) {
-  values[idx] = max_v > 0.0f ? std::min(val / max_v, 1.0f) : 0.0f;
-}
-
-// Write B0-sub block: Identity (10) + Resources & Tracks (16) + Bonus (18) + Rep Track (15) + Blueprints (32) + Tech Tree (44) = 135.
-void write_self_player_block(absl::Span<float> values, int B,
-                              const ::Player& me, int num_players,
-                              int16_t live_vp) {
-  // Identity (10)
-  write_one_hot(values, B + 0, static_cast<int>(me.species_id), 7);
-  values[B + 7] = me.eliminated ? 1.0f : 0.0f;
-  values[B + 8] = me.has_passed ? 1.0f : 0.0f;
-  // B+9 reserved
-
-  // Resources & Tracks (16): B+10..25
-  // B+10: live "current VP if the game ended now" (banked score breakdown),
-  // used for potential-based reward shaping and the agent's own estimate.
-  write_frac(values, B + 10, static_cast<float>(live_vp), 200.0f);
-  write_frac(values, B + 11, static_cast<float>(me.resources.gold), 40.0f);
-  write_frac(values, B + 12, static_cast<float>(me.resources.science), 40.0f);
-  write_frac(values, B + 13, static_cast<float>(me.resources.materials), 40.0f);
-  write_frac(values, B + 14, static_cast<float>(me.resources.gold_prod), 12.0f);
-  write_frac(values, B + 15, static_cast<float>(me.resources.science_prod), 12.0f);
-  write_frac(values, B + 16, static_cast<float>(me.resources.materials_prod), 12.0f);
-  write_frac(values, B + 17, static_cast<float>(me.graveyard_counts[0]), 12.0f);
-  write_frac(values, B + 18, static_cast<float>(me.graveyard_counts[1]), 12.0f);
-  write_frac(values, B + 19, static_cast<float>(me.graveyard_counts[2]), 12.0f);
-  if (me.colony_ships_total > 0)
-    write_frac(values, B + 20, static_cast<float>(me.colony_ships_available),
-               static_cast<float>(me.colony_ships_total));
-  write_frac(values, B + 21, static_cast<float>(me.colony_ships_total), 12.0f);
-  write_frac(values, B + 22, static_cast<float>(me.disks_on_sectors), 16.0f);
-  write_frac(values, B + 23, static_cast<float>(me.disks_on_actions), 12.0f);
-  write_frac(values, B + 24, static_cast<float>(me.disks_on_reactions), 12.0f);
-  values[B + 25] = static_cast<float>(me.extra_influence_discs) / 2.0f;
-
-  // Bonus State (18): B+26..43
-  write_frac(values, B + 26, static_cast<float>(me.trade_rate), 4.0f);
-  write_frac(values, B + 27, static_cast<float>(me.orbitals), 10.0f);
-  write_frac(values, B + 28, static_cast<float>(me.monoliths), 6.0f);
-  write_frac(values, B + 29, static_cast<float>(me.ambassador_tiles_held), 3.0f);
-  write_frac(values, B + 30, static_cast<float>(me.ambassador_tiles_pending_return), 3.0f);
-  values[B + 31] = me.traitor_held ? 1.0f : 0.0f;
-  write_frac(values, B + 32, static_cast<float>(me.discovery_vp_tiles_kept), 20.0f);
-  values[B + 33] = me.warp_portal_eligible ? 1.0f : 0.0f;
-  write_frac(values, B + 34, static_cast<float>(me.pending_artifact_key_chunks), 6.0f);
-  // Minor species bitmap: B+35..43 (9 floats)
-  for (uint8_t ms_idx : me.owned_minor_species) {
-    if (ms_idx < 9) values[B + 35 + ms_idx] = 1.0f;
-  }
-
-  // Reputation Track (15 = 5 slots × 3): B+44..58
-  for (int si = 0; si < 5 && si < static_cast<int>(me.reputation_track.size()); ++si) {
-    const auto& slot = me.reputation_track[si];
-    values[B + 44 + si] = slot.holds_ambassador ? 1.0f : 0.0f;    // +0..4
-    write_frac(values, B + 49 + si, static_cast<float>(slot.rep_value), 4.0f); // +5..9
-    values[B + 54 + si] = slot.pending_track_choice ? 1.0f : 0.0f; // +10..14
-  }
-
-  // Blueprint Summary (32 = 4 ships × 8): B+59..90
-  for (int ship = 0; ship < 4; ++ship) {
-    const auto& s = me.blueprints[ship].total_stats;
-    int base = B + 59 + ship * 8;
-    write_frac(values, base + 0, static_cast<float>(std::max<int8_t>(s.initiative, 0)), 20.0f);
-    write_frac(values, base + 1, static_cast<float>(std::max<int8_t>(s.computer, 0)), 20.0f);
-    write_frac(values, base + 2, static_cast<float>(std::max<int8_t>(s.shield, 0)), 20.0f);
-    values[base + 3] = (s.shield < 0) ? 1.0f : 0.0f;
-    write_frac(values, base + 4, static_cast<float>(s.hull), 20.0f);
-    // energy_net in slot 5
-    write_frac(values, base + 5,
-               static_cast<float>(s.energy_net > 0 ? s.energy_net : 0),
-               20.0f);
-    write_frac(values, base + 6, static_cast<float>(s.movement), 10.0f);
-    int total_dice = 0;
-    for (int c = 0; c < 5; ++c) total_dice += s.cannons[c] + s.missiles[c];
-    write_frac(values, base + 7, static_cast<float>(total_dice), 20.0f);
-  }
-
-  // Tech Tree (44): B+91..134
-  // Write only bits 0-8 of each mask (standard techs + one extra for edge cases).
-  write_bits(values, B + 91, me.researched_techs_military, 9);
-  write_bits(values, B + 100, me.researched_techs_grid, 9);
-  write_bits(values, B + 109, me.researched_techs_nano, 9);
-  // Rare bits (spread across all 3 masks): flatten bits 25-40 to indices 0-15.
-  // Layout: military(9) + grid(9) + nano(9) = 27 at B+91..117.
-  // Rare bits at B+118..133 (16), wormhole flag at B+134.
-  {
-    uint64_t rare_mask = 0x000001FFFE000000ULL;
-    uint64_t rare_bits =
-        (me.researched_techs_military & rare_mask) |
-        (me.researched_techs_grid & rare_mask) |
-        (me.researched_techs_nano & rare_mask);
-    for (int rb = 0; rb < 16; ++rb) {
-      values[B + 118 + rb] =
-          (rare_bits & (1ULL << (25 + rb))) ? 1.0f : 0.0f;
-    }
-  }
-  // Track counts can be derived by the agent from the 9-bit tech masks.
-  values[B + 134] = me.has_tech(TechBit::WORMHOLE_GENERATOR) ? 1.0f : 0.0f;
-}
-
-// Write opponent public-info block (25 floats).
-void write_opponent_block(absl::Span<float> values, int Bn,
-                           const ::Player& op, int16_t live_vp) {
-  // Bn+0: live "current VP if the game ended now" (banked score breakdown).
-  write_frac(values, Bn + 0, static_cast<float>(live_vp), 200.0f);
-  values[Bn + 1] = op.has_passed ? 1.0f : 0.0f;
-  values[Bn + 2] = op.eliminated ? 1.0f : 0.0f;
-  write_one_hot(values, Bn + 3, static_cast<int>(op.species_id), 7);
-  values[Bn + 10] = op.traitor_held ? 1.0f : 0.0f;
-  write_frac(values, Bn + 11, static_cast<float>(op.ambassador_tiles_held), 3.0f);
-  write_frac(values, Bn + 12, static_cast<float>(op.colony_ships_total), 12.0f);
-  write_frac(values, Bn + 13, static_cast<float>(op.disks_on_sectors), 16.0f);
-  write_frac(values, Bn + 14, static_cast<float>(op.orbitals), 10.0f);
-  write_frac(values, Bn + 15, static_cast<float>(op.monoliths), 6.0f);
-  values[Bn + 16] = op.warp_portal_eligible ? 1.0f : 0.0f;
-  write_frac(values, Bn + 17, static_cast<float>(op.owned_minor_species.size()), 9.0f);
-  int rep_filled = 0;
-  for (const auto& slot : op.reputation_track) {
-    if (slot.holds_ambassador || slot.rep_value != ReputationTiles::NONE) ++rep_filled;
-  }
-  write_frac(values, Bn + 18, static_cast<float>(rep_filled), 5.0f);
-  // Bn+19..24 reserved
-}
-
-}  // namespace
-
+// The observation tensor's layout and encoding live in observation.{h,cpp} --
+// one source of truth, mirrored by open_spiel/python/eclipse/obs_layout.py.
 void EclipseState::ObservationTensor(Player player, absl::Span<float> values) const {
   std::fill(values.begin(), values.end(), 0.0f);
+  // A chance node has no well-defined per-player view; rl_environment resolves
+  // chance nodes before handing control to a policy, so this is only reachable
+  // by code inspecting a state paused mid-resolution.
   if (pending_random_event_ != PendingRandomEvent::none) {
     return;
   }
   SPIEL_CHECK_GE(player, 0);
   SPIEL_CHECK_LT(player, NumPlayers());
-
-  const int num_players = NumPlayers();
-  const auto& state = eclipse_state_;
-  const auto& me = state.players[player];
-
-  // Live banked VP per seat ("if the game ended now"), computed once per call
-  // and reused across the self block and all opponent blocks. compute_all now
-  // walks the unit registry + galaxy once for every seat instead of per seat.
-  std::array<int16_t, MAX_PLAYERS> live_vp = {0};
-  const auto live_scores = open_spiel::eclipse::compute_all_player_scores(state);
-  for (uint8_t p = 0; p < state.players.size() && p < MAX_PLAYERS; ++p) {
-    live_vp[p] = live_scores[p].total_vp;
-  }
-
-  // ── Tensor layout (1785 floats) ──────────────────────────────────────
-  //   A: Global state                             45
-  //   B0: Self (full per-player)                  135
-  //   B1..B5: Opponent blocks (5 × 25)             125
-  //   C: Galaxy (225 cells × 6)                   1350
-  //   D: Tech market                               40
-  //   E: Combat state                              40
-  //   F: Upkeep state                              15
-  //   G: Action sub-states                         35
-  //   Total                                       1785
-
-  int off = 0;
-
-  // ══════════════════════════════════════════════════════════════════════
-  // Block A: Global state (45)
-  // ══════════════════════════════════════════════════════════════════════
-  int const A = off; off += 45;
-  write_frac(values, A + 0, static_cast<float>(state.current_round), 8.0f);
-  write_one_hot(values, A + 1, static_cast<int>(state.current_phase), 4);
-  values[A + 5] = (state.current_player == player) ? 1.0f : 0.0f;
-  write_one_hot(values, A + 6, static_cast<int>(state.current_player), num_players);
-  for (int i = 0; i < num_players; ++i) {
-    if (state.turn_order[i] == player) {
-      values[A + 12] = static_cast<float>(i + 1) / static_cast<float>(num_players);
-      break;
-    }
-  }
-  values[A + 13] = state.warped_universe ? 1.0f : 0.0f;
-  write_frac(values, A + 14, static_cast<float>(state.gcds_difficulty), 2.0f);
-  write_frac(values, A + 15, static_cast<float>(state.guardian_difficulty), 2.0f);
-  write_frac(values, A + 16, static_cast<float>(state.ancient_difficulty), 2.0f);
-  write_frac(values, A + 17, static_cast<float>(__builtin_popcount(state.sector_bag_inner)), 10.0f);
-  write_frac(values, A + 18, static_cast<float>(__builtin_popcount(state.sector_bag_middle)), 16.0f);
-  write_frac(values, A + 19, static_cast<float>(__builtin_popcount(state.sector_bag_outer)), 22.0f);
-  // A+20..44 reserved
-
-  // ══════════════════════════════════════════════════════════════════════
-  // Block B0: Self (135)
-  // ══════════════════════════════════════════════════════════════════════
-  int const B0 = off; off += 135;
-  write_self_player_block(values, B0, me, num_players, live_vp[player]);
-
-  // ══════════════════════════════════════════════════════════════════════
-  // Block B1..B5: Opponents (5 × 25)
-  // ══════════════════════════════════════════════════════════════════════
-  // Always reserve 5 opponent blocks (125 floats) for fixed tensor shape.
-  // Smaller games zero-pad the unused blocks.
-  int opp_idx = 0;
-  for (int other = 0; other < num_players && opp_idx < 5; ++other) {
-    if (other == player) continue;
-    int const Bn = off; off += 25;
-    write_opponent_block(values, Bn, state.players[other], live_vp[other]);
-    ++opp_idx;
-  }
-  // Advance past remaining unused opponent blocks (fixed offset).
-  off = 45 + 135 + 5 * 25;  // A(45) + B0(135) + 5×B(125) = 305
-
-  // ══════════════════════════════════════════════════════════════════════
-  // Block C: Galaxy (225 cells × 6 = 1350)
-  // ══════════════════════════════════════════════════════════════════════
-  int const C = off; off += 1350;
-  for (int q = -GALAXY_RADIUS; q <= GALAXY_RADIUS; ++q) {
-    for (int r = -GALAXY_RADIUS; r <= GALAXY_RADIUS; ++r) {
-      int cell = hex_to_index(q, r);
-      int base = C + cell * 6;
-      const Sector& sec = state.galaxy.at(q, r);
-      if (sec.sector_id == 0) continue;
-
-      values[base + 0] = 1.0f;  // sector present
-      // Owner encoding
-      if (sec.owner_id < static_cast<uint8_t>(num_players)) {
-        values[base + 1] = static_cast<float>(sec.owner_id + 1) / 7.0f;
-      } else if (sec.owner_id != 255) {
-        values[base + 1] = 1.0f;  // NPC-owned
-      }
-      // Buildings
-      uint8_t build_flag = (sec.orbital_built ? 1 : 0) | (sec.monolith_built ? 2 : 0);
-      values[base + 2] = static_cast<float>(build_flag) / 3.0f;
-
-      // Unit counts (one pass through registry per cell — fine for a 225-cell grid)
-      int friendly = 0, enemy = 0, npc = 0;
-      for (const Unit& u : state.unit_registry) {
-        if (u.sector_id != sec.sector_id) continue;
-        if (u.player_id == NPC_PLAYER_ID) { ++npc; continue; }
-        if (u.player_id == player) ++friendly;
-        else if (u.player_id < static_cast<uint8_t>(num_players)) ++enemy;
-      }
-      write_frac(values, base + 3, static_cast<float>(friendly), 8.0f);
-      write_frac(values, base + 4, static_cast<float>(enemy), 8.0f);
-      write_frac(values, base + 5, static_cast<float>(npc), 8.0f);
-    }
-  }
-
-  // ══════════════════════════════════════════════════════════════════════
-  // Block D: Tech market (40)
-  // ══════════════════════════════════════════════════════════════════════
-  int const D = off; off += 40;
-  for (int ti = 0; ti < 40; ++ti) {
-    uint8_t copies = TECH_TABLE[ti].copies;
-    write_frac(values, D + ti, static_cast<float>(state.tech_tray[ti]),
-               static_cast<float>(std::max<uint8_t>(copies, 1)));
-  }
-
-  // ══════════════════════════════════════════════════════════════════════
-  // Block E: Combat state (40)
-  // ══════════════════════════════════════════════════════════════════════
-  int const E = off; off += 40;
-  const CombatState& cs = state.combat_state;
-  if (cs.phase != CombatState::Phase::inactive) {
-    values[E + 0] = 1.0f;
-    write_one_hot(values, E + 1, static_cast<int>(cs.phase), 11);
-    write_frac(values, E + 12, static_cast<float>(cs.engagement_round), 20.0f);
-    write_frac(values, E + 13, static_cast<float>(cs.current_attacker_id), 7.0f);
-    write_frac(values, E + 14, static_cast<float>(cs.current_defender_id), 7.0f);
-    write_frac(values, E + 15, static_cast<float>(cs.pending_player), 7.0f);
-    write_frac(values, E + 16, static_cast<float>(cs.active_sector_id), 395.0f);
-    write_frac(values, E + 17, static_cast<float>(cs.initiative_size), 16.0f);
-    write_frac(values, E + 18, static_cast<float>(cs.battle_queue_size), 8.0f);
-    write_frac(values, E + 19, static_cast<float>(cs.retreating_group_count), 16.0f);
-    write_frac(values, E + 20, static_cast<float>(cs.reputation_earned), 15.0f);
-    write_frac(values, E + 21, static_cast<float>(cs.pop_attack_damage_remaining), 20.0f);
-    write_frac(values, E + 22, static_cast<float>(cs.pop_attack_player), 7.0f);
-    write_frac(values, E + 23, static_cast<float>(cs.pop_attack_owner), 7.0f);
-    write_frac(values, E + 24, static_cast<float>(cs.influence_uncontrolled_size), 225.0f);
-    write_frac(values, E + 25, static_cast<float>(cs.influence_decision_player), 7.0f);
-  }
-
-  // ══════════════════════════════════════════════════════════════════════
-  // Block F: Upkeep state (15)
-  // ══════════════════════════════════════════════════════════════════════
-  int const F = off; off += 15;
-  const UpkeepState& us = state.upkeep_state;
-  if (us.step != UpkeepState::Step::inactive) {
-    values[F + 0] = 1.0f;
-    write_one_hot(values, F + 1, static_cast<int>(us.step), 5);
-    write_frac(values, F + 6, static_cast<float>(us.player_id), 7.0f);
-    write_frac(values, F + 7, static_cast<float>(us.pending_returns.size()), 20.0f);
-    if (!us.pending_returns.empty()) {
-      write_frac(values, F + 8,
-                 static_cast<float>(static_cast<int>(us.pending_returns.front().type)), 2.0f);
-      values[F + 9] = us.pending_returns.front().is_orbital ? 1.0f : 0.0f;
-    }
-    if (us.player_id < static_cast<uint8_t>(state.players.size())) {
-      const ::Player& upkeep_player = state.players[us.player_id];
-      values[F + 10] = IsPlayerSolvent(upkeep_player) ? 1.0f : 0.0f;
-      write_frac(values, F + 11, static_cast<float>(PlayerIncome(upkeep_player)), 28.0f);
-      write_frac(values, F + 12, static_cast<float>(PlayerUpkeepCost(upkeep_player)), 30.0f);
-    }
-  }
-
-  // ══════════════════════════════════════════════════════════════════════
-  // Block G: Action sub-states (35)
-  //   Each action: 1 (active) + phase one-hot + 1 (activations left).
-  //   Packed tightly per action: 13+4+4+5+4+5 = 35.
-  // ══════════════════════════════════════════════════════════════════════
-  int const G = off; off += 35;
-  auto write_action_pack = [&](int base, auto phase, int phase_oh_count, uint8_t activations) {
-    values[base] = (phase != decltype(phase)::inactive) ? 1.0f : 0.0f;
-    if (phase != decltype(phase)::inactive) {
-      write_one_hot(values, base + 1, static_cast<int>(phase), phase_oh_count);
-    }
-    write_frac(values, base + 1 + phase_oh_count, static_cast<float>(activations), 8.0f);
-  };
-  write_action_pack(G + 0,  state.explore_state.phase, 11, state.explore_state.activations_remaining);
-  write_action_pack(G + 13, state.research_state.phase, 2,  state.research_state.activations_remaining);
-  write_action_pack(G + 17, state.build_state.phase, 2,    state.build_state.activations_remaining);
-  write_action_pack(G + 21, state.influence_state.phase, 3, state.influence_state.activations_remaining);
-  write_action_pack(G + 26, state.upgrade_state.phase, 2,  state.upgrade_state.activations_remaining);
-  write_action_pack(G + 30, state.move_state.phase, 3,     state.move_state.activations_remaining);
-  // G+35..39 are within the reserved range.
+  open_spiel::eclipse::obs::WriteObservationTensor(eclipse_state_, player,
+                                                  NumPlayers(), values);
 }
 
 void EclipseState::RestoreFromSnapshot(

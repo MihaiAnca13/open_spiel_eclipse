@@ -50,6 +50,7 @@ from torch import nn
 
 import pyspiel
 from open_spiel.python import rl_environment
+from open_spiel.python.eclipse import obs_layout
 from open_spiel.python.examples.league import Matchmaker
 from open_spiel.python.examples.league import PolicyRoster
 from open_spiel.python.pytorch.ppo import PPO
@@ -592,27 +593,30 @@ def _squash_win(vp):
   return float(np.clip(np.array(vp) / 200.0, -0.5, 1.0))
 
 
-# Observation tensor score slots written by the C++ game (see eclipse.cc):
-#   self score slot  B0 + 10   => index 45 + 10 = 55
-#   opponent k slot  Bn + 0    => index 45 + 135 + k * 25, k = other index
-SCORE_SELF_SLOT = 45 + 10
-OPP_BASE = 45 + 135
-SCORE_DIVISOR = 200.0  # total_vp normalized by /200 in the tensor.
+# Every observation offset now comes from one place -- see obs_layout.py, which
+# mirrors open_spiel/games/eclipse/observation.h and asserts its TOTAL against
+# the engine's real observation size. The previous hand-written constants here
+# (SCORE_SELF_SLOT, OPP_BASE, GALAXY_BASE, CELL_STRIDE and the offsets buried
+# inside phi_soft_*) all silently addressed the wrong floats the moment the C++
+# layout moved, which it now has.
+SCORE_DIVISOR = 60.0  # total_vp is normalized by /60 in the tensor.
 
 
-def opponent_block_index(seat, viewer):
-  """Block index of `seat` within `viewer`'s opponent blocks, or None.
+def player_slot(seat, viewer, num_players):
+  """Block slot holding ``seat`` in ``viewer``'s observation.
 
-  Returns None when ``seat == viewer``: that seat occupies the *self* block, not
-  an opponent block. Previously this returned ``seat - 1`` in that case, reading
-  a different player's slots -- and for seat 0, index -1, i.e. ``OPP_BASE - 25``,
-  which is unrelated observation memory. The same-seat case is common in Eclipse
-  because macro actions (explore -> place -> rotate, build/upgrade/move
-  internals) keep one seat acting for several consecutive steps.
+  The tensor is canonicalised to the viewer: slot 0 is *always* the viewer and
+  slots 1..n-1 are the other seats in wrapping order. There is no longer a
+  separate self/opponent schema, so unlike the old ``opponent_block_index`` this
+  is total -- every seat, including the viewer, has a slot.
   """
-  if seat == viewer:
-    return None
-  return seat if seat < viewer else seat - 1
+  return obs_layout.slot_for_seat(seat, viewer, num_players)
+
+
+def score_slot(seat, viewer, num_players):
+  """Index of ``seat``'s live total-VP float in ``viewer``'s observation."""
+  return (obs_layout.player_block_start(player_slot(seat, viewer, num_players))
+          + obs_layout.P_VP_TOTAL)
 
 
 # Eclipse flat action-id layout (see eclipse.cc anonymous namespace):
@@ -633,18 +637,17 @@ ACTION_COLONY_START = 332
 ACTION_COLONY_END = 5731
 ACTION_PASS = 0
 
-GALAXY_BASE = 45 + 135 + 125  # obs block C starts after A+B0+5 opponent blocks.
-CELL_STRIDE = 6
+GALAXY_BASE = obs_layout.GALAXY_START
+CELL_STRIDE = obs_layout.CELL_CHANNELS
 
-
-# Observation slots used by the episode diagnostics (see eclipse.cc layout):
-#   A + 0        round / 8
-#   B0 + 7       self "eliminated"       -> index 52
-#   Bn + 2       opponent n "eliminated" -> OPP_BASE + block*25 + 2
-ROUND_SLOT = 0
-SELF_ELIM_SLOT = 45 + 7
-OPP_ELIM_OFFSET = 2
+ROUND_SLOT = obs_layout.GLOBAL_START  # round / MAX_ROUNDS
 MAX_ROUNDS = 8
+
+
+def elim_slot(seat, viewer, num_players):
+  """Index of ``seat``'s `eliminated` flag in ``viewer``'s observation."""
+  return (obs_layout.player_block_start(player_slot(seat, viewer, num_players))
+          + obs_layout.P_ELIMINATED)
 
 
 class EpisodeDiagnostics:
@@ -680,12 +683,17 @@ class EpisodeDiagnostics:
     self._cols = None
 
   def _elim_columns(self, seats):
-    """(num_players, num_envs) obs column holding each seat's eliminated bit."""
+    """(num_players, num_envs) obs column holding each seat's eliminated bit.
+
+    Every seat now has an identical block and the tensor is canonicalised to the
+    viewer, so this is one wrapping subtraction rather than a self/opponent
+    special case.
+    """
     seat_ids = np.arange(self.num_players, dtype=np.int64)[:, None]
     viewers = np.asarray(seats, dtype=np.int64)[None, :]
-    block = seat_ids - (seat_ids > viewers).astype(np.int64)
-    return np.where(seat_ids == viewers, SELF_ELIM_SLOT,
-                    OPP_BASE + block * 25 + OPP_ELIM_OFFSET)
+    slot = (seat_ids - viewers) % self.num_players
+    return (obs_layout.PLAYERS_START + slot * obs_layout.PLAYER_SIZE
+            + obs_layout.P_ELIMINATED)
 
   def observe(self, obs_batch, seats):
     """Folds one step's observations into the per-episode trackers."""
@@ -781,8 +789,12 @@ def _best_expand_zone(obs, zones):
   best_key = None
   for a in zones:
     c = a - ACTION_EXPLORE_ZONE_START
-    o = CELL_STRIDE * c
-    enemy = obs[GALAXY_BASE + o + 4] if GALAXY_BASE + o + 4 < len(obs) else 0.0
+    base = GALAXY_BASE + CELL_STRIDE * c
+    if base + obs_layout.C_ENEMY_SHIPS + obs_layout.PLAYER_SHIP_TYPES > len(obs):
+      enemy = 0.0
+    else:
+      lo = base + obs_layout.C_ENEMY_SHIPS
+      enemy = float(sum(obs[lo:lo + obs_layout.PLAYER_SHIP_TYPES]))
     key = (enemy, c)
     if best_key is None or key < best_key:
       best_key = key
@@ -812,32 +824,34 @@ def _phi_cached():
   return _PHI_VARS[0], _PHI_WEIGHTS, _PHI_VARS[1]
 
 
-def phi_soft_self(obs):
-  """Soft potential read from a seat's own (self) observation block."""
-  _, (w_colony, w_disk, w_struct, w_amb), _ = _phi_cached()
-  base = phi_from_obs_slot(obs, SCORE_SELF_SLOT)
-  colony = float(obs[45 + 21]) * 12.0
-  disks = float(obs[45 + 22]) * 16.0
-  orbitals = float(obs[45 + 27]) * 10.0
-  monoliths = float(obs[45 + 28]) * 6.0
-  amb = float(obs[45 + 29]) * 3.0
-  return base + (w_colony * colony + w_disk * disks +
-                 w_struct * (orbitals + monoliths) +
-                 w_amb * amb)
+# Denominators the C++ writer used for each field, so the reads below recover
+# real units rather than normalised ones.
+_PHI_SCALES = (
+    (obs_layout.P_COLONY_TOTAL, 12.0),
+    (obs_layout.P_DISKS_ON_SECTORS, 16.0),
+    (obs_layout.P_ORBITALS, 10.0),
+    (obs_layout.P_MONOLITHS, 6.0),
+    (obs_layout.P_AMBASSADOR_HELD, 5.0),
+)
 
 
-def phi_soft_opponent(obs_viewer, block):
-  """Soft potential for a seat read from another seat's observation block."""
+def phi_soft_block(obs, base):
+  """Soft potential for the seat whose block starts at ``base``.
+
+  Self and opponent now share one identical block schema, so this replaces the
+  old ``phi_soft_self``/``phi_soft_opponent`` pair -- which had to duplicate the
+  same formula against two different sets of offsets.
+  """
   _, (w_colony, w_disk, w_struct, w_amb), _ = _phi_cached()
-  base = phi_from_obs_slot(obs_viewer, block)
-  colony = float(obs_viewer[block + 12]) * 12.0
-  disks = float(obs_viewer[block + 13]) * 16.0
-  orbitals = float(obs_viewer[block + 14]) * 10.0
-  monoliths = float(obs_viewer[block + 15]) * 6.0
-  amb = float(obs_viewer[block + 11]) * 3.0
-  return base + (w_colony * colony + w_disk * disks +
-                 w_struct * (orbitals + monoliths) +
-                 w_amb * amb)
+  vp = float(obs[base + obs_layout.P_VP_TOTAL]) * SCORE_DIVISOR
+  colony = float(obs[base + obs_layout.P_COLONY_TOTAL]) * 12.0
+  disks = float(obs[base + obs_layout.P_DISKS_ON_SECTORS]) * 16.0
+  orbitals = float(obs[base + obs_layout.P_ORBITALS]) * 10.0
+  monoliths = float(obs[base + obs_layout.P_MONOLITHS]) * 6.0
+  amb = float(obs[base + obs_layout.P_AMBASSADOR_HELD]) * 5.0
+  return vp + (w_colony * colony + w_disk * disks +
+               w_struct * (orbitals + monoliths) +
+               w_amb * amb)
 
 
 def potential_self(obs, win_squash=False):
@@ -849,28 +863,28 @@ def potential_self(obs, win_squash=False):
   needs the network).
   """
   mode, _, _ = _phi_cached()
+  # The viewer is always block slot 0 now.
+  return potential_block(obs, obs_layout.player_block_start(0), win_squash)
+
+
+def potential_block(obs, base, win_squash=False):
+  """Potential of the seat whose block starts at ``base``.
+
+  VP units for banked/soft; ``win_squash`` maps onto the rank-utility scale.
+  """
+  mode, _, _ = _phi_cached()
   if mode == "banked":
-    v = phi_from_obs_slot(obs, SCORE_SELF_SLOT)
+    v = float(obs[base + obs_layout.P_VP_TOTAL]) * SCORE_DIVISOR
   elif mode == "soft":
-    v = phi_soft_self(obs)
+    v = phi_soft_block(obs, base)
   else:
     v = 0.0
   return _squash_win(v) if (win_squash and mode in ("banked", "soft")) else v
 
 
 def potential_opponent(obs_viewer, block, win_squash=False):
-  """Potential of a non-acting seat read from the viewer's observation.
-
-  VP units for banked/soft; ``win_squash`` maps onto the rank-utility scale.
-  """
-  mode, _, _ = _phi_cached()
-  if mode == "banked":
-    v = phi_from_obs_slot(obs_viewer, block)
-  elif mode == "soft":
-    v = phi_soft_opponent(obs_viewer, block)
-  else:
-    v = 0.0
-  return _squash_win(v) if (win_squash and mode in ("banked", "soft")) else v
+  """Backwards-compatible alias -- ``block`` is now a full block start index."""
+  return potential_block(obs_viewer, block, win_squash)
 
 
 def potential_self_vec(obs_batch, win_squash=False):
@@ -879,41 +893,43 @@ def potential_self_vec(obs_batch, win_squash=False):
   Column reads only, no per-env Python loop (hot shaping path).
   """
   mode, (w_col, w_disk, w_struct, w_amb), _ = _phi_cached()
+  # The viewer is always block slot 0.
+  return potential_block_vec(
+      obs_batch,
+      np.full(obs_batch.shape[0], obs_layout.player_block_start(0),
+              dtype=np.int64),
+      win_squash)
+
+
+def potential_block_vec(obs_batch, blocks, win_squash=False):
+  """Vectorized potential; ``blocks`` is (num_envs,) block-start index per row.
+
+  Self and opponent share one block schema, so a single formula now serves both
+  -- the two vectorized variants used to duplicate it against different offsets.
+  """
+  n = obs_batch.shape[0]
+  ar = np.arange(n)
+  mode, (w_col, w_disk, w_struct, w_amb), _ = _phi_cached()
+  blocks = np.asarray(blocks, dtype=np.int64)
   if mode == "banked":
-    v = obs_batch[:, SCORE_SELF_SLOT] * SCORE_DIVISOR
+    v = obs_batch[ar, blocks + obs_layout.P_VP_TOTAL] * SCORE_DIVISOR
   elif mode == "soft":
-    v = (
-        obs_batch[:, SCORE_SELF_SLOT] * SCORE_DIVISOR + w_col * obs_batch[:, 66] * 12.0
-        + w_disk * obs_batch[:, 67] * 16.0
-        + w_struct * (obs_batch[:, 72] * 10.0 + obs_batch[:, 73] * 6.0)
-        + w_amb * obs_batch[:, 74] * 3.0)
+    v = (obs_batch[ar, blocks + obs_layout.P_VP_TOTAL] * SCORE_DIVISOR
+         + w_col * obs_batch[ar, blocks + obs_layout.P_COLONY_TOTAL] * 12.0
+         + w_disk * obs_batch[ar, blocks + obs_layout.P_DISKS_ON_SECTORS] * 16.0
+         + w_struct * (obs_batch[ar, blocks + obs_layout.P_ORBITALS] * 10.0
+                       + obs_batch[ar, blocks + obs_layout.P_MONOLITHS] * 6.0)
+         + w_amb * obs_batch[ar, blocks + obs_layout.P_AMBASSADOR_HELD] * 5.0)
   else:
-    v = np.zeros(obs_batch.shape[0], dtype=np.float32)
+    v = np.zeros(n, dtype=np.float32)
   if win_squash and mode in ("banked", "soft"):
     return np.clip(v / SCORE_DIVISOR, -0.5, 1.0)
   return v
 
 
 def potential_opponent_vec(obs_batch, blocks, win_squash=False):
-  """Vectorized ``potential_opponent``; ``blocks`` is (num_envs,) int of the
-  opponent's obs block start per row."""
-  n = obs_batch.shape[0]
-  ar = np.arange(n)
-  mode, (w_col, w_disk, w_struct, w_amb), _ = _phi_cached()
-  if mode == "banked":
-    v = obs_batch[ar, blocks] * SCORE_DIVISOR
-  elif mode == "soft":
-    v = (
-        obs_batch[ar, blocks] * SCORE_DIVISOR + w_col * obs_batch[ar, blocks + 12] * 12.0
-        + w_disk * obs_batch[ar, blocks + 13] * 16.0
-        + w_struct * (obs_batch[ar, blocks + 14] * 10.0
-                      + obs_batch[ar, blocks + 15] * 6.0)
-        + w_amb * obs_batch[ar, blocks + 11] * 3.0)
-  else:
-    v = np.zeros(n, dtype=np.float32)
-  if win_squash and mode in ("banked", "soft"):
-    return np.clip(v / SCORE_DIVISOR, -0.5, 1.0)
-  return v
+  """Backwards-compatible alias for ``potential_block_vec``."""
+  return potential_block_vec(obs_batch, blocks, win_squash)
 
 
 def _phi_wins(agent, obs_np, device):
@@ -1826,23 +1842,15 @@ def main(_):
             phi_next = _phi_wins(agent, step_arrays.obs, device)
             shaped[not_done] = FLAGS.gamma * phi_next[not_done] - phi_prev[not_done]
           else:
-            # phi(s') for the acting seat. When a *different* seat is now to
-            # move, read the mover's opponent block in that viewer's obs; when
-            # the same seat keeps acting (common in Eclipse macro actions:
-            # explore -> place -> rotate, build/upgrade/move internals) the
-            # mover is the viewer, so read its self slots. The block-relative
-            # soft-phi offsets differ between the two layouts, hence two calls
-            # rather than one index trick. Previously the same-seat case read
-            # seat-1's block -- and for seat 0, unrelated memory at OPP_BASE-25.
-            same = seats == new_seats
-            blocks = OPP_BASE + np.where(seats < new_seats, seats,
-                                         np.maximum(seats - 1, 0)) * 25
-            phi_next = potential_opponent_vec(step_arrays.obs, blocks,
-                                              win_squash)
-            if same.any():
-              phi_next = np.where(
-                  same, potential_self_vec(step_arrays.obs, win_squash),
-                  phi_next)
+            # phi(s') for the seat that just acted, read out of whichever seat
+            # is now to move. Every seat has an identical block and the tensor
+            # is canonicalised to the viewer, so this is one wrapping
+            # subtraction -- the old self-vs-opponent branch (and its two
+            # different offset layouts) is gone.
+            blocks = (obs_layout.PLAYERS_START
+                      + ((seats - new_seats) % num_players)
+                      * obs_layout.PLAYER_SIZE)
+            phi_next = potential_block_vec(step_arrays.obs, blocks, win_squash)
             shaped[not_done] = FLAGS.gamma * phi_next[not_done] - phi_prev[not_done]
         t2b = time.perf_counter() if _tm is not None else None
         agent.post_step_np(
@@ -1960,14 +1968,11 @@ def main(_):
               viewer = ts.observations["current_player"]
               seat = seats[i]
               obs_viewer = ts.observations["info_state"][viewer]
-              k = opponent_block_index(seat, viewer)
-              if k is None:
-                # Same seat still to move: it is the viewer, so read its self
-                # slots rather than an opponent block.
-                phi_next = potential_self(obs_viewer, win_squash)
-              else:
-                phi_next = potential_opponent(obs_viewer, OPP_BASE + k * 25,
-                                              win_squash)
+              # One identical block per seat, canonicalised to the viewer, so
+              # the same-seat and different-seat cases are the same read.
+              base = obs_layout.player_block_start(
+                  obs_layout.slot_for_seat(seat, viewer, num_players))
+              phi_next = potential_block(obs_viewer, base, win_squash)
               shaped[i] = FLAGS.gamma * phi_next - phi_prev[i]
 
         agent.post_step(
