@@ -174,20 +174,57 @@ The 9 VP categories are now in the tensor. Add a `breakdown` choice to `--aux_ta
 `aux_heads` is already a `ModuleDict` and `ppo.py`'s `aux_targets`/`aux_mask` buffers already
 back-fill terminal-derived targets, so no new mechanism is needed.
 
-### 3. Make strength measurable before tuning anything else
+### 3. Make strength measurable before tuning anything else — DONE (2026-08-07)
 
-Still the open item from both Sprint B3 and Sprint C.
+Both halves delivered and measured on the current 24714/spatial stack. Details below.
 
-- **Run the existing ladder.** `roster_ladder.py` is complete and careful (margin ratings with
-  Random pinned at 0, bootstrap CIs, Kendall-tau monotonicity verdict, identical-policy mirror
-  gate) but has never been run to completion — its default 55 pairs × 256 games ≈ 14k games
-  starved the GPU. Run it standalone on an idle GPU with a much smaller budget, pruning to
-  well-separated snapshots (`--ladder_min_sep`).
-- **Write a stronger scripted reference bot.** `_greedy_pick` falls back to `rng.choice(legal)`
-  for build/upgrade/move/combat/upkeep/diplomacy/trade — most of the game — so "+0.70 vs Greedy"
-  means "beats near-random" and is saturated. The planet, wormhole and sector-VP data a real
-  heuristic needs now exists. This is also the only route that would make a BC warm-start worth
-  reconsidering (cloning today's Greedy teaches nothing).
+**The ladder ran to completion and is MONOTONE.** Fresh clean roster (`runs/roster`, main birth 573
++ 8 snapshots across updates 25–573) from a 9.4M-step / 1h run on the 24714 observation; ladder at
+32 games/pair (`runs/roster/ladder.json`): verdict **MONOTONE** (Kendall τ=+0.64, permutation
+p=0.031, zero CI-clear regressions, margin and binarized-Elo orderings agree).
+
+Ratings (margin model, Random pinned 0, bootstrap CIs):
+
+| policy | upd | rating |
+|---|---|---|
+| main | 573 | +1.225 [1.185, 1.266] |
+| snap_u573 | 573 | +1.221 |
+| snap_u550 | 550 | +1.188 |
+| snap_u450 | 450 | +1.186 |
+| snap_u525 | 525 | +1.177 |
+| snap_u475 | 475 | +1.145 |
+| snap_u500 | 500 | +1.144 |
+| snap_u25 | 25 | +0.479 |
+| snap_u50 | 50 | +0.370 |
+| Greedy | — | +0.200 |
+| Heuristic | — | +0.165 |
+| Random | — | 0 (anchor) |
+
+Three findings load-bearing for Items 4/5:
+
+- **Training improvement is real and measurable** — early snapshots (u25/u50 +0.37–0.48) are far
+  below late ones (u450+ +1.14–1.22). First direct proof the fixed stack improves with training.
+- **The agent converges by ~u450 (~7.4M steps)** — u450→u573 and `main` are indistinguishable
+  within CI (adjacent dmargins ≈0, none CI-clear); the final ~2M steps buy nothing. **This
+  contradicts Item 5's "longer is better"** and matches the old 400M run's declining vp_all: do not
+  extend blindly, resolve the plateau instead.
+- **The agent solves every reference** — dmargins ~+0.98 vs Random, +0.92–0.98 vs Greedy/
+  Heuristic; `main` +1.225 is far above the new Heuristic bar. The old "vs Greedy"+0.70 column is
+  fully saturated.
+
+**Stronger reference bot.** New `_GreedyPickV2` in `ppo_eclipse.py`, wired into the ladder as a
+separate `Heuristic` anchor (`--ladder_include_heuristic`, default on). It decodes the engine's own
+action id arithmetic (explore-zone `101+cell`, colony `332+cell*24+…`, build `6188+type*225+cell`,
+all `obs_layout.hex_to_index`-indexed) and scores target cells from the full 24,714-float tensor
+(sector VP, printed planet, enemy ships), so explore/colony/build are informed rather than
+`rng.choice`. Diplomacy/trade still fall back to random (deferred, per plan). Validated: plays a
+full legal game, and beats old Greedy +0.320 [0.164,0.469] head-to-head; roughly tied with Greedy
+in the ladder and a real (non-saturated) bar. `action_factors_test` 8/8 green.
+
+**Overwrite gotcha (fixed).** Overwriting `runs/roster` in place silently poisoned pruning: the run
+loaded the stale pre-rewrite snapshot entries, so the first new snapshot got pruned away. Fix:
+clear the roster directory before a run that reuses it. `roster_ladder.py`/`ppo_eclipse.py` have no
+backward compat with pre-24714 checkpoints (expected).
 
 ### 4. Closed-loop LR and entropy control (needs 0b first)
 

@@ -934,6 +934,164 @@ def _best_expand_zone(obs, zones):
   return best
 
 
+class _GreedyPickV2:
+  """Observation-aware reference heuristic (stronger than ``_greedy_pick``).
+
+  ``_greedy_pick`` types only the explore macro-starts and the explore
+  sub-pipeline; everything else (build/colony/move/combat/upkeep/diplomacy/
+  trade internals) falls back to a uniform random pick, so the "+0.70 vs
+  Greedy" verdict means "beats near-random" and saturates early. This bot
+  reads the (now complete) observation tensor and the engine's own action-id
+  arithmetic to make *informed* choices among the legal cell-targeted
+  families, so it is a real reference an RL agent must beat.
+
+  Decoder (mirrors eclipse.cc, all cell-targeted ids use ``hex_to_index``,
+  which is exactly ``obs_layout.hex_to_index``):
+    explore zone: cell = id - 101
+    colony ship : cell = (id - 332) / 24  ;  street = (id - 332) % 24
+    build choice: enc = id - 6188 ; cell = enc % 225, type = enc / 225
+
+  Deliberately out of scope (deferred, matches B3 plan): diplomacy and trade
+  internals still fall back to random, exactly as today. A live reference for
+  those would need the ambassador/trade tables, not the raw tensor.
+  """
+
+  ACTION_BUILD_START = 6188
+  ACTION_BUILD_STOP = ACTION_BUILD_START - 1   # 6187, eclipse.cc
+  GALAXY_CELLS = obs_layout.GALAXY_CELLS
+  COLONY_CODES = 24
+
+  BUILD_TYPES = ("INTERCEPTOR", "CRUISER", "DREADNOUGHT", "STARBASE",
+                 "ORBITAL", "MONOLITH")
+
+  def __call__(self, obs, legal, rng=None):
+    if rng is None:
+      rng = np.random
+    obs = np.asarray(obs, dtype=np.float32)
+    s = set(int(a) for a in legal)
+
+    # Explore sub-pipeline: keep exact behaviour of v1 (it is already typed).
+    if ACTION_EXPLORE_START in s:
+      return ACTION_EXPLORE_START
+    if 84 in s and 85 in s:
+      return 84  # place over discard
+    rot = next((a for a in range(86, 92) if a in s), None)
+    if rot is not None:
+      return rot
+    if 92 in s and 93 in s:
+      return 92  # take control over decline
+    if 94 in s and 95 in s:
+      return 95  # immediate 2 banked VP over a discovery draw
+    keep = next((a for a in range(96, 100) if a in s), None)
+    if keep is not None:
+      return keep
+
+    # Explore-zone choice: prefer a present, planet-bearing, uncontested cell.
+    zones = [int(a) for a in legal
+             if ACTION_EXPLORE_ZONE_START <= a <= ACTION_EXPLORE_ZONE_END]
+    if zones:
+      return self._pick_explore_zone(obs, zones)
+
+    # Build choice: prefer a defensive hull on our planet, else pass.
+    builds = [int(a) for a in legal if self.ACTION_BUILD_START <= a]
+    if builds:
+      c = self._pick_build(obs, builds)
+      if c is not None:
+        return c
+
+    # Colony placement: prefer the highest-value reachable cell.
+    colony = [int(a) for a in legal
+              if ACTION_COLONY_START <= a <= ACTION_COLONY_END]
+    if colony:
+      return self._pick_colony(obs, colony, rng)
+
+    # Macro-starts and the pass, as v1.
+    for pid in (ACTION_BUILD_START, ACTION_UPGRADE_START, ACTION_RESEARCH_START,
+                ACTION_INFLUENCE_START, ACTION_MOVE_START):
+      if pid in s:
+        return pid
+    if ACTION_PASS in s:
+      return ACTION_PASS
+    return int(rng.choice(np.asarray(legal)))
+
+  # -- per-family scoring --------------------------------------------------
+
+  def _cell_score(self, obs, cell):
+    """Higher = a better cell to expand/colonize/build on (0..~3)."""
+    base = GALAXY_BASE + CELL_STRIDE * cell
+    if not (base + obs_layout.C_PLANET_PRINTED + obs_layout.PLANET_TYPE_COUNT
+            <= len(obs)):
+      return -1.0, 0.0
+    has_planet = bool(
+        obs[base + obs_layout.C_PLANET_PRINTED:
+            base + obs_layout.C_PLANET_PRINTED
+            + obs_layout.PLANET_TYPE_COUNT].sum())
+    vp = float(obs[base + obs_layout.C_POINTS])
+    lo = base + obs_layout.C_ENEMY_SHIPS
+    enemy = float(sum(obs[lo:lo + obs_layout.PLAYER_SHIP_TYPES]))
+    score = vp * 2.0 + (1.0 if has_planet else 0.0) - enemy * 1.5
+    return score, vp
+
+  def _pick_explore_zone(self, obs, zones):
+    best, best_key = None, None
+    for a in zones:
+      cell = a - ACTION_EXPLORE_ZONE_START
+      score, vp = self._cell_score(obs, cell)
+      key = (score, -vp, cell)
+      if best_key is None or key > best_key:
+        best_key = key
+        best = a
+    return best
+
+  def _pick_colony(self, obs, colony, rng):
+    by_cell = {}
+    for a in colony:
+      cell = (a - ACTION_COLONY_START) // self.COLONY_CODES
+      by_cell.setdefault(cell, []).append(a)
+    best, best_key = None, None
+    for cell, acts in by_cell.items():
+      score, vp = self._cell_score(obs, cell)
+      # Colony street (slot*3+track): prefer the first (money/slot 0) entry.
+      acts = sorted(acts)
+      key = (score, -vp, acts[0])
+      if best_key is None or key > best_key:
+        best_key = key
+        best = acts[0]
+    if best is not None:
+      return best
+    return int(rng.choice(np.asarray(colony)))
+
+  def _pick_build(self, obs, builds):
+    """Build defender/economic hull on the best owned cell; else BUILD_STOP.
+
+    A cheap ENEMY-free colony is what an RL economy needs, but a naive 'build
+    anything' just burns cash. Pick INTERCEPTOR on the strongest *own* cell
+    when it would be cheap; otherwise stop.  Keep it weak-but-sane: the point
+    is a floor a trained policy must clear, not a tuned strategy.
+    """
+    # BUILD_STOP is the lowest legal build-range id in most states; only act
+    # when at least one non-stop build is legal.
+    bstop = self.ACTION_BUILD_STOP
+    choices = [a for a in builds if a != bstop]
+    if not choices:
+      return (bstop if bstop in builds else None)
+    # Prefer the cheapest ship (INTERCEPTOR=0) on our best planet cell.
+    best, best_key = None, None
+    for a in choices:
+      enc = a - self.ACTION_BUILD_START
+      cell = enc % self.GALAXY_CELLS
+      btype = enc // self.GALAXY_CELLS
+      if btype != 0:          # only interceptors here (cheap, valid in most)
+        continue
+      score, vp = self._cell_score(obs, cell)
+      key = (score, -vp, a)
+      if best_key is None or key > best_key:
+        best_key = key
+        best = a
+    return best if best is not None else (
+        bstop if bstop in builds else None)
+
+
 def phi_from_obs_slot(obs_full, slot):
   """Banked-VP potential read from a score slot of a full observation."""
   return float(obs_full[slot]) * SCORE_DIVISOR

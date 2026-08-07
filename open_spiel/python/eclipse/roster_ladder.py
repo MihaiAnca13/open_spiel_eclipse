@@ -76,6 +76,10 @@ flags.DEFINE_bool("ladder_include_bots", True,
                   "Add fixed Random and Greedy bots to the tournament. Random "
                   "is pinned at rating 0, which is what makes ratings across "
                   "different rosters comparable.")
+flags.DEFINE_bool("ladder_include_heuristic", True,
+                  "Also add the observation-aware reference heuristic "
+                  "(_GreedyPickV2) as a separate anchor row, so the saturated "
+                  "'vs Greedy' column is not the only strength probe.")
 flags.DEFINE_integer("ladder_seed_offset", 7777,
                      "Held-out boards are drawn from seed + this offset, fixed "
                      "for the whole tournament (paired comparisons).")
@@ -282,6 +286,11 @@ def main(_):
         "id": "Greedy", "kind": "bot", "birth": None,
         "bot": lambda obs, legal: pe._greedy_pick(
             np.asarray(obs, dtype=np.float32), legal, bot_rng),
+    })
+  if FLAGS.ladder_include_heuristic:
+    policies.append({
+        "id": "Heuristic", "kind": "bot", "birth": None,
+        "bot": pe._GreedyPickV2(),
     })
 
   p = len(policies)
