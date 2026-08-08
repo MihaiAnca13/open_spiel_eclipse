@@ -195,9 +195,42 @@ per-cell conv activations; actual demand is an order of magnitude worse and is N
 Its orphaned workers then held the GPU for 6h, blocking `w3_wide`. If the pointer head is
 ever revisited, profile this first.
 
-**Only clear signal so far:** `--ent_coef=0.05` alone drops `vp_all` to 9.33 vs baseline's
-~15.9 while the other single changes stay near baseline — consistent with it being what
-regressed wave 1/2. Not strength; the ladder decides.
+### WAVE 3 LADDER VERDICT (2026-08-08) — `--ent_coef=0.05` alone WINS; the bundle was an interaction failure
+
+`runs/wave_ladder2.json`, 17 policies, 2,048 games each.
+
+| policy | rating | CI |
+|---|---|---|
+| **`w3_ent:main` (`--ent_coef=0.05` alone)** | **1.1071** | [1.0817, 1.1375] |
+| `w3_ent:u1025` | 1.0576 | [1.0320, 1.0818] |
+| `baseline:u573` | 1.0553 | [1.0328, 1.0810] |
+| `baseline:main` | 1.0288 | [1.0007, 1.0542] |
+| `w3_wide:main` (`--nn_width=256 --nn_depth=3`) | 1.0159 | [0.9907, 1.0380] |
+| `w3_sep:main` (`--separate_critic`) | 0.9609 | [0.9345, 0.9874] |
+| `w3_fact:main` (`--factored_actions`) | 0.9097 | [0.8822, 0.9326] |
+| `exp1_pointer:main` | 0.9292 | [0.9023, 0.9540] |
+| `exp1_combined:main` (the wave-1 bundle) | **0.8735** | [0.8483, 0.9009] |
+| Greedy / Heuristic / Random | 0.2075 / 0.2008 / 0.0 | — |
+
+**Ratings are NOT comparable across ladder runs.** The margin model is fit relative to the
+policy pool with Random pinned at 0, so `baseline:u573` reads 1.0553 here and 1.2204 in
+`runs/wave_ladder.json`. Only within-ladder comparisons are valid.
+
+Conclusions:
+1. **`--ent_coef=0.05` alone is the best config tested** and clears the go/no-go bar — its CI
+   lower bound (1.0817) passes `baseline:u573`'s upper bound (1.0810). By **0.0007**, so it is
+   marginal: confirm at higher `--ladder_games_per_dir` before treating it as settled.
+2. **This reverses the hypothesis recorded above.** `--ent_coef=0.05` was named the prime
+   suspect for the wave-1/2 regression because `vp_all` fell to 9.33 vs 15.9. That was the
+   VP/utility decoupling this very doc documents, used as a strength proxy anyway. **Do not
+   infer strength from `vp_all`, `mean_episode_return`, or the vs-Greedy verdict. Ever.**
+3. **The regression was an interaction, not a single ingredient.** `--ent_coef=0.05` is the
+   best single change; the bundle containing it is the *worst* net on the board (0.8735).
+   `--separate_critic` and `--factored_actions` each rate clearly BELOW baseline on their own;
+   `--nn_width=256` is neutral (CI overlaps baseline).
+4. **The pointer head remains a null result.** `exp1_pointer` vs `exp1_combined` flipped order
+   between the two ladders (combined ahead in one, pointer ahead in the other), which is what
+   "no real difference" looks like.
 
 ## Reference point: OpenAI hide-and-seek (Baker et al. 2019, arXiv 1909.07528)
 
@@ -233,7 +266,42 @@ It is true, and the scale is the point.
 |---|---|---|---|
 | `--lr_schedule` | unset → `kl` | unset → **`fixed`** | the old default silently enabled a controller that has never been validated; at the observed `approx_kl~0.003` vs `kl_target=0.02` it saturates `lr_max=1e-2` (40x base) within ~5 updates. Every good policy so far used a fixed LR. Opt in explicitly and watch `control/lr`. |
 | `--gamma` | 0.99 | **0.998** | Eclipse pays out only at the end and GAE follows each seat's own ~80-decision subsequence: `0.99^80 ≈ 0.45` discards over half the only true signal; `0.998^80 ≈ 0.85`. Matches hide-and-seek. **Untested on the ladder** — the 1.2204 baseline was trained at 0.99. |
-| `--amp`, `--channels_last`, `--compile_encoder` | — | new, all **False** | bf16-autocast on the learn path, `channels_last` galaxy view, `torch.compile`d encoder. Correctness verified on CPU (flags-off bit-identical; bf16 first-epoch `clipfrac` 0.0 vs 0.0 and `approx_kl` matching to 4 s.f., so no PPO-ratio damage). **NOT yet GPU-benchmarked** — measure before trusting. |
+| `--amp`, `--channels_last`, `--compile_encoder` | — | new, all **False** | bf16-autocast on the learn path, `channels_last` galaxy view, `torch.compile`d encoder. Correctness verified on CPU (flags-off bit-identical; bf16 first-epoch `clipfrac` 0.0 vs 0.0 and `approx_kl` matching to 4 s.f., so no PPO-ratio damage). Now GPU-benchmarked — see below. |
+
+### GPU throughput benchmark (2026-08-08, `run_bench.sh`, 180s real training runs)
+
+Baseline config (width 64/2, spatial, 128 envs x 128 steps), measured end-to-end envstep/s:
+
+| config | SPS | vs base |
+|---|---|---|
+| base | 3337 | — |
+| `--amp` | 4328 | **+30%** |
+| `--channels_last` | 3338 | **+0%** |
+| `--amp --channels_last` | 4256 | +28% |
+| **`--amp --channels_last --compile_encoder`** | **5251** | **+57%** |
+
+**Use `--amp --compile_encoder`.** Net 1.57x: a 90-min run goes from ~18M to ~28M steps.
+
+- **`--channels_last` does not earn its place**: 3338 vs 3337 alone, and slightly negative
+  combined with amp. A trunk microbenchmark had predicted ~25% off the conv; that did not
+  survive contact with the full loop (env stepping, act path, GAE, optimizer dominate more
+  than the isolated conv suggested). Untested combination: `--amp --compile_encoder` WITHOUT
+  channels_last — worth one probe, may recover the small loss.
+- Lesson worth keeping: isolated trunk microbenchmarks over-predicted the end-to-end gain.
+  Benchmark real training runs before believing a throughput number.
+
+### Max parallel envs on this box: 128 is the ceiling
+
+`--num_envs` 192, 256, 384 and 512 **all OOM** on the 12 GiB card at `--num_steps=128`
+(with `--amp --channels_last`). The rollout obs buffer alone is
+`num_envs x num_steps x 24714 x 4B` = 1.51 GiB at 128x128, and it lives on the GPU
+(`ppo.py:385-386`).
+
+This matters because the top untested lever (hide-and-seek's batch-size floor) needs a batch
+far larger than 16,384 timesteps, and **that cannot be reached on this machine**. Options:
+(a) run big-batch experiments on a GPU cluster; (b) move the rollout buffer to CPU or store
+it fp16, which would free ~1.5 GiB and is a code change, not a flag. This box is best used
+for fast small-rollout iteration.
 
 ## How to resume
 

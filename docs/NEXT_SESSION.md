@@ -9,10 +9,22 @@ Read docs/eclipse_rl_todo.md first — it is the single source of truth and cont
 full diagnosis, measured constraints, and negative results. Then read the "Wave 3
 results" section and runs/wave_ladder2.json.
 
-THE ONE NUMBER THAT MATTERS: the best policy anyone has produced is still the ORIGINAL
-baseline, runs/roster snap_u573, margin rating 1.2204 [1.1941, 1.2490]. Every
-architectural and hyperparameter change tried so far has failed to beat it, and the
-bundle of them regressed to ~0.99. Do not assume any of the new flags help.
+WHERE THINGS STAND: wave 3's single-variable ladder (runs/wave_ladder2.json, 2048
+games/policy) found exactly ONE change that beats the baseline: --ent_coef=0.05 alone,
+rating 1.1071 [1.0817,1.1375] vs baseline:u573 1.0553 [1.0328,1.0810]. It clears by only
+0.0007, so confirm it at higher --ladder_games_per_dir before trusting it. Everything
+else lost: --separate_critic and --factored_actions each rate BELOW baseline,
+--nn_width=256 is neutral, the spatial pointer head is a null result, and the bundle of
+all of them is the WORST net on the board (0.8735) -- an interaction failure, not a bad
+ingredient.
+
+NOTE: ladder ratings are NOT comparable across runs (the margin fit is relative to the
+pool, Random pinned at 0). baseline:u573 reads 1.0553 in wave_ladder2.json and 1.2204 in
+wave_ladder.json. Compare within one tournament only.
+
+NEVER infer strength from vp_all, mean_episode_return, or the vs-Greedy verdict. Two
+wrong conclusions were reached that way in the last session, including calling
+--ent_coef=0.05 harmful when it is in fact the only thing that won.
 
 My goal this session: one long (8-12h) training run to find out where the plateau
 actually sits when the agent gets 10x more steps than the ~16M our short arms managed.
