@@ -85,6 +85,28 @@ reported success on work that had a real bug in it.
 
 ---
 
+## URGENT for the next long run: verdict evals eat 71% of wall-clock
+
+Measured on `long_v2` at 7.75h elapsed / 47.4M steps:
+
+- `charts/SPS` reads **5855**, but that is *per-update* throughput (16,384 steps / 2.80s).
+- 2,894 updates x 2.80s = **2.25h of actual training compute inside 7.75h of wall-clock**.
+- The average over wall-clock is **1700 steps/s** — 71% of the run is not training.
+- Cause: **12 verdict evaluations**. `--verdict_every_sec` defaults to **1800** (30 min) and
+  each eval plays `--eval_games=32` on `--eval_envs=64` against Random/Greedy, pausing
+  training for roughly 27 minutes.
+
+Consequence: a 12h run reaches ~73M steps instead of the ~200M the per-update rate implies.
+
+**Fix for any future long run** (and especially on the cluster, where this waste scales):
+set `--verdict_every_sec=7200` or higher, and/or cut `--eval_games`/`--eval_envs`. The
+verdict is measured against Greedy anyway, which is saturated and worthless as a strength
+signal — the ladder is the judge. There is little reason to pay 27 minutes every 30 minutes
+for a number we have explicitly stopped trusting.
+
+Beware: `charts/SPS` flatters the run. Always sanity-check steps-per-wall-clock as
+`final_steps / elapsed_seconds`, not the logged SPS.
+
 ## Quick reference for whoever picks this up
 
 ### State of the world
