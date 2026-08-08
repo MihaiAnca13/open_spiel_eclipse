@@ -13,12 +13,19 @@
 # limitations under the License.
 """Elo/rating ladder over a policy roster (Sprint B1 item).
 
-Rates the snapshots of a **single** training run against each other in a
+Rates the snapshots of one or more training runs against each other in a
 round-robin, on fixed held-out boards, using tie-aware rank utility -- so
 training improvement is measurable once the fixed Random/Greedy baselines are
-saturated. Policies of one roster are played in one tournament; ratings from
-different rosters land on a common scale only because Random is pinned at 0
-in every tournament (metrics are identified only up to an additive constant).
+saturated. ``--ladder_roster_dir`` takes a comma-separated list of roster
+directories, each with its own architecture (own ``arch.json``), so that
+different arms (e.g. differing nn_width/depth/separate_critic/factored_
+actions) can be rated in one tournament directly against each other, not just
+bridged by saturated bot anchors. Policy ids are prefixed with their roster
+directory's basename to stay unique across rosters. Ratings across separate
+single-roster invocations still land on a common scale only because Random is
+pinned at 0 in every tournament (metrics are identified only up to an
+additive constant); a single multi-roster invocation gets a stronger,
+directly-measured cross-arm comparison instead.
 
 Reuses the training evaluator end-to-end:
   * ``ppo_eclipse.evaluate_batched`` (async, N games in parallel on paired
@@ -45,7 +52,10 @@ Monotonicity
   snapshots inside an 18-minute run are nearly indistinguishable; their
   inversions are noise). We report Kendall tau + exact permutation p over
   coarse age representatives, plus which cross-bucket regressions clear the
-  bootstrap CI. A regression that clears the CI is a real finding.
+  bootstrap CI. A regression that clears the CI is a real finding. In a
+  multi-roster tournament this is scoped per roster directory -- snapshots
+  from different arms are not one training run's age sequence, and comparing
+  them as such would misreport arm-to-arm variance as regressions.
 """
 
 import json
@@ -67,8 +77,13 @@ FLAGS = flags.FLAGS
 # ppo_eclipse.py already defines and are reused unchanged.
 flags.DEFINE_string("ladder_roster_dir", None,
                     "Roster directory to rate (snapshots + main, optionally "
-                    "+ Random/Greedy anchors). Policies are rated only against "
-                    "each other within this roster.")
+                    "+ Random/Greedy anchors). Comma-separate multiple "
+                    "directories to rate them all in one tournament (e.g. to "
+                    "compare training arms with different architectures "
+                    "head-to-head). Each directory's own arch.json (or these "
+                    "arch flags, as a fallback) rebuilds its nets; loaded "
+                    "policy ids are prefixed with the directory's basename "
+                    "so they stay unique across rosters.")
 flags.DEFINE_integer("ladder_games_per_dir", 128,
                      "Games per pair per seat direction (both directions are "
                      "played on the same boards, so a full pair sees 2x).")
@@ -100,14 +115,16 @@ flags.DEFINE_integer("ladder_boot_seed", 0,
                      "RNG seed for the bootstrap.")
 
 
-def _resolve_arch(num_actions, input_shape):
+def _resolve_arch(roster_dir, num_actions, input_shape):
   """Network architecture to rebuild checkpoints with.
 
   Prefer the persisted ``arch.json`` (written by ppo_eclipse since the ladder
   was introduced); fall back to the caller's arch flags, which reproduce the
-  run's own launch flags for pre-existing rosters.
+  run's own launch flags for pre-existing rosters. ``roster_dir`` is explicit
+  (rather than read from FLAGS) because a multi-roster tournament resolves one
+  arch per directory.
   """
-  arch_path = os.path.join(FLAGS.ladder_roster_dir, "arch.json")
+  arch_path = os.path.join(roster_dir, "arch.json")
   if os.path.exists(arch_path):
     with open(arch_path) as f:
       return json.load(f)
@@ -125,6 +142,7 @@ def _resolve_arch(num_actions, input_shape):
       "num_actions": int(num_actions),
       "input_shape": [int(s) for s in input_shape],
       "encoder": FLAGS.encoder,
+      "spatial_pointer": bool(FLAGS.spatial_pointer),
   }
 
 
@@ -224,57 +242,164 @@ def _fit_margin_ratings(policy_ids, anchor_idx, pair_margins, rng=None,
   return list(ratings), list(zip(lo, hi))
 
 
+def _monotonicity_report(nets, ratings, cis, label=None):
+  """Kendall-tau/regression scan over one training run's snapshots.
+
+  ``nets`` is a list of ``(policy_index, birth_update, rating)`` and MUST be
+  restricted to snapshots from a single roster directory -- comparing
+  snapshots across different arms as if they were one run's age sequence
+  would misreport architecture/arm variance as training regressions.
+  ``label``, if given, prefixes the printed lines (multi-roster tournaments).
+  """
+  tag = f"[{label}] " if label else ""
+  if len(nets) < 2:
+    return {"ok": False, "detail": "not enough distinct net policies"}
+  births = [t[1] for t in nets]
+  rat_seq = [t[2] for t in nets]
+  full_tau = _kendall_tau(rat_seq)
+  full_p = _permutation_p(rat_seq, np.random.RandomState(0))
+  # Representatives: newest per coarse age bucket, plus the earliest net --
+  # an early peak must never hide behind the newest-of-bucket pick (e.g. an
+  # early-overfit snapshot that outrates its immediate successor).
+  split = np.array_split(np.arange(len(nets)), FLAGS.ladder_bins)
+  reps = list(dict.fromkeys([0] + [grp[-1] for grp in split if len(grp)]))
+  rep_tau = None if len(reps) < 2 else _kendall_tau([rat_seq[r] for r in reps])
+  rep_p = None
+  if rep_tau is not None:
+    rep_p = _permutation_p([rat_seq[r] for r in reps],
+                           np.random.RandomState(0))
+  # (a) Regressions: any well-separated older->newer pair whose joint
+  # bootstrap CI reverses orientation is a real finding -- a later snapshot
+  # rated strictly below an earlier one. (b) Monotone evidence: every
+  # adjacent pair rises clear of the joint CI.
+  regressions = []
+  for ai in range(len(nets)):
+    for bi in range(ai + 1, len(nets)):
+      a, b = nets[ai], nets[bi]
+      if b[1] - a[1] < FLAGS.ladder_min_sep:
+        continue
+      la, ha = cis[a[0]]
+      lb, hb = cis[b[0]]
+      if (not np.isnan(la)) and (not np.isnan(hb)) and la > hb:
+        regressions.append((a[1], b[1], ratings[a[0]], ratings[b[0]]))
+  strict_up = True
+  for ai in range(len(nets) - 1):
+    a, b = nets[ai], nets[ai + 1]
+    la, ha = cis[a[0]]
+    lb, hb = cis[b[0]]
+    if not (np.isnan(la) or np.isnan(hb)):
+      strict_up = strict_up and ha < lb
+  alpha = FLAGS.ladder_alpha
+  if regressions:
+    verdict = "NON-MONOTONE"
+    why = (f"{len(regressions)} well-separated snapshot(s) rated strictly "
+           f"below an earlier one (joint CI)")
+  elif strict_up:
+    verdict = "MONOTONE"
+    why = "every adjacent snapshot pair rises clear of the joint CI"
+    if full_p >= alpha:
+      why += "; tau significance limited by n"
+  elif full_tau > 0 and full_p < alpha:
+    verdict = "MONOTONE"
+    why = f"full_tau={full_tau:+.2f} significant (p={full_p:.3f})"
+  elif full_tau < 0 and full_p < alpha:
+    verdict = "NON-MONOTONE"
+    why = f"full_tau={full_tau:+.2f} significantly negative (p={full_p:.3f})"
+  else:
+    verdict = "inconclusive"
+    why = "flat or underpowered (tau sign not significant, no CI-clear regression)"
+  mono = {
+      "ok": verdict == "MONOTONE",
+      "verdict": verdict,
+      "why": why,
+      "full_tau": float(full_tau),
+      "full_p": float(full_p),
+      "reps_births": [int(births[r]) for r in reps],
+      "rep_tau": None if rep_tau is None else float(rep_tau),
+      "rep_p": None if rep_p is None else float(rep_p),
+      "regressions": [[int(x[0]), int(x[1]), float(x[2]), float(x[3])]
+                      for x in regressions],
+  }
+  print(f"\n  {tag}monotonicity (age -> rating): full_tau={full_tau:+.2f} "
+        f"(p={full_p:.3f}) over {len(nets)} nets; "
+        f"reps={[int(births[r]) for r in reps]}"
+        + (f" tau={rep_tau:+.2f} p={rep_p:.3f}" if rep_tau is not None else ""))
+  print(f"  {tag}VERDICT: {verdict} -- {why}")
+  for r in regressions:
+    print(f"    {tag}regression: birth {r[0]} ({r[2]:+.3f}) > birth {r[1]} "
+          f"({r[3]:+.3f})")
+  return mono
+
+
 def main(_):
   if not FLAGS.ladder_roster_dir:
     raise ValueError("--ladder_roster_dir is required")
+  roster_dirs = [d.strip() for d in FLAGS.ladder_roster_dir.split(",")
+                if d.strip()]
   device = torch.device(
       "cuda" if torch.cuda.is_available() and FLAGS.cuda else "cpu")
   game = pyspiel.load_game(FLAGS.game)
   num_actions = game.num_distinct_actions()
   num_players = game.num_players()
   input_shape = tuple(game.observation_tensor_shape())
-
-  arch = _resolve_arch(num_actions, input_shape)
-  factored = None
-  if arch.get("factored_actions"):
-    factored = factorization_from_game(game)
-  agent_fn = pe.make_agent_fn(
-      int(arch["width"]), int(arch["depth"]), tuple(arch.get("aux_tasks") or ()),
-      norm=bool(arch["norm"]), activation=arch["activation"],
-      separate_critic=bool(arch["separate_critic"]),
-      factored_actions=factored,
-      encoder=str(arch.get("encoder", "flat")))
-  print(f"rating roster      : {FLAGS.ladder_roster_dir}")
-  print(f"arch (arch.json?)  : width={arch['width']} depth={arch['depth']} "
-        f"norm={arch['norm']} act={arch['activation']} "
-        f"sep_critic={arch['separate_critic']} "
-        f"factored={arch['factored_actions']} aux={arch.get('aux_tasks')} "
-        f"encoder={arch.get('encoder')}")
   print(f"device={device}  games/dir={FLAGS.ladder_games_per_dir}  "
         f"eval_envs={FLAGS.eval_envs}  workers={FLAGS.num_workers}")
 
-  roster = PolicyRoster(FLAGS.ladder_roster_dir)
-  # Nets: snapshots in birth order, then main. Bots appended last (Random
-  # first so it is the natural rating anchor).
-  snapshots = sorted([e for e in roster.entries.values()
-                      if e.role == "snapshot"], key=lambda e: e.birth_update)
-  main_entry = roster.get("main")
-  net_policies = [{
-      "id": e.policy_id, "kind": "net",
-      "birth": int(e.birth_update),
-      "net": _load_net_tolerant(agent_fn, e.path, num_actions, input_shape,
-                                device, e.policy_id),
-  } for e in snapshots]
-  if main_entry is not None:
-    net_policies.append({
-        "id": main_entry.policy_id, "kind": "net",
-        "birth": int(main_entry.birth_update),
-        "net": _load_net_tolerant(agent_fn, main_entry.path, num_actions,
-                                  input_shape, device, main_entry.policy_id),
-    })
-  policies = list(net_policies)
-  for net in policies:
-    net["net"].to(device)
+  # One roster + one architecture-specific agent_fn per directory (each has
+  # its own arch.json), so arms with different nn_width/depth/separate_critic/
+  # factored_actions can be loaded side by side. Loaded ids are tagged with
+  # the directory's basename ("<tag>:<policy_id>") to stay unique/readable
+  # once rosters are merged into one tournament.
+  policies = []
+  for roster_dir in roster_dirs:
+    tag = os.path.basename(os.path.normpath(roster_dir))
+    arch = _resolve_arch(roster_dir, num_actions, input_shape)
+    factored = None
+    if arch.get("factored_actions"):
+      factored = factorization_from_game(game)
+    agent_fn = pe.make_agent_fn(
+        int(arch["width"]), int(arch["depth"]), tuple(arch.get("aux_tasks") or ()),
+        norm=bool(arch["norm"]), activation=arch["activation"],
+        separate_critic=bool(arch["separate_critic"]),
+        factored_actions=factored,
+        encoder=str(arch.get("encoder", "flat")),
+        # Must be threaded through: a pointer-head roster rebuilt without this
+        # loads into a base-only head, so the ladder would silently rate a
+        # different (board-blind) policy than the one that was trained.
+        spatial_pointer=bool(arch.get("spatial_pointer", False)))
+    print(f"rating roster      : {roster_dir}  (tag={tag})")
+    print(f"arch (arch.json?)  : width={arch['width']} depth={arch['depth']} "
+          f"norm={arch['norm']} act={arch['activation']} "
+          f"sep_critic={arch['separate_critic']} "
+          f"factored={arch['factored_actions']} aux={arch.get('aux_tasks')} "
+          f"encoder={arch.get('encoder')} "
+          f"spatial_pointer={bool(arch.get('spatial_pointer', False))}")
+
+    roster = PolicyRoster(roster_dir)
+    # Nets: snapshots in birth order, then main.
+    snapshots = sorted([e for e in roster.entries.values()
+                        if e.role == "snapshot"], key=lambda e: e.birth_update)
+    main_entry = roster.get("main")
+    for e in snapshots:
+      policy_id = f"{tag}:{e.policy_id}"
+      policies.append({
+          "id": policy_id, "kind": "net", "birth": int(e.birth_update),
+          "source": tag,
+          "net": _load_net_tolerant(agent_fn, e.path, num_actions,
+                                    input_shape, device, policy_id),
+      })
+    if main_entry is not None:
+      policy_id = f"{tag}:{main_entry.policy_id}"
+      policies.append({
+          "id": policy_id, "kind": "net", "birth": int(main_entry.birth_update),
+          "source": tag,
+          "net": _load_net_tolerant(agent_fn, main_entry.path, num_actions,
+                                    input_shape, device, policy_id),
+      })
+  for pol in policies:
+    pol["net"].to(device)
+  # Bots appended last (Random first so it is the natural rating anchor);
+  # they are shared anchors, not per-roster, so their ids are untagged.
   if FLAGS.ladder_include_bots:
     bot_rng = np.random.RandomState(FLAGS.seed + 12345)
     policies.append({
@@ -352,7 +477,10 @@ def main(_):
     # Per-game margins are NOT zero -- identical policies play a symmetric but
     # random game, so their two seat-pairs see different galaxies game to game
     # -- but the two directions cancel exactly. Any deviation is a bug.
-    if a["kind"] == "net" and b["kind"] == "net" and a["birth"] == b["birth"]:
+    # Only within one roster does a shared birth_update imply shared weights:
+    # two different arms both snapshot at u25/u50/... with unrelated weights.
+    if (a["kind"] == "net" and b["kind"] == "net"
+        and a["source"] == b["source"] and a["birth"] == b["birth"]):
       if len(dir_margins) == 2:
         mirror = np.abs(dir_margins[0] + dir_margins[1]).max()
         if mirror != 0.0:
@@ -421,92 +549,33 @@ def main(_):
           f" {counts[k]:>6d} {mean_u[k]:+.3f} "
           f"{ratings[k]:+.3f} {ci:>16s} {elo_s:>7s}")
 
-  # Monotonicity over well-separated snapshots.
-  nets = sorted([(k, policies[k]["birth"], ratings[k]) for k in range(p)
-                 if policies[k]["kind"] == "net"], key=lambda t: t[1])
-  # main is a re-save of the last forced snapshot, so collapse same-birth nets
-  # (keep the last) before judging age monotonicity -- otherwise the duplicate
-  # counts twice.
-  seen = {}
-  for t in nets:
-    seen[t[1]] = t
-  nets = [seen[b] for b in sorted(seen)]
-  mono = {"ok": False, "detail": "not enough distinct net policies"}
-  if len(nets) >= 2:
-    births = [t[1] for t in nets]
-    rat_seq = [t[2] for t in nets]
-    full_tau = _kendall_tau(rat_seq)
-    full_p = _permutation_p(rat_seq, np.random.RandomState(0))
-    # Representatives: newest per coarse age bucket, plus the earliest net --
-    # an early peak must never hide behind the newest-of-bucket pick (e.g. an
-    # early-overfit snapshot that outrates its immediate successor).
-    split = np.array_split(np.arange(len(nets)), FLAGS.ladder_bins)
-    reps = list(dict.fromkeys([0] + [grp[-1] for grp in split if len(grp)]))
-    rep_tau = None if len(reps) < 2 else _kendall_tau([rat_seq[r] for r in reps])
-    rep_p = None
-    if rep_tau is not None:
-      rep_p = _permutation_p([rat_seq[r] for r in reps],
-                             np.random.RandomState(0))
-    # (a) Regressions: any well-separated older->newer pair whose joint
-    # bootstrap CI reverses orientation is a real finding -- a later snapshot
-    # rated strictly below an earlier one. (b) Monotone evidence: every
-    # adjacent pair rises clear of the joint CI.
-    regressions = []
-    for ai in range(len(nets)):
-      for bi in range(ai + 1, len(nets)):
-        a, b = nets[ai], nets[bi]
-        if b[1] - a[1] < FLAGS.ladder_min_sep:
-          continue
-        la, ha = cis[a[0]]
-        lb, hb = cis[b[0]]
-        if (not np.isnan(la)) and (not np.isnan(hb)) and la > hb:
-          regressions.append((a[1], b[1], ratings[a[0]], ratings[b[0]]))
-    strict_up = True
-    for ai in range(len(nets) - 1):
-      a, b = nets[ai], nets[ai + 1]
-      la, ha = cis[a[0]]
-      lb, hb = cis[b[0]]
-      if not (np.isnan(la) or np.isnan(hb)):
-        strict_up = strict_up and ha < lb
-    alpha = FLAGS.ladder_alpha
-    if regressions:
-      verdict = "NON-MONOTONE"
-      why = (f"{len(regressions)} well-separated snapshot(s) rated strictly "
-             f"below an earlier one (joint CI)")
-    elif strict_up:
-      verdict = "MONOTONE"
-      why = "every adjacent snapshot pair rises clear of the joint CI"
-      if full_p >= alpha:
-        why += "; tau significance limited by n"
-    elif full_tau > 0 and full_p < alpha:
-      verdict = "MONOTONE"
-      why = f"full_tau={full_tau:+.2f} significant (p={full_p:.3f})"
-    elif full_tau < 0 and full_p < alpha:
-      verdict = "NON-MONOTONE"
-      why = f"full_tau={full_tau:+.2f} significantly negative (p={full_p:.3f})"
-    else:
-      verdict = "inconclusive"
-      why = "flat or underpowered (tau sign not significant, no CI-clear regression)"
-    mono = {
-        "ok": verdict == "MONOTONE",
-        "verdict": verdict,
-        "why": why,
-        "full_tau": float(full_tau),
-        "full_p": float(full_p),
-        "reps_births": [int(births[r]) for r in reps],
-        "rep_tau": None if rep_tau is None else float(rep_tau),
-        "rep_p": None if rep_p is None else float(rep_p),
-        "regressions": [[int(x[0]), int(x[1]), float(x[2]), float(x[3])]
-                        for x in regressions],
-    }
-    print(f"\n  monotonicity (age -> rating): full_tau={full_tau:+.2f} "
-          f"(p={full_p:.3f}) over {len(nets)} nets; "
-          f"reps={[int(births[r]) for r in reps]}"
-          + (f" tau={rep_tau:+.2f} p={rep_p:.3f}" if rep_tau is not None else ""))
-    print(f"  VERDICT: {verdict} -- {why}")
-    for r in regressions:
-      print(f"    regression: birth {r[0]} ({r[2]:+.3f}) > birth {r[1]} "
-            f"({r[3]:+.3f})")
+  # Monotonicity over well-separated snapshots, scoped per roster directory:
+  # snapshots from different arms are not one run's age sequence, so a
+  # cross-arm birth-order comparison would misreport architecture/arm
+  # variance as training regressions (see module docstring).
+  net_idxs = [k for k in range(p) if policies[k]["kind"] == "net"]
+  sources = list(dict.fromkeys(policies[k]["source"] for k in net_idxs))
+
+  def _collapse_same_birth(idxs):
+    # main is a re-save of the last forced snapshot, so collapse same-birth
+    # nets (keep the last) before judging age monotonicity -- otherwise the
+    # duplicate counts twice.
+    keep = {}
+    for k in sorted(idxs, key=lambda k: policies[k]["birth"]):
+      keep[policies[k]["birth"]] = k
+    return [(keep[b], b, ratings[keep[b]]) for b in sorted(keep)]
+
+  nets = []  # combined, collapsed-per-source; reused below for the Elo check.
+  if len(sources) <= 1:
+    nets = _collapse_same_birth(net_idxs)
+    mono = _monotonicity_report(nets, ratings, cis)
+  else:
+    mono = {}
+    for src in sources:
+      grp = _collapse_same_birth([k for k in net_idxs
+                                  if policies[k]["source"] == src])
+      nets.extend(grp)
+      mono[src] = _monotonicity_report(grp, ratings, cis, label=src)
 
   # Cross-check: do margin vs binarized Elo orderings disagree on the nets?
   if elo is not None and len(nets) >= 2:
@@ -517,10 +586,16 @@ def main(_):
       print("  [signal] margin rating and binarized Elo order the nets in"
             " opposite directions -- treat both with caution")
 
-  out_path = FLAGS.ladder_out or os.path.join(FLAGS.ladder_roster_dir,
-                                              "ladder.json")
+  if FLAGS.ladder_out:
+    out_path = FLAGS.ladder_out
+  elif len(roster_dirs) == 1:
+    out_path = os.path.join(roster_dirs[0], "ladder.json")
+  else:
+    raise ValueError(
+        "--ladder_out is required when --ladder_roster_dir lists more than "
+        "one directory (there is no single roster dir to default it into)")
   payload = {
-      "roster_dir": FLAGS.ladder_roster_dir,
+      "roster_dirs": roster_dirs,
       "anchor": "Random" if anchor_idx is not None else None,
       "games_per_dir": FLAGS.ladder_games_per_dir,
       "seed": FLAGS.seed,
