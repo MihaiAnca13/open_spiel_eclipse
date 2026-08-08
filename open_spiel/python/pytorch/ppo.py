@@ -256,14 +256,39 @@ def legal_actions_to_mask(legal_actions_list, num_actions, device="cpu"):
   return mask
 
 
-def head_rows(head, idx):
-  """Weight rows for action ids ``idx``, for either head type.
+def head_logits(head, features, cells, rows, cols):
+  """(M,) logits for the (rows[i], cols[i]) pairs, for any actor head type.
 
-  A factored head exposes ``rows_for`` and never materializes the full
-  (num_actions, width) matrix; a plain nn.Linear is indexed directly.
+  The sparse path used to gather a per-column weight row and dot it with the
+  sample's features -- valid only when an action's weight is the same for
+  every sample. A spatial pointer term breaks that: its contribution is a
+  joint function of (row, col) via the per-cell feature at that action's
+  board cell, not a function of col alone. So a head that has a real notion
+  of "logit at (row, col)" exposes ``logits_for(features, cells, rows, cols)``
+  and this defers to it; a plain nn.Linear or base FactoredActorHead has no
+  such per-pair term, so its logit factors as features[row] . weight[col] +
+  bias[col] and is gathered directly (``cells`` is unused on that path).
   """
+  logits_for = getattr(head, "logits_for", None)
+  if logits_for is not None:
+    return logits_for(features, cells, rows, cols)
   rows_for = getattr(head, "rows_for", None)
-  return rows_for(idx) if rows_for is not None else head.weight[idx]
+  w = rows_for(cols) if rows_for is not None else head.weight[cols]
+  return (features[rows] * w).sum(-1) + head.bias[cols]
+
+
+def shared_and_cells(net, x):
+  """(features, cells) from the shared trunk, one forward either way.
+
+  ``cells`` is the per-cell conv tensor when the trunk exposes
+  ``forward_with_cells`` (the spatial encoder), so a spatial pointer head can
+  read it via ``head_logits``; otherwise ``cells`` is None and every head
+  falls back to its cell-blind logit. Never calls the trunk twice.
+  """
+  forward_with_cells = getattr(net.shared, "forward_with_cells", None)
+  if forward_with_cells is not None:
+    return forward_with_cells(x)
+  return net.shared(x), None
 
 
 class PPO(nn.Module):
@@ -311,6 +336,7 @@ class PPO(nn.Module):
       aux_coef=0.1,
       rank_vp_beta=0.0,
       rank_ce_coef=0.0,
+      amp=False,
   ):
     super().__init__()
 
@@ -320,6 +346,9 @@ class PPO(nn.Module):
     self.player_id = player_id
     self.selfplay = num_players > 1
     self.device = device
+    # bf16 autocast on the _learn_core minibatch loop only -- see the comment
+    # at its call site for why the act path is excluded.
+    self.amp = amp
 
     # Training settings
     self.num_envs = num_envs
@@ -797,11 +826,14 @@ class PPO(nn.Module):
                           vp_beta=self.rank_vp_beta)
     return per_agent_reward[seat]
 
-  def _aux_targets_for(self, per_agent_reward):
+  def _aux_targets_for(self, per_agent_reward, terminal_obs=None,
+                       acting_seat=None):
     """Per-seat aux-target matrix (num_players, num_aux), or None.
 
     Uses ``aux_target_fn`` if supplied, else defaults to the raw per-agent
-    payoff (one-column aux = predict a seat's final payoff).
+    payoff (one-column aux = predict a seat's final payoff). ``terminal_obs`` /
+    ``acting_seat`` are forwarded to the extractor so e.g. the VP-breakdown mode
+    can read the per-category targets out of the terminal observation.
     """
     if not self.num_aux:
       return None
@@ -809,6 +841,14 @@ class PPO(nn.Module):
       arr = np.asarray(per_agent_reward, dtype=np.float32)
       if arr.ndim == 1:
         arr = arr.reshape(-1, 1)
+    elif getattr(self.aux_target_fn, "needs_terminal_obs", False):
+      # Breakdown-style extractor: without a terminal obs there is no real
+      # target, so leave the rows unmasked instead of training toward zeros.
+      if terminal_obs is None or acting_seat is None:
+        return None
+      arr = np.asarray(
+          self.aux_target_fn(per_agent_reward, terminal_obs, acting_seat),
+          dtype=np.float32)
     else:
       arr = np.asarray(self.aux_target_fn(per_agent_reward), dtype=np.float32)
     try:
@@ -853,7 +893,8 @@ class PPO(nn.Module):
       if pair is None:
         continue
       obs_, cols_, action_, logprob_, value_ = pair
-      ex_aux, ex_aux_mask = self._extras_aux(per_agent_reward, seat)
+      ex_aux, ex_aux_mask = self._extras_aux(
+          per_agent_reward, seat, terminal_obs=obs_, acting_seat=seat)
       self._extra_samples.append(
           (env_idx, seat, obs_, cols_, int(action_), logprob_, value_,
            target, ex_aux, ex_aux_mask))
@@ -939,16 +980,19 @@ class PPO(nn.Module):
                                                           seat)
       self.rank_label_mask[idx, env_idx] = 1.0
 
-  def _backfill_aux(self, env_idx, row, per_agent_reward):
+  def _backfill_aux(self, env_idx, row, per_agent_reward,
+                    terminal_obs=None, acting_seat=None):
     """Fills aux targets for every stored row (<=row) of each seat in `env_idx`.
 
     Terminal payoff fixes the final target for all seats of a finished episode,
     so every row of a seat in this batch (which came from the same episode)
-    inherits that seat's terminal-derived aux target.
+    inherits that seat's terminal-derived aux target. ``terminal_obs`` /
+    ``acting_seat`` (the observation the terminal decision was taken from, and
+    the seat that took it) are forwarded to a breakdown aux extractor.
     """
     if not self.num_aux:
       return
-    tgt = self._aux_targets_for(per_agent_reward)
+    tgt = self._aux_targets_for(per_agent_reward, terminal_obs, acting_seat)
     if tgt is None:
       return
     start = int(self._episode_start_row[env_idx])
@@ -964,15 +1008,21 @@ class PPO(nn.Module):
       self.aux_targets[rows_t, env_idx, :] = target_t
       self.aux_mask[rows_t, env_idx, :] = 1.0
 
-  def _extras_aux(self, per_agent_reward, seat):
+  def _extras_aux(self, per_agent_reward, seat, terminal_obs=None,
+                  acting_seat=None):
     """(aux_target, aux_mask) 1-D tensors for one extra sample's seat."""
     if not self.num_aux:
       return None, None
-    tgt = self._aux_targets_for(per_agent_reward)
+    tgt = self._aux_targets_for(per_agent_reward, terminal_obs, acting_seat)
     if tgt is None:
       return None, None
     return (torch.from_numpy(tgt[seat]).to(self.device),
             torch.ones((self.num_aux,), dtype=torch.float32).to(self.device))
+
+  def _terminal_obs_for(self, env_idx):
+    """(terminal_obs, acting_seat) for a finished env, or (None, None)."""
+    return (None if self.last_obs_batch is None else self.last_obs_batch[env_idx],
+            None if self.last_seats is None else int(self.last_seats[env_idx]))
 
   def post_step(self, reward, done, shaped_reward=None, phi=None):
     """Stores rewards/dones for the action taken at the current batch step.
@@ -1002,7 +1052,8 @@ class PPO(nn.Module):
         if phi is not None and not is_done:
           self._record_phi(i, seat, row, phi[i])
         if is_done:
-          self._backfill_aux(i, row, rvec)
+          term_obs, term_seat = self._terminal_obs_for(i)
+          self._backfill_aux(i, row, rvec, term_obs, term_seat)
           self._backfill_rank_labels(i, row, rvec)
           self._attribute_terminal(i, row, rvec, seat)
           self._last_decision[i].clear()
@@ -1056,7 +1107,8 @@ class PPO(nn.Module):
       for i in done_idx:
         rvec = reward_np[i]
         seat = int(seats[i])
-        self._backfill_aux(i, row, rvec)
+        term_obs, term_seat = self._terminal_obs_for(i)
+        self._backfill_aux(i, row, rvec, term_obs, term_seat)
         self._backfill_rank_labels(i, row, rvec)
         self._attribute_terminal(int(i), row, rvec, seat)
         self._last_decision[i].clear()
@@ -1168,7 +1220,8 @@ class PPO(nn.Module):
       return False
     head = net.actor[-1]
     return (getattr(head, "out_features", None) == self.num_actions
-            and (isinstance(head, nn.Linear) or hasattr(head, "rows_for")))
+            and (isinstance(head, nn.Linear) or hasattr(head, "rows_for")
+                 or hasattr(head, "logits_for")))
 
   def _pack_legal_batch(self, n_extra, remap=None, extra_base=None):
     """Builds (rows, cols, counts) over the whole flattened batch.
@@ -1223,16 +1276,17 @@ class PPO(nn.Module):
     counts = np.bincount(rows, minlength=total)
     return rows, cols, counts
 
-  def _sparse_minibatch(self, features, rows, cols, actions_mb, weight, bias):
+  def _sparse_minibatch(self, features, cells, rows, cols, actions_mb, head):
     """Per-minibatch masked log-prob + entropy from sparse legal entries.
 
     Args:
       features: (B_mb, H) shared features of the minibatch.
+      cells: (B_mb, C, 225) per-cell conv features (see
+        ``shared_and_cells``), or None for a head/encoder with no spatial term.
       rows: (M_mb,) local sample index (into the minibatch) per legal entry.
       cols: (M_mb,) legal action id per entry.
       actions_mb: (B_mb,) chosen action per sample.
-      weight: (num_actions, H) actor head weight.
-      bias: (num_actions,) actor head bias.
+      head: actor head module (``net.actor[-1]``); carries its own bias.
 
     Returns:
       (logprob, entropy) each (B_mb,), computed only over legal entries.
@@ -1244,9 +1298,7 @@ class PPO(nn.Module):
               torch.zeros(b, device=self.device))
     rows_gpu = torch.from_numpy(rows).to(self.device)
     cols_gpu = torch.from_numpy(cols).to(self.device)
-    w = head_rows(weight, cols_gpu)  # (M, H)
-    f = features[rows_gpu]           # (M, H)
-    logits_e = (f * w).sum(-1) + bias[cols_gpu]   # (M,)
+    logits_e = head_logits(head, features, cells, rows_gpu, cols_gpu)  # (M,)
     # segment reductions per block (entries of a sample are contiguous)
     b_mb = features.shape[0]
     m = torch.full((b_mb,), float("-inf"), device=self.device)
@@ -1261,20 +1313,19 @@ class PPO(nn.Module):
     safe_s = torch.where(empty, torch.ones_like(s), s)
     lse = torch.where(empty, torch.zeros_like(m), m + safe_s.log())
     entropy = torch.where(empty, torch.zeros_like(m), lse - num / safe_s)
-    # log_prob of the chosen action: logit_a = features @ W[action] + b[action]
-    wa = head_rows(weight, actions_mb)   # (B_mb, H)
-    logit_a = (features * wa).sum(-1) + bias[actions_mb]
+    # log_prob of the chosen action: each sample's own feature row paired with
+    # its own chosen action, so rows == arange(b_mb) here.
+    own_rows = torch.arange(b_mb, device=self.device)
+    logit_a = head_logits(head, features, cells, own_rows, actions_mb)
     logprob = logit_a - lse
     return logprob, entropy
 
-  def _pack_logits(self, features, rows, cols, weight, bias):
+  def _pack_logits(self, features, cells, rows, cols, head):
     """Logits at the legal entries. ``rows`` are torch sample indices (a
-    row's entries contiguous); ``cols`` the legal action ids; ``features`` the
-    shared features for the batch. Returns (M,) logits and the (M,) rows torch
-    tensor for downstream segment ops."""
-    w = head_rows(weight, cols)      # (M, H)
-    f = features[rows]               # (M, H)
-    return (f * w).sum(-1) + bias[cols]
+    row's entries contiguous); ``cols`` the legal action ids; ``features``
+    (+ ``cells``, see ``shared_and_cells``) the shared features for the batch.
+    Returns (M,) logits."""
+    return head_logits(head, features, cells, rows, cols)
 
   def _segment_lse_entropy(self, logits_e, rows, batch_size):
     """Per-row logsumexp + entropy of the (masked) distribution given the
@@ -1320,11 +1371,11 @@ class PPO(nn.Module):
       chosen.scatter_reduce_(0, mrows, mcols, reduce="amin", include_self=False)
     return chosen
 
-  def _log_prob_chosen(self, features, chosen, lse, weight, bias):
+  def _log_prob_chosen(self, features, cells, chosen, lse, head):
     """(B,) log_prob of ``chosen`` under the masked distribution with known
     per-row logsumexp ``lse``."""
-    wa = head_rows(weight, chosen)
-    logit_a = (features * wa).sum(-1) + bias[chosen]
+    own_rows = torch.arange(features.shape[0], device=self.device)
+    logit_a = head_logits(head, features, cells, own_rows, chosen)
     return logit_a - lse
 
   def _act_sparse(self, obs, mask_rows, mask_cols, seats):
@@ -1365,7 +1416,7 @@ class PPO(nn.Module):
     values = torch.empty(batch, device=self.device)
     for net, idx in zip(nets, groups):
       n = len(idx)
-      features = net.shared(obs[idx])
+      features, cells = shared_and_cells(net, obs[idx])
       # Remap env (== row) indices in this group to local 0..n-1.
       local = np.full(batch, -1, dtype=np.int64)
       local[idx] = np.arange(n)
@@ -1373,12 +1424,10 @@ class PPO(nn.Module):
       rows_np = local[mask_rows[keep]]
       cols = torch.from_numpy(mask_cols[keep].astype(np.int64)).to(self.device)
       rows = torch.from_numpy(rows_np.astype(np.int64)).to(self.device)
-      logits_e = self._pack_logits(features, rows, cols,
-                                   net.actor[-1], net.actor[-1].bias)
+      logits_e = self._pack_logits(features, cells, rows, cols, net.actor[-1])
       chosen = self._gumbel_sample(logits_e, rows, cols, n)
       lse, ent = self._segment_lse_entropy(logits_e, rows, n)
-      lp = self._log_prob_chosen(features, chosen, lse,
-                                 net.actor[-1], net.actor[-1].bias)
+      lp = self._log_prob_chosen(features, cells, chosen, lse, net.actor[-1])
       if hasattr(net, "value_from_obs"):
         v = net.value_from_obs(obs[idx]).view(-1)
       elif hasattr(net, "value_from_features"):
@@ -1555,6 +1604,14 @@ class PPO(nn.Module):
     # Optimizing the policy and value network
     b_inds = np.arange(batch_size)
     clipfracs = []
+    # --amp: bf16 autocast around this minibatch loop's forward+loss only. The
+    # rollout/act path (self.step/step_np) is deliberately never autocast --
+    # it's ~128 rows/step (not the bottleneck) and its fp32 log-probs are what
+    # b_logprobs below was recorded with, so mixing precisions there would put
+    # the PPO ratio between two different numeric paths from the start.
+    # torch.device(...).type normalizes self.device, which callers pass as
+    # either a string ("cpu") or a torch.device.
+    amp_device_type = torch.device(self.device).type
     # Per-update accumulators: kl / old_kl / entropy are computed inside the
     # minibatch loop; without these, last_metrics fell through with the FINAL
     # minibatch's values, so controllers and TB saw noise instead of the mean.
@@ -1568,128 +1625,129 @@ class PPO(nn.Module):
         end = start + minibatch_size
         mb_inds = b_inds[start:end]
 
-        if use_sparse:
-          # Slice the packed legal entries for this minibatch (vectorized via
-          # the per-sample cumulative offsets).
-          features = self.network.shared(b_obs[mb_inds])
-          # A network with its own critic trunk must not have its value read off
-          # the *actor* features; value_from_obs runs the right trunk.
-          if hasattr(self.network, "value_from_obs"):
-            newvalue = self.network.value_from_obs(b_obs[mb_inds])
+        with torch.autocast(device_type=amp_device_type, dtype=torch.bfloat16,
+                            enabled=self.amp):
+          if use_sparse:
+            # Slice the packed legal entries for this minibatch (vectorized via
+            # the per-sample cumulative offsets).
+            features, cells = shared_and_cells(self.network, b_obs[mb_inds])
+            # A network with its own critic trunk must not have its value read off
+            # the *actor* features; value_from_obs runs the right trunk.
+            if hasattr(self.network, "value_from_obs"):
+              newvalue = self.network.value_from_obs(b_obs[mb_inds])
+            else:
+              newvalue = self._value_from_features(features)
+            cnt_mb = sparse_counts[mb_inds].astype(np.int64)
+            m_size = int(cnt_mb.sum())
+            if m_size > 0:
+              starts = sparse_offsets[mb_inds]
+              borders = np.concatenate([[0], np.cumsum(cnt_mb)])
+              rep = np.repeat(np.arange(len(mb_inds)), cnt_mb)
+              within = np.arange(m_size) - borders[rep]
+              col_idx = np.repeat(starts, cnt_mb) + within
+              logprob, entropy = self._sparse_minibatch(
+                  features, cells, rep, sparse_cols[col_idx],
+                  b_actions.long()[mb_inds], self.network.actor[-1])
+            else:
+              # Degenerate empty minibatch: uniform, zero-entropy losses.
+              b = b_obs[mb_inds].shape[0]
+              logprob = torch.zeros(b, device=self.device)
+              entropy = torch.zeros(b, device=self.device)
           else:
-            newvalue = self._value_from_features(features)
-          cnt_mb = sparse_counts[mb_inds].astype(np.int64)
-          m_size = int(cnt_mb.sum())
-          if m_size > 0:
-            starts = sparse_offsets[mb_inds]
-            borders = np.concatenate([[0], np.cumsum(cnt_mb)])
-            rep = np.repeat(np.arange(len(mb_inds)), cnt_mb)
-            within = np.arange(m_size) - borders[rep]
-            col_idx = np.repeat(starts, cnt_mb) + within
-            logprob, entropy = self._sparse_minibatch(
-                features, rep, sparse_cols[col_idx],
-                b_actions.long()[mb_inds], self.network.actor[-1],
-                self.network.actor[-1].bias)
+            _, newlogprob, entropy, newvalue, _ = self.get_action_and_value(
+                b_obs[mb_inds],
+                legal_actions_mask=b_legal_actions_mask[mb_inds],
+                action=b_actions.long()[mb_inds])
+            logprob = newlogprob
+            features = None
+          logratio = logprob - b_logprobs[mb_inds]
+          ratio = logratio.exp()
+
+          with torch.no_grad():
+            # calculate approx_kl http://joschu.net/blog/kl-approx.html
+            old_approx_kl = (-logratio).mean()
+            approx_kl = ((ratio - 1) - logratio).mean()
+            _kl_acc += float(approx_kl.detach())
+            _old_kl_acc += float(old_approx_kl.detach())
+            _mb_count += 1
+            clipfracs += [
+                ((ratio - 1.0).abs() > self.clip_coef).float().mean().item()
+            ]
+
+          mb_advantages = b_advantages[mb_inds]
+          if self.normalize_advantages:
+            mb_advantages = (mb_advantages - mb_advantages.mean()) / (
+                mb_advantages.std() + 1e-8)
+
+          # Policy loss
+          pg_loss1 = -mb_advantages * ratio
+          pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - self.clip_coef,
+                                                  1 + self.clip_coef)
+          pg_loss = torch.max(pg_loss1, pg_loss2).mean()
+
+          # Value loss
+          newvalue = newvalue.view(-1)
+          if self.clip_vloss:
+            v_loss_unclipped = (newvalue - b_returns[mb_inds])**2
+            v_clipped = b_values[mb_inds] + torch.clamp(
+                newvalue - b_values[mb_inds],
+                -self.clip_coef,
+                self.clip_coef,
+            )
+            v_loss_clipped = (v_clipped - b_returns[mb_inds])**2
+            v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
+            v_loss = 0.5 * v_loss_max.mean()
           else:
-            # Degenerate empty minibatch: uniform, zero-entropy losses.
-            b = b_obs[mb_inds].shape[0]
-            logprob = torch.zeros(b, device=self.device)
-            entropy = torch.zeros(b, device=self.device)
-        else:
-          _, newlogprob, entropy, newvalue, _ = self.get_action_and_value(
-              b_obs[mb_inds],
-              legal_actions_mask=b_legal_actions_mask[mb_inds],
-              action=b_actions.long()[mb_inds])
-          logprob = newlogprob
-          features = None
-        logratio = logprob - b_logprobs[mb_inds]
-        ratio = logratio.exp()
+            v_loss = 0.5 * ((newvalue - b_returns[mb_inds])**2).mean()
 
-        with torch.no_grad():
-          # calculate approx_kl http://joschu.net/blog/kl-approx.html
-          old_approx_kl = (-logratio).mean()
-          approx_kl = ((ratio - 1) - logratio).mean()
-          _kl_acc += float(approx_kl.detach())
-          _old_kl_acc += float(old_approx_kl.detach())
-          _mb_count += 1
-          clipfracs += [
-              ((ratio - 1.0).abs() > self.clip_coef).float().mean().item()
-          ]
+          entropy_loss = entropy.mean()
+          _entropy_acc += float(entropy_loss.detach())
+          loss = pg_loss - self.entropy_coef * entropy_loss + v_loss * self.value_coef
 
-        mb_advantages = b_advantages[mb_inds]
-        if self.normalize_advantages:
-          mb_advantages = (mb_advantages - mb_advantages.mean()) / (
-              mb_advantages.std() + 1e-8)
+          # Auxiliary-head loss: supervise the trunk's auxiliary predictors
+          # (e.g. "final total VP") on the terminal-derived targets back-filled
+          # into this batch. Only rows whose episode closed get a target; others
+          # are masked out, so the loss is over the available fraction.
+          aux_loss = torch.zeros((), device=self.device)
+          aux_hit = 0
+          if self.num_aux and features is None:
+            # Aux heads need the shared trunk features, which only the sparse path
+            # produces. Silently training no aux head while aux_coef > 0 hid a dead
+            # head for an entire 408M-step run; say so once.
+            if not self._aux_unsupported_warned:
+              self._aux_unsupported_warned = True
+              print("WARNING: aux_coef>0 but this network has no shared-feature "
+                    "path (needs `shared` + `get_aux`); aux heads are NOT being "
+                    "trained.")
+          if self.num_aux and features is not None:
+            if hasattr(self.network, "aux_from_obs"):
+              pred = self.network.aux_from_obs(b_obs[mb_inds])
+            else:
+              pred = self.network.get_aux(features)
+            tgt = b_aux[mb_inds]
+            msk = b_aux_mask[mb_inds]
+            for k, name in enumerate(self.aux_tasks):
+              p = pred[name]
+              if p.dim() > 1 and p.size(1) == 1:
+                p = p.view(-1)
+              m = msk[:, k].float()
+              denom = m.sum()
+              if denom > 0:
+                aux_loss = aux_loss + (((p - tgt[:, k])**2) * m).sum() / denom
+                aux_hit += 1
+            if aux_hit:
+              loss = loss + self.aux_coef * aux_loss
 
-        # Policy loss
-        pg_loss1 = -mb_advantages * ratio
-        pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - self.clip_coef,
-                                                1 + self.clip_coef)
-        pg_loss = torch.max(pg_loss1, pg_loss2).mean()
-
-        # Value loss
-        newvalue = newvalue.view(-1)
-        if self.clip_vloss:
-          v_loss_unclipped = (newvalue - b_returns[mb_inds])**2
-          v_clipped = b_values[mb_inds] + torch.clamp(
-              newvalue - b_values[mb_inds],
-              -self.clip_coef,
-              self.clip_coef,
-          )
-          v_loss_clipped = (v_clipped - b_returns[mb_inds])**2
-          v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
-          v_loss = 0.5 * v_loss_max.mean()
-        else:
-          v_loss = 0.5 * ((newvalue - b_returns[mb_inds])**2).mean()
-
-        entropy_loss = entropy.mean()
-        _entropy_acc += float(entropy_loss.detach())
-        loss = pg_loss - self.entropy_coef * entropy_loss + v_loss * self.value_coef
-
-        # Auxiliary-head loss: supervise the trunk's auxiliary predictors
-        # (e.g. "final total VP") on the terminal-derived targets back-filled
-        # into this batch. Only rows whose episode closed get a target; others
-        # are masked out, so the loss is over the available fraction.
-        aux_loss = torch.zeros((), device=self.device)
-        aux_hit = 0
-        if self.num_aux and features is None:
-          # Aux heads need the shared trunk features, which only the sparse path
-          # produces. Silently training no aux head while aux_coef > 0 hid a dead
-          # head for an entire 408M-step run; say so once.
-          if not self._aux_unsupported_warned:
-            self._aux_unsupported_warned = True
-            print("WARNING: aux_coef>0 but this network has no shared-feature "
-                  "path (needs `shared` + `get_aux`); aux heads are NOT being "
-                  "trained.")
-        if self.num_aux and features is not None:
-          if hasattr(self.network, "aux_from_obs"):
-            pred = self.network.aux_from_obs(b_obs[mb_inds])
-          else:
-            pred = self.network.get_aux(features)
-          tgt = b_aux[mb_inds]
-          msk = b_aux_mask[mb_inds]
-          for k, name in enumerate(self.aux_tasks):
-            p = pred[name]
-            if p.dim() > 1 and p.size(1) == 1:
-              p = p.view(-1)
-            m = msk[:, k].float()
-            denom = m.sum()
-            if denom > 0:
-              aux_loss = aux_loss + (((p - tgt[:, k])**2) * m).sum() / denom
-              aux_hit += 1
-          if aux_hit:
-            loss = loss + self.aux_coef * aux_loss
-
-        # Distributional critic: cross-entropy on the realized placement.
-        rank_ce = torch.zeros((), device=self.device)
-        if self.rank_ce_coef and hasattr(self.network, "rank_logits_from_obs"):
-          msk = b_rank_mask[mb_inds]
-          if float(msk.sum()) > 0:
-            logits_r = self.network.rank_logits_from_obs(b_obs[mb_inds])
-            per_row = nn.functional.cross_entropy(
-                logits_r, b_ranks[mb_inds], reduction="none")
-            rank_ce = (per_row * msk).sum() / msk.sum()
-            loss = loss + self.rank_ce_coef * rank_ce
+          # Distributional critic: cross-entropy on the realized placement.
+          rank_ce = torch.zeros((), device=self.device)
+          if self.rank_ce_coef and hasattr(self.network, "rank_logits_from_obs"):
+            msk = b_rank_mask[mb_inds]
+            if float(msk.sum()) > 0:
+              logits_r = self.network.rank_logits_from_obs(b_obs[mb_inds])
+              per_row = nn.functional.cross_entropy(
+                  logits_r, b_ranks[mb_inds], reduction="none")
+              rank_ce = (per_row * msk).sum() / msk.sum()
+              loss = loss + self.rank_ce_coef * rank_ce
 
         self.optimizer.zero_grad()
         loss.backward()
@@ -1829,3 +1887,60 @@ class PPO(nn.Module):
     lrnow = frac * self.learning_rate
     for group in self.optimizer.param_groups:
       group["lr"] = lrnow
+
+  def kl_step_lr(self, approx_kl, target, tau, lr_min, lr_max):
+    """Closed-loop LR: react to the realized KL every step.
+
+    A fixed anneal-to-zero shuts off learning past convergence (Item 5 showed
+    post-plateau updates buy nothing) and, on resume, a fresh loop restarted the
+    anneal at the base rate. Instead, keep exploration/update strength where
+    the policy can actually absorb it: if the per-update KL is above the target,
+    scale LR down (protect against over-large updates); if below, ease it back
+    up (recover speed that was cut prematurely). Uses an EMA so a single noisy
+    KL reading does not swing the LR. All mutation goes through
+    ``set_learning_rate`` so the base ``self.learning_rate`` stays aligned with
+    the optimizer's param groups (the same requirement ``anneal_learning_rate``
+    has). Returns the applied multiplier (1.0 = unchanged).
+    """
+    if target is None or target <= 0:
+      return 1.0
+    decay = getattr(self, "_kl_ema", None)
+    if decay is None:
+      decay = approx_kl
+    decay = tau * approx_kl + (1.0 - tau) * decay
+    self._kl_ema = float(decay)
+    # Proportional error; keeps the step size dimensionless across targets.
+    err = (decay - target) / target
+    # Logistic-style update clamped to keep a single step from halving/tripling
+    # the rate. err<0 (KL under target) raises LR, err>0 lowers it.
+    mult = float(np.exp(-np.clip(err, -1.0, 1.0)))
+    new_lr = float(np.clip(self.learning_rate * mult, lr_min, lr_max))
+    self.set_learning_rate(new_lr)
+    return mult
+
+  def entropy_band_step(self, entropy, lo, hi, step, every):
+    """Entropy-band controller for ``ent_coef``.
+
+    Maintains an EMA of the realized entropy and nudges ``ent_coef`` up when the
+    band is too low (risk of premature determinism / policy collapse) and down
+    when too high (paying exploration noise with nothing to show). Rate-limited
+    to fire ``every`` updates so it does not react to per-update noise, giving a
+    far longer time constant than the KL/LR loop. Returns the new ``ent_coef``.
+    """
+    if lo is None or hi is None or lo >= hi:
+      return self.entropy_coef
+    decay = getattr(self, "_ent_ema", None)
+    if decay is None:
+      decay = entropy
+    decay = 0.9 * entropy + 0.1 * decay
+    self._ent_ema = float(decay)
+    count = getattr(self, "_ent_control_count", 0) + 1
+    self._ent_control_count = count
+    if count % every != 0:
+      return self.entropy_coef
+    if decay < lo:
+      self.entropy_coef = self.entropy_coef * (1.0 + step)
+    elif decay > hi:
+      self.entropy_coef = self.entropy_coef * (1.0 - step)
+    self.entropy_coef = float(np.clip(self.entropy_coef, 1e-6, 1e6))
+    return self.entropy_coef

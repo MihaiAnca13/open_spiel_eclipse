@@ -24,6 +24,7 @@ from open_spiel.python.eclipse.action_factors import factorization_from_game
 from open_spiel.python.eclipse.action_factors import NUM_SLOTS
 from open_spiel.python.eclipse import obs_layout
 from open_spiel.python.examples.ppo_eclipse import EclipsePPOAgent
+from open_spiel.python.examples.ppo_eclipse import build_aux_targets
 from open_spiel.python.pytorch.ppo import CategoricalMasked
 from open_spiel.python.pytorch.ppo import PPO
 
@@ -88,9 +89,9 @@ class FactoredActorHeadTest(absltest.TestCase):
     rows = np.concatenate([[i] * len(l) for i, l in enumerate(legal)])
     cols = np.concatenate(legal).astype(np.int64)
 
-    packed = agent._pack_logits(feats, torch.from_numpy(rows.astype(np.int64)),
-                               torch.from_numpy(cols), net.actor[-1],
-                               net.actor[-1].bias)
+    packed = agent._pack_logits(feats, None,
+                               torch.from_numpy(rows.astype(np.int64)),
+                               torch.from_numpy(cols), net.actor[-1])
     dense = net.actor(batch)
     reference = dense[torch.from_numpy(rows.astype(np.int64)),
                       torch.from_numpy(cols)]
@@ -130,6 +131,14 @@ class FactoredActorHeadTest(absltest.TestCase):
   def test_spatial_encoder_sparse_and_shape(self):
     """The spatial encoder (the default run path) must also feed the sparse
     factored head, and must slice the real flat tensor without a shape error."""
+    # ponytail: seeded -- the spatial branch MLPs have no input normalization
+    # (real observations are bounded [0,1]; unseeded torch.randn synthetic
+    # input is not), so an unlucky random draw sends logits to ~1e8 and the
+    # dense-vs-sparse comparison's *absolute* 1e-5 tolerance below sees plain
+    # float32 rounding as a mismatch -- pre-existing on git HEAD too (repro'd
+    # with seeds 1,4,5,7,9,13 before this test ever mentioned spatial_pointer).
+    # Fix the *test's* tolerance/scale if this ever needs unseeding.
+    torch.manual_seed(0)
     net = EclipsePPOAgent(
         self.num_actions, (self.obs_size,), "cpu", width=64, depth=2,
         aux_tasks=("final_rank",), factored_actions=self.fz, encoder="spatial")
@@ -152,6 +161,110 @@ class FactoredActorHeadTest(absltest.TestCase):
     untouched = set(range(self.fz.num_rows)) - touched
     self.assertTrue(all(float(grad[r].abs().sum()) == 0
                         for r in list(untouched)[:50]))
+
+  def test_spatial_pointer_requires_spatial_encoder_and_factored_actions(self):
+    with self.assertRaises(ValueError):
+      EclipsePPOAgent(self.num_actions, (self.obs_size,), "cpu", width=64,
+                      depth=2, factored_actions=self.fz, encoder="flat",
+                      spatial_pointer=True)
+    with self.assertRaises(ValueError):
+      EclipsePPOAgent(self.num_actions, (self.obs_size,), "cpu", width=64,
+                      depth=2, factored_actions=None, encoder="spatial",
+                      spatial_pointer=True)
+
+  def test_spatial_pointer_reads_the_actual_targeted_cell(self):
+    """Direct falsifier for the bug: cell 42's state must reach the logit for
+    "colonize cell 42". Swap two cells' conv features between each other and
+    the pointer contribution to the two actions' logits must swap with them
+    -- this fails against the pre-fix head (no pointer term at all, hence no
+    ``logits_for``) and would also fail against a "fix" that feeds the query
+    a globally-pooled vector instead of the specific targeted cell.
+
+    The comparison is on the pointer term alone (full logit minus the
+    ``cells=None`` base-only logit), not the raw logit: two *different*
+    actions on different cells generally have different base weights (that's
+    the whole point of the factorization -- each cell keeps its own row), so
+    the full logits have no reason to swap to numerically identical values;
+    only the spatial contribution this task adds does.
+    """
+    net = EclipsePPOAgent(
+        self.num_actions, (self.obs_size,), "cpu", width=64, depth=2,
+        aux_tasks=("final_rank",), factored_actions=self.fz, encoder="spatial",
+        spatial_pointer=True)
+    head = net.actor[-1]
+    x = torch.randn(2, self.obs_size)
+    with torch.no_grad():
+      features, cells = net.shared.forward_with_cells(x)
+
+      # Two colony-ship actions targeting different board cells, same row.
+      action_cell0 = int(np.flatnonzero(self.fz.cell_id == 0)[0])
+      action_cell1 = int(np.flatnonzero(self.fz.cell_id == 1)[0])
+      rows = torch.tensor([0, 0])
+      cols = torch.tensor([action_cell0, action_cell1])
+
+      base_only = head.logits_for(features, None, rows, cols)
+      before = head.logits_for(features, cells, rows, cols) - base_only
+      self.assertNotAlmostEqual(float(before[0]), float(before[1]), places=5)
+
+      swapped = cells.clone()
+      swapped[0, :, 0] = cells[0, :, 1]
+      swapped[0, :, 1] = cells[0, :, 0]
+      after = head.logits_for(features, swapped, rows, cols) - base_only
+
+    self.assertTrue(torch.allclose(after[0], before[1], atol=1e-5))
+    self.assertTrue(torch.allclose(after[1], before[0], atol=1e-5))
+
+
+class BuildAuxTargetsBreakdownTest(absltest.TestCase):
+  """The ``breakdown`` aux mode reads the 9 VP categories from terminal obs."""
+
+  def setUp(self):
+    super().setUp()
+    self.game = pyspiel.load_game("eclipse(players=4)")
+    self.obs_size = obs_layout.validate(self.game)
+    self.tasks, self.fn = build_aux_targets("breakdown", 30.0)
+
+  def _terminal_obs(self, acting_seat):
+    """A synthetic terminal obs with a distinct breakdown per seat."""
+    obs = np.zeros(self.obs_size, dtype=np.float32)
+    for s in range(4):
+      slot = obs_layout.slot_for_seat(s, acting_seat, 4)
+      base = (obs_layout.player_block_start(slot)
+              + obs_layout.P_VP_BREAKDOWN)
+      # Seat s's categories = s + 1...s + 9 (all within [0,1]).
+      obs[base:base + 9] = np.arange(1.0, 10.0) * 0.01 + s
+    return obs
+
+  def test_task_names_are_the_nine_categories(self):
+    self.assertEqual(len(self.tasks), 9)
+    self.assertIn("bd_sector", self.tasks)
+    self.assertIn("bd_traitor", self.tasks)
+
+  def test_missing_obs_returns_none_for_unmasking(self):
+    out = self.fn(np.array([40.0, 25.0, 10.0, 0.0], dtype=np.float32))
+    self.assertIsNone(out)
+
+  def test_reads_terminal_breakdown_per_seat(self):
+    acting = 2
+    obs = self._terminal_obs(acting)
+    out = self.fn(np.zeros(4, dtype=np.float32), terminal_obs=obs,
+                  acting_seat=acting)
+    self.assertEqual(out.shape, (4, 9))
+    for s in range(4):
+      expected = np.arange(1.0, 10.0) * 0.01 + s
+      np.testing.assert_allclose(out[s], expected, atol=1e-6)
+
+  def test_seat_canonicalisation(self):
+    # Each terminal obs is canonicalised to its own acting seat; the extractor
+    # must therefore yield the same per-absolute-seat values regardless of who
+    # acted last.
+    for acting in range(4):
+      obs = self._terminal_obs(acting)
+      out = self.fn(np.zeros(4, dtype=np.float32), terminal_obs=obs,
+                    acting_seat=acting)
+      for s in range(4):
+        np.testing.assert_allclose(
+            out[s], np.arange(1.0, 10.0) * 0.01 + s, atol=1e-6, err_msg=f"a={acting} s={s}")
 
 
 if __name__ == "__main__":

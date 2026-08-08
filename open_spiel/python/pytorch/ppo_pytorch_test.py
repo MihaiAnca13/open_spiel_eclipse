@@ -34,6 +34,10 @@ SIMPLE_EFG_DATA = """
 """
 SEED = 24261711
 
+# Small rate-limit window for entropy-band controller tests (must match what
+# the tests pass as `every`).
+ENT_CONTROL_EVERY = 5
+
 
 class PPOTest(absltest.TestCase):
 
@@ -84,6 +88,61 @@ class PPOTest(absltest.TestCase):
       total_eval_reward += reward[0][0]
       n_evaluations += sum(done)
     self.assertGreaterEqual(total_eval_reward, 900)
+
+  def _make_agent(self):
+    game = pyspiel.load_efg_game(SIMPLE_EFG_DATA)
+    env = rl_environment.Environment(game=game)
+    return env, PPO(
+        input_shape=tuple(
+            np.array(env.observation_spec()["info_state"]).flatten()),
+        num_actions=game.num_distinct_actions(),
+        num_players=game.num_players(),
+        player_id=0,
+        num_envs=1,
+        agent_fn=PPOAgent,
+        learning_rate=1e-3,
+    )
+
+  def test_kl_lr_controller_lowers_on_high_kl(self):
+    _, agent = self._make_agent()
+    start_lr = agent.learning_rate
+    # KL far above target -> LR should drop, never exceed base, never fall
+    # below lr_min, and param groups must stay aligned with self.learning_rate.
+    agent.kl_step_lr(approx_kl=0.5, target=0.02, tau=0.05,
+                     lr_min=1e-6, lr_max=1e-2)
+    self.assertLess(agent.learning_rate, start_lr)
+    self.assertGreaterEqual(agent.learning_rate, 1e-6)
+    self.assertEqual(agent.optimizer.param_groups[0]["lr"], agent.learning_rate)
+
+  def test_kl_lr_controller_recovers_when_kl_under_target(self):
+    _, agent = self._make_agent()
+    # Force the EMA near zero (KL below target) so the controller pushes LR up
+    # toward the ceiling without exceeding it.
+    agent.kl_step_lr(approx_kl=0.0, target=0.02, tau=0.05,
+                     lr_min=1e-6, lr_max=1e-2)
+    self.assertLessEqual(agent.learning_rate, 1e-2)
+    self.assertEqual(agent.optimizer.param_groups[0]["lr"], agent.learning_rate)
+
+  def test_entropy_band_raises_coef_when_entropy_low(self):
+    _, agent = self._make_agent()
+    base = agent.entropy_coef
+    # Rate-limited: first `every-1` calls leave ent_coef unchanged.
+    for _ in range(ENT_CONTROL_EVERY - 1):
+      agent.entropy_band_step(entropy=0.05, lo=0.2, hi=0.6,
+                              step=0.1, every=ENT_CONTROL_EVERY)
+    self.assertEqual(agent.entropy_coef, base)
+    # On the fire update, entropy below the band raises ent_coef.
+    agent.entropy_band_step(entropy=0.05, lo=0.2, hi=0.6,
+                            step=0.1, every=ENT_CONTROL_EVERY)
+    self.assertGreater(agent.entropy_coef, base)
+
+  def test_entropy_band_lowers_coef_when_entropy_high(self):
+    _, agent = self._make_agent()
+    base = agent.entropy_coef
+    for _ in range(ENT_CONTROL_EVERY):
+      agent.entropy_band_step(entropy=0.95, lo=0.2, hi=0.6,
+                              step=0.1, every=ENT_CONTROL_EVERY)
+    self.assertLess(agent.entropy_coef, base)
 
 
 if __name__ == "__main__":

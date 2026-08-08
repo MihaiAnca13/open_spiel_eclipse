@@ -14,7 +14,7 @@
 
 """Shared-policy PPO self-play for Eclipse with potential-based reward shaping.
 
-This is the Stage 0.5/1 training path (see ppo_eclipse_plan.md). A single
+This is the Stage 0.5/1 training path (see docs/eclipse_rl_todo.md). A single
 shared network acts for whichever seat is to move in each of `num_envs` parallel
 games (the N-player self-play generalization of open_spiel.python.pytorch.ppo).
 
@@ -42,6 +42,7 @@ import json
 import os
 import random
 import time
+import warnings
 from absl import app
 from absl import flags
 import numpy as np
@@ -151,8 +152,43 @@ flags.DEFINE_bool("progress", True,
                   "Show a tqdm-style progress bar with it/s (env steps/sec). "
                   "Disabled automatically if tqdm is not installed.")
 flags.DEFINE_bool("anneal_lr", True,
-                  "Linearly anneal the learning rate to 0 over the run "
-                  "(standard PPO practice for long training).")
+                  "Legacy alias used only when --lr_schedule is unset: True maps "
+                  "to 'fixed', False maps to 'fixed'. Kept for back-compat with "
+                  "old command lines; --lr_schedule wins when set explicitly. "
+                  "NOTE: this used to map True -> 'kl', which silently enabled a "
+                  "never-validated controller on every run that did not pass "
+                  "--lr_schedule. See the safety note on --lr_schedule.")
+flags.DEFINE_enum(
+    "lr_schedule", None, ["fixed", "anneal", "kl"],
+    "How the learning rate is mutated after each update. 'fixed' = never "
+    "touch it. 'anneal' = the historical linear decay to zero over the run "
+    "(driven off agent.updates_done, resume-continuing). 'kl' = closed-loop "
+    "KL-targeted controller (cls. Item 4): react to the realized per-update KL "
+    "every step with a small multiplicative step and clamp within "
+    "[--lr_min, --lr_max]. A fixed anneal shuts off learning past convergence, "
+    "so 'kl' is the default when this flag is unset (falls back to --anneal_lr "
+    "if that is set False).")
+flags.DEFINE_float("kl_target", 0.02,
+                   "Target per-update KL for the 'kl' LR controller.")
+flags.DEFINE_float("kl_lr_tau", 0.05,
+                   "EMA weight for the kl controller's KL estimate (small = "
+                   "smooth; reacts over many updates).")
+flags.DEFINE_float("lr_min", 1e-6, "Floor for the 'kl' LR controller.")
+flags.DEFINE_float("lr_max", 1e-2, "Ceiling for the 'kl' LR controller.")
+
+flags.DEFINE_float("ent_lo", None,
+                   "Lower entropy bound for the entropy-band controller "
+                   "(None disables).")
+flags.DEFINE_float("ent_hi", None,
+                   "Upper entropy bound for the entropy-band controller "
+                   "(None disables).")
+flags.DEFINE_float("ent_step", 0.1,
+                   "Fractional per-fire change to --ent_coef for the "
+                   "entropy-band controller.")
+flags.DEFINE_integer("ent_control_every", 15,
+                     "Rate-limit the entropy-band controller to fire this "
+                     "often (updates), giving it a longer time constant than "
+                     "the KL/LR loop.")
 
 flags.DEFINE_integer(
     "num_workers", 0,
@@ -206,7 +242,18 @@ flags.DEFINE_float("phi_w_structure", 1.0,
                    "Soft-Phi weight per orbital/monolith built.")
 flags.DEFINE_float("phi_w_ambassador", 1.0,
                    "Soft-Phi weight per ambassador tile held.")
-flags.DEFINE_float("gamma", 0.99, "Discount factor (used for shaping too).")
+flags.DEFINE_float(
+    "gamma", 0.998,
+    "Discount factor (used for potential-based shaping too). Raised from 0.99 "
+    "on 2026-08-08 for horizon reasons: Eclipse pays its real reward only at "
+    "the end, and GAE follows each seat's OWN decision subsequence, which runs "
+    "~80 decisions per player. At 0.99 the terminal rank utility is discounted "
+    "to 0.99^80 ~ 0.45 by mid-game -- over half of the only true signal is "
+    "thrown away. At 0.998 it is 0.998^80 ~ 0.85. 0.998 is also what the "
+    "hide-and-seek PPO setup used (Baker et al. 2019). UNTESTED on the ladder: "
+    "the 1.2204 baseline was trained at 0.99, so any run at this default "
+    "differs from that baseline in this respect too -- keep it in mind when "
+    "attributing a result.")
 flags.DEFINE_float("gae_lambda", 0.95, "GAE lambda.")
 flags.DEFINE_bool("gae", True, "Use GAE.")
 flags.DEFINE_enum("value_mode", "win", ["win", "vp"],
@@ -249,14 +296,17 @@ flags.DEFINE_float(
     "over *masked* rows, so its effective weight scales with how many episodes "
     "closed in the batch.")
 flags.DEFINE_enum(
-    "aux_target_mode", "rank", ["vp", "rank", "both", "none"],
-    "Aux-head regression target. 'rank' (default) = per-seat tie-aware rank "
-    "utility: bounded in [-0.5, 1] by construction, so it can neither vanish "
-    "nor dominate. 'vp' = final VP / --aux_vp_scale. 'both' supervises a "
-    "normalized-VP head and a rank head. 'none' disables aux heads. Note the "
-    "target must be O(1): raw VP targets gave aux_loss ~8-11 against pg_loss "
-    "~1e-3, and because the gradient is clipped globally that rescaled the "
-    "policy gradient toward zero.")
+     "aux_target_mode", "rank", ["vp", "rank", "both", "breakdown", "none"],
+     "Aux-head regression target. 'rank' (default) = per-seat tie-aware rank "
+     "utility: bounded in [-0.5, 1] by construction, so it can neither vanish "
+     "nor dominate. 'vp' = final VP / --aux_vp_scale. 'both' supervises a "
+     "normalized-VP head and a rank head. 'breakdown' supervises 9 heads, one "
+     "per final-VP category (reputation/ambassador/sector/monolith/"
+     "discovery/tech/traitor/species/minor), each read back-filled from the "
+     "terminal observation. 'none' disables aux heads. Note the "
+     "target must be O(1): raw VP targets gave aux_loss ~8-11 against pg_loss "
+     "~1e-3, and because the gradient is clipped globally that rescaled the "
+     "policy gradient toward zero.")
 flags.DEFINE_float(
     "aux_vp_scale", 30.0,
     "Divisor for the 'vp' aux target. A contested Eclipse game scores ~20-40 "
@@ -304,6 +354,29 @@ flags.DEFINE_enum(
     "tower + viewer self block + tail blocks + a relational masked mean+max "
     "seat pool (the flat Linear(24714, width) first layer was a ~5.1x "
     "throughput collapse). 'flat' preserves the old dense trunk as a control.")
+flags.DEFINE_bool(
+    "spatial_pointer", False,
+    "Add a pointer/attention term from the spatial encoder's per-cell conv "
+    "features into FactoredActorHead's cell-indexed logits ("
+    "'colonize cell 42' should depend on cell 42's actual state, which a "
+    "global-average-pooled trunk feature otherwise never sees). Requires "
+    "--encoder=spatial and --factored_actions.")
+flags.DEFINE_bool(
+    "amp", False,
+    "bf16 autocast (torch.autocast) around the PPO learn-path minibatch "
+    "forward+loss only -- never the rollout/act path. See PPO.__init__'s "
+    "`amp` docstring for why. No-op (bit-identical) when off.")
+flags.DEFINE_bool(
+    "channels_last", False,
+    "Run SpatialEclipseEncoder's conv tower in channels_last memory format. "
+    "obs_layout.galaxy_view returns a permuted, non-contiguous view that "
+    "cudnn otherwise silently copies on every call (measured 20.24ms vs "
+    "14.44ms channels_last, fwd only, 4096 rows); this makes that copy "
+    "explicit and cheaper. No-op (bit-identical) when off.")
+flags.DEFINE_bool(
+    "compile_encoder", False,
+    "torch.compile SpatialEclipseEncoder._encode. Falls back to eager with a "
+    "warning if compilation fails. No-op when off or --encoder=flat.")
 
 flags.DEFINE_bool(
     "league", False,
@@ -396,23 +469,29 @@ class SpatialEclipseEncoder(nn.Module):
   batch stats would be wrong in one path or the other.
   """
 
-  def __init__(self, width, depth=1, activation="gelu", device=None):
+  # Conv tower output channels -- a class attribute (not a bare literal) so
+  # SpatialFactoredActorHead's pointer query can size itself off it.
+  CELL_FEATURE_CHANNELS = 64
+
+  def __init__(self, width, depth=1, activation="gelu", device=None,
+               channels_last=False, compile_encoder=False):
     super().__init__()
     self.device = device
     act = nn.GELU if activation == "gelu" else nn.Tanh
+    c = self.CELL_FEATURE_CHANNELS
 
     # ── Galaxy branch: (B, 88, 15, 15) conv tower ───────────────────────────
     self.conv = nn.Sequential(
-        layer_init(nn.Conv2d(obs_layout.CELL_CHANNELS, 64, 3, padding=1)),
-        nn.GroupNorm(8, 64),
+        layer_init(nn.Conv2d(obs_layout.CELL_CHANNELS, c, 3, padding=1)),
+        nn.GroupNorm(8, c),
         act(),
     )
     self.conv_res = nn.Sequential(
-        layer_init(nn.Conv2d(64, 64, 3, padding=1)),
-        nn.GroupNorm(8, 64),
+        layer_init(nn.Conv2d(c, c, 3, padding=1)),
+        nn.GroupNorm(8, c),
         act(),
     )
-    self.galaxy_fc = layer_init(nn.Linear(64, width))
+    self.galaxy_fc = layer_init(nn.Linear(c, width))
 
     # ── Viewer self block: (547,) MLP ───────────────────────────────────────
     self.self_mlp = self._mlp(obs_layout.PLAYER_SIZE, width, depth, act)
@@ -429,6 +508,29 @@ class SpatialEclipseEncoder(nn.Module):
     # ── Fuse the four branch latents to (B, width) ──────────────────────────
     self.fuse = layer_init(nn.Linear(4 * width, width))
 
+    # --channels_last: obs_layout.galaxy_view returns a permuted (non-
+    # contiguous) view, which cudnn otherwise silently re-copies to contiguous
+    # NCHW on every call. Putting the conv tower's weights in channels_last
+    # memory format and making the input contiguous in that same format up
+    # front (see _encode_impl) turns that hidden copy into one explicit,
+    # cheaper one. Purely a memory-layout change -- values are unaffected.
+    self.channels_last = channels_last
+    if channels_last:
+      self.conv = self.conv.to(memory_format=torch.channels_last)
+      self.conv_res = self.conv_res.to(memory_format=torch.channels_last)
+
+    # --compile_encoder: see _encode's dispatch for the graceful-fallback
+    # mechanics.
+    self._compiled_encode = None
+    if compile_encoder:
+      # dynamic=True: the learn path always calls with the same fixed batch
+      # (num_envs*num_steps/num_minibatches), but the sparse act path's batch
+      # size is the per-step legal-action count, which changes every call.
+      # Compiling per-shape would mean a recompile per distinct batch size on
+      # the act path (a recompile storm); one dynamic-shape compile serves
+      # both call sites.
+      self._compiled_encode = torch.compile(self._encode_impl, dynamic=True)
+
   def _mlp(self, in_features, width, depth, act):
     layers = []
     cur = in_features
@@ -439,15 +541,52 @@ class SpatialEclipseEncoder(nn.Module):
     return nn.Sequential(*layers)
 
   def forward(self, x):
+    return self._encode(x)[0]
+
+  def forward_with_cells(self, x):
+    """Like ``forward``, but also returns the pre-pool per-cell conv features.
+
+    Returns:
+      fused: (B, width) -- byte-identical to ``forward(x)``.
+      h_cells: (B, CELL_FEATURE_CHANNELS, 225) conv features per board cell,
+        indexed by ``obs_layout.hex_to_index(q, r)`` (see the flatten check in
+        ``forward``/module docstring: galaxy_view's last two dims are
+        (q_idx, r_idx), and a plain reshape preserves that as the linear cell
+        id -- no permute needed).
+    """
+    return self._encode(x)
+
+  def _encode(self, x):
+    """Dispatches to the (optionally torch.compile'd) encoder body.
+
+    --compile_encoder failures surface at the first real call, not at
+    construction time (torch.compile is lazy), so the try/except lives here:
+    one bad call falls back to eager for the rest of the run instead of
+    crashing training.
+    """
+    if self._compiled_encode is None:
+      return self._encode_impl(x)
+    try:
+      return self._compiled_encode(x)
+    except Exception as e:  # pylint: disable=broad-except
+      warnings.warn(
+          f"torch.compile(SpatialEclipseEncoder) failed at runtime ({e!r}); "
+          "falling back to eager for the rest of this run.")
+      self._compiled_encode = None
+      return self._encode_impl(x)
+
+  def _encode_impl(self, x):
     b = x.shape[0]
     x = x.reshape(b, -1)
 
     # Galaxy: (B, CELL_CHANNELS, 15, 15).
     gal = obs_layout.galaxy_view(x)
+    if self.channels_last:
+      gal = gal.contiguous(memory_format=torch.channels_last)
     h = self.conv(gal)
     h = h + self.conv_res(h)
-    h = h.mean(dim=(2, 3))                       # global avg pool -> (B,64)
-    gal_lat = self.galaxy_fc(h)
+    h_cells = h.reshape(b, self.CELL_FEATURE_CHANNELS, obs_layout.GALAXY_CELLS)
+    gal_lat = self.galaxy_fc(h_cells.mean(dim=-1))  # global avg pool -> (B,width)
 
     # Viewer self block (slot 0 is always the viewer).
     self_start = obs_layout.PLAYERS_START
@@ -483,8 +622,9 @@ class SpatialEclipseEncoder(nn.Module):
         mask, seat_h, torch.full_like(seat_h, neg)).max(dim=1).values
     rel_lat = self.rel_fc(torch.cat([mean, masked_max], dim=1))
 
-    return self.fuse(torch.cat(
+    fused = self.fuse(torch.cat(
         [gal_lat, self_lat, tail_lat, rel_lat], dim=1))
+    return fused, h_cells
 
 
 class FactoredActorHead(nn.Module):
@@ -525,6 +665,73 @@ class FactoredActorHead(nn.Module):
     return features @ self.full_weight().t() + self.bias
 
 
+class SpatialFactoredActorHead(FactoredActorHead):
+  """FactoredActorHead + a pointer term into the per-cell conv features.
+
+  The base class's ``W[a] = sum_slot E[decode[a, slot]]`` weight is a pure
+  function of the action id: the state of board cell 42 never influences the
+  logit for "colonize cell 42" because nothing in that weight depends on the
+  observation. This adds, for every action with a real board coordinate
+  (``cell_id[a] >= 0``), a joint term between the observation and the action:
+
+      logit[a] = base[a] + <query(features), h_cells[:, :, cell_id[a]]>
+
+  where ``h_cells`` is ``SpatialEclipseEncoder``'s pre-pool per-cell conv
+  output (see ``forward_with_cells``). ``query`` is ``layer_init(..., std=0.01)``
+  so the pointer term starts near zero and cannot destabilise early training.
+
+  TRAP: this class inherits ``rows_for``/``full_weight`` from FactoredActorHead
+  UNCHANGED, and those return the BASE term ONLY -- they have no ``cells``
+  argument to add the pointer term through. Any code path that does
+  ``hasattr(head, 'rows_for')`` and calls it directly (instead of going through
+  ``logits_for`` or ``forward(features, cells)``) will silently get the
+  pre-fix, cell-blind policy. Never call ``rows_for``/``full_weight`` on this
+  head expecting complete logits.
+  """
+
+  def __init__(self, decode, num_rows, num_actions, width, cell_id,
+               cell_channels):
+    super().__init__(decode, num_rows, num_actions, width)
+    cell_id = np.asarray(cell_id, dtype=np.int64)
+    self.register_buffer("cell_id", torch.from_numpy(cell_id))
+    self.register_buffer("is_cell", torch.from_numpy(cell_id >= 0))
+    self.query = layer_init(nn.Linear(width, cell_channels), std=0.01)
+
+  def _pointer_term(self, q, cell_feat, is_cell):
+    """<q, cell_feat> gated to 0 where the action has no board cell."""
+    pointer = (q * cell_feat).sum(-1)
+    return torch.where(is_cell, pointer, torch.zeros_like(pointer))
+
+  def logits_for(self, features, cells, rows, cols):
+    """(M,) logits for the (rows[i], cols[i]) pairs (sparse path).
+
+    ``features``: (B, width) shared features. ``cells``: (B, cell_channels,
+    225) per-cell conv features, or None (base-only, e.g. --spatial_pointer
+    off or the flat encoder). ``rows``/``cols``: (M,) torch tensors.
+    """
+    base = ((features[rows] * self.rows_for(cols)).sum(-1)
+            + self.bias[cols])
+    if cells is None:
+      return base
+    is_cell = self.is_cell[cols]
+    q = self.query(features[rows])                      # (M, cell_channels)
+    cid = self.cell_id[cols].clamp(min=0)                # safe dummy index
+    cell_feat = cells[rows].gather(
+        2, cid.view(-1, 1, 1).expand(-1, cells.shape[1], 1)).squeeze(-1)
+    return base + self._pointer_term(q, cell_feat, is_cell)
+
+  def forward(self, features, cells=None):
+    """(B, num_actions) dense logits. ``cells`` as in ``logits_for``."""
+    base = features @ self.full_weight().t() + self.bias
+    if cells is None:
+      return base
+    q = self.query(features)                             # (B, cell_channels)
+    cell_logits = torch.einsum("bc,bcn->bn", q, cells)    # (B, 225)
+    cid = self.cell_id.clamp(min=0)                       # (num_actions,)
+    pointer = cell_logits[:, cid] * self.is_cell.to(cell_logits.dtype)
+    return base + pointer
+
+
 class EclipsePPOAgent(nn.Module):
   """MLP actor-critic for Eclipse's flat observation vector.
 
@@ -561,14 +768,26 @@ class EclipsePPOAgent(nn.Module):
   def __init__(self, num_actions, observation_shape, device, width=64,
                depth=2, aux_tasks=("final_vp",), norm=False,
                activation="tanh", separate_critic=False,
-               factored_actions=None, encoder="flat"):
+               factored_actions=None, encoder="flat", spatial_pointer=False,
+               channels_last=False, compile_encoder=False):
     super().__init__()
     in_features = int(np.array(observation_shape).prod())
     self.encoder = encoder
+    if spatial_pointer and encoder != "spatial":
+      raise ValueError(
+          "--spatial_pointer requires --encoder=spatial: a flat trunk has no "
+          "per-cell features for the pointer term to read, and silently "
+          "degrading to the base-only head would defeat the point of the flag.")
+    if spatial_pointer and factored_actions is None:
+      raise ValueError(
+          "--spatial_pointer requires --factored_actions: the pointer term "
+          "needs the per-action cell_id table that only the factorization "
+          "carries.")
 
     if encoder == "spatial":
       self.shared = SpatialEclipseEncoder(
-          width, depth=max(1, depth), activation=activation, device=device)
+          width, depth=max(1, depth), activation=activation, device=device,
+          channels_last=channels_last, compile_encoder=compile_encoder)
     else:
       self.shared = self._trunk(in_features, width, depth, norm, activation)
     self.separate_critic = separate_critic
@@ -580,7 +799,8 @@ class EclipsePPOAgent(nn.Module):
       # mostly by the regression heads.
       if encoder == "spatial":
         self.critic_trunk = SpatialEclipseEncoder(
-            width, depth=max(1, depth), activation=activation, device=device)
+            width, depth=max(1, depth), activation=activation, device=device,
+            channels_last=channels_last, compile_encoder=compile_encoder)
       else:
         self.critic_trunk = self._trunk(in_features, width, depth, norm,
                                         activation)
@@ -593,10 +813,16 @@ class EclipsePPOAgent(nn.Module):
     )
     if factored_actions is None:
       actor_head = layer_init(nn.Linear(width, num_actions), std=0.01)
+    elif spatial_pointer:
+      actor_head = SpatialFactoredActorHead(
+          factored_actions.decode, factored_actions.num_rows, num_actions,
+          width, factored_actions.cell_id,
+          SpatialEclipseEncoder.CELL_FEATURE_CHANNELS)
     else:
       actor_head = FactoredActorHead(
           factored_actions.decode, factored_actions.num_rows, num_actions,
           width)
+    self.spatial_pointer = spatial_pointer
     self.actor = nn.Sequential(self.shared, actor_head)
     # Auxiliary heads hang off the critic trunk (they are terminal-outcome
     # regressions, same job as the value head).
@@ -653,10 +879,29 @@ class EclipsePPOAgent(nn.Module):
     """Auxiliary-head raw outputs keyed by task name."""
     return {name: head(features) for name, head in self.aux_heads.items()}
 
+  def dense_logits(self, x):
+    """(B, num_actions) dense logits -- the eval/argmax entry point.
+
+    ``self.actor`` stays a literal ``nn.Sequential(self.shared, actor_head)``
+    (ppo.py's ``_sparse_supported`` checks that shape), but ``nn.Sequential``
+    only ever chains one tensor, so a spatial pointer term's per-cell features
+    cannot flow through it. This bypasses the Sequential to route ``cells``
+    into the head when both the trunk and the head support it, so eval scores
+    the actual policy being trained rather than a base-only approximation of
+    it; it falls back to plain ``self.actor(x)`` otherwise (flat encoder, no
+    factored head, or --spatial_pointer off).
+    """
+    forward_with_cells = getattr(self.shared, "forward_with_cells", None)
+    head = self.actor[-1]
+    if forward_with_cells is not None and hasattr(head, "cell_id"):
+      features, cells = forward_with_cells(x)
+      return head.forward(features, cells)
+    return self.actor(x)
+
   def get_action_and_value(self, x, legal_actions_mask=None, action=None):
     if legal_actions_mask is None:
       legal_actions_mask = torch.ones((len(x), self.num_actions)).bool()
-    logits = self.actor(x)
+    logits = self.dense_logits(x)
     from open_spiel.python.pytorch.ppo import CategoricalMasked
     probs = CategoricalMasked(logits=logits, masks=legal_actions_mask,
                               mask_value=self.mask_value)
@@ -668,14 +913,18 @@ class EclipsePPOAgent(nn.Module):
 
 def make_agent_fn(width, depth, aux_tasks=("final_vp",), norm=False,
                   activation="tanh", separate_critic=False,
-                  factored_actions=None, encoder="flat"):
+                  factored_actions=None, encoder="flat",
+                  spatial_pointer=False, channels_last=False,
+                  compile_encoder=False):
   def agent_fn(num_actions, observation_shape, device):
     return EclipsePPOAgent(num_actions, observation_shape, device,
                            width=width, depth=depth, aux_tasks=aux_tasks,
                            norm=norm, activation=activation,
                            separate_critic=separate_critic,
                            factored_actions=factored_actions,
-                           encoder=encoder)
+                           encoder=encoder, spatial_pointer=spatial_pointer,
+                           channels_last=channels_last,
+                           compile_encoder=compile_encoder)
 
   return agent_fn
 
@@ -685,9 +934,12 @@ _AUX_TASKS_BY_MODE = {
     "vp": ("final_vp",),
     "rank": ("final_rank",),
     "both": ("final_vp", "final_rank"),
+    "breakdown": (
+        "bd_reputation", "bd_ambassador", "bd_sector", "bd_monolith",
+        "bd_discovery", "bd_tech_track", "bd_traitor", "bd_species",
+        "bd_minor_species"),
     "none": (),
 }
-
 
 def build_aux_targets(mode, vp_scale):
   """(task names, target fn) for ``--aux_target_mode``.
@@ -697,23 +949,44 @@ def build_aux_targets(mode, vp_scale):
   globally, so an aux term far larger than the policy term rescales the policy
   gradient toward zero. Raw-VP targets (the state this replaces) reached
   aux_loss ~8-11 against pg_loss ~1e-3.
+
+  For ``breakdown`` the targets are the 9 per-category VPs read from the
+  terminal *observation* (``terminal_obs``, canonicalised to the acting seat),
+  each already normalized to [0,1] in the tensor -- see ``P_VP_BREAKDOWN``.
+  ``terminal_obs=None`` (used by the pre-run magnitude probe) returns ``None``
+  so the caller leaves those rows unmasked.
   """
   tasks = _AUX_TASKS_BY_MODE[mode]
   if not tasks:
     return None, None
 
-  def target_fn(rvec):
+  def target_fn(rvec, terminal_obs=None, acting_seat=None):
     arr = np.asarray(rvec, dtype=np.float32)
+    num_players = arr.shape[0]
+    if mode == "breakdown":
+      if terminal_obs is None or acting_seat is None:
+        return None
+      cols = []
+      for s in range(num_players):
+        slot = obs_layout.slot_for_seat(s, int(acting_seat), num_players)
+        base = obs_layout.player_block_start(slot) + obs_layout.P_VP_BREAKDOWN
+        cols.append(np.asarray(terminal_obs[base:base + len(tasks)],
+                               dtype=np.float32))
+      return np.stack(cols, axis=0)
     cols = []
     for task in tasks:
       if task == "final_vp":
         cols.append(arr / float(vp_scale))
       else:  # final_rank: bounded in [-0.5, 1] by construction.
         cols.append(np.asarray(
-            [rank_utility(arr, s) for s in range(arr.shape[0])],
+            [rank_utility(arr, s) for s in range(num_players)],
             dtype=np.float32))
     return np.stack(cols, axis=1)
 
+  if mode == "breakdown":
+    # Tag so ``ppo.py`` knows to route the terminal observation through -- a
+    # pre-existing one-arg extractor (e.g. in tests) is otherwise left alone.
+    target_fn.needs_terminal_obs = True
   return list(tasks), target_fn
 
 
@@ -813,6 +1086,18 @@ class EpisodeDiagnostics:
     self.all_seat_vp = collections.deque(maxlen=history)
     self.wipeouts = collections.deque(maxlen=history)
     self._cols = None
+    # Per-VP-category breakdown (the 9 scoring sources, in P_VP_BREAKDOWN
+    # order), harvested from terminal observations at episode closeout. Each
+    # value is already normalized to [0,1] in the tensor. Tracked separately for
+    # the actor's own seat and the all-seats mean, so "how the agent does per
+    # VP source" is observable without an aux head.
+    self.vp_categories = (
+        "reputation", "ambassador", "sector", "monolith", "discovery",
+        "tech_track", "traitor", "species", "minor_species")
+    self.num_vp_categories = len(self.vp_categories)
+    self.actor_cat_vp = collections.deque(maxlen=history)
+    self.all_cat_vp = collections.deque(maxlen=history)
+    self._cat_cols_cache = {}
 
   def _elim_columns(self, seats):
     """(num_players, num_envs) obs column holding each seat's eliminated bit.
@@ -854,6 +1139,42 @@ class EpisodeDiagnostics:
       self.all_seat_vp.append(np.asarray(rewards[i], dtype=np.float32).copy())
       self.elim_round[i] = -1
       self.max_round[i] = 0
+
+  def record_breakdown(self, obs_batch, seats, donor_idx):
+    """Harvest the 9 VP category values for finished episodes.
+
+    ``obs_batch[i]`` is the *terminal* decision-obs of env ``i`` (the acting
+    seat's view, canonicalised so slot 0 is that seat) and ``seats[i]`` is that
+    acting seat's absolute id. Each seat's block is read via ``slot_for_seat``
+    and ``P_VP_BREAKDOWN`` (the identical read ``build_aux_targets`` uses for
+    breakdown mode) -- values are already in [0,1].
+    """
+    for i in donor_idx:
+      i = int(i)
+      viewer = int(seats[i])
+      # The acting seat is slot 0 in its own canonicalised view.
+      actor_base = obs_layout.PLAYERS_START + obs_layout.P_VP_BREAKDOWN
+      self.actor_cat_vp.append(
+          np.asarray(obs_batch[i][actor_base:actor_base
+                                  + self.num_vp_categories], dtype=np.float32))
+      cats = np.zeros(self.num_vp_categories, dtype=np.float32)
+      for s in range(self.num_players):
+        slot = obs_layout.slot_for_seat(s, viewer, self.num_players)
+        base = (obs_layout.PLAYERS_START
+                + slot * obs_layout.PLAYER_SIZE
+                + obs_layout.P_VP_BREAKDOWN)
+        cats += np.asarray(
+            obs_batch[i][base:base + self.num_vp_categories], dtype=np.float32)
+      self.all_cat_vp.append(cats / self.num_players)
+
+  def breakdown_summary(self):
+    """Per-VP-category means: (actor_seat_means, all_seats_means) or (None,
+    None) when nothing recorded."""
+    if not self.actor_cat_vp:
+      return None, None
+    actor = np.stack(self.actor_cat_vp)
+    alls = np.stack(self.all_cat_vp)
+    return actor.mean(axis=0), alls.mean(axis=0)
 
   def summary(self):
     if not self.survivors:
@@ -1286,6 +1607,10 @@ def _save_train_state(agent, roster_dir):
       "updates_done": agent.updates_done,
       "rank_vp_beta": agent.rank_vp_beta,
       "learning_rate": agent.learning_rate,
+      "entropy_coef": agent.entropy_coef,
+      "kl_ema": getattr(agent, "_kl_ema", None),
+      "ent_ema": getattr(agent, "_ent_ema", None),
+      "ent_control_count": getattr(agent, "_ent_control_count", None),
   }, _train_state_path(roster_dir))
 
 
@@ -1305,6 +1630,11 @@ def _load_train_state(agent, roster_dir):
     # Restore the *base* LR so the anneal continues from where it stopped
     # instead of restarting at the full base rate every resume.
     agent.set_learning_rate(float(state["learning_rate"]))
+  if "entropy_coef" in state:
+    agent.entropy_coef = float(state["entropy_coef"])
+  for key in ("_kl_ema", "_ent_ema", "_ent_control_count"):
+    if state.get(key) is not None:
+      setattr(agent, key, state[key])
   return True
 
 
@@ -1328,9 +1658,64 @@ def _write_arch(roster_dir, num_actions, input_shape, aux_tasks):
       "num_actions": int(num_actions),
       "input_shape": list(input_shape),
       "encoder": FLAGS.encoder,
+      "spatial_pointer": bool(FLAGS.spatial_pointer),
   }
   with open(os.path.join(str(roster_dir), "arch.json"), "w") as f:
     json.dump(arch, f, indent=2)
+
+
+def _step_controllers(agent, writer, update, num_updates):
+  """Mutates LR / ent_coef once per update, per --lr_schedule / ent bounds.
+
+  Shared by the async and sync loops so the two can never drift apart. Returns
+  a dict of control scalars for the writer (empty when nothing fired).
+
+  LR is mutually exclusive by schedule: 'kl' uses the closed-loop controller,
+  'anneal' the historical linear decay, 'fixed' leaves it alone. All LR writes
+  go through set_learning_rate so base/param-groups stay aligned. The entropy
+  band is independent and rate-limited to a far longer time constant.
+  """
+  ctrl = {}
+  schedule = FLAGS.lr_schedule
+  if schedule is None:
+    # Default to 'fixed'. This used to default to the closed-loop 'kl'
+    # controller, which meant every run that did not explicitly pass
+    # --lr_schedule silently enabled a controller that has never been validated
+    # on a real run. With the observed approx_kl ~0.003 against --kl_target=0.02
+    # it computes mult = exp(0.85) ~ 2.34 every update and, because
+    # --kl_lr_tau=0.05 barely moves the EMA, saturates --lr_max=1e-2 (40x base)
+    # within ~5 updates. Every run that produced a good policy so far used a
+    # fixed/near-fixed LR, so that is the safe default. Opt in with
+    # --lr_schedule=kl, and watch control/lr for the first 50 updates.
+    schedule = "fixed"
+
+  if schedule == "anneal":
+    agent.anneal_learning_rate(
+        min(agent.updates_done, num_updates - 1), num_updates)
+    ctrl["lr"] = agent.optimizer.param_groups[0]["lr"]
+  elif schedule == "kl":
+    kl = (agent.last_metrics or {}).get("kl")
+    if kl is not None:
+      mult = agent.kl_step_lr(
+          float(kl), FLAGS.kl_target, FLAGS.kl_lr_tau, FLAGS.lr_min,
+          FLAGS.lr_max)
+      ctrl["kl_ema"] = agent._kl_ema
+      ctrl["lr_multiplier"] = mult
+      ctrl["lr"] = agent.optimizer.param_groups[0]["lr"]
+
+  if FLAGS.ent_lo is not None and FLAGS.ent_hi is not None:
+    ent = (agent.last_metrics or {}).get("entropy")
+    if ent is not None:
+      new_coef = agent.entropy_band_step(
+          float(ent), FLAGS.ent_lo, FLAGS.ent_hi, FLAGS.ent_step,
+          FLAGS.ent_control_every)
+      ctrl["ent_coef"] = new_coef
+      ctrl["ent_ema"] = agent._ent_ema
+
+  if writer is not None and ctrl:
+    for name, value in ctrl.items():
+      writer.add_scalar(f"control/{name}", value, agent.total_steps_done)
+  return ctrl
 
 
 def _maybe_snapshot(agent, roster, update, force=False):
@@ -1420,7 +1805,7 @@ def _argmax_over_legal(net, obs_np, legal_rows, legal_cols, idx, device):
   """
   with torch.no_grad():
     x = torch.from_numpy(obs_np[idx]).to(device)
-    logits = net.actor(x)
+    logits = net.dense_logits(x)
     mask = torch.full_like(logits, float("-inf"))
     local = np.full(obs_np.shape[0], -1, dtype=np.int64)
     local[idx] = np.arange(len(idx))
@@ -1556,7 +1941,7 @@ def _eval_squad(agent, roster, agent_fn, num_actions, input_shape, device,
       with torch.no_grad():
         x = torch.from_numpy(np.asarray(obs, dtype=np.float32))[None].to(
             device)
-        logits = net.actor(x)
+        logits = net.dense_logits(x)
         mask = torch.full((1, logits.size(1)), -1e6).to(device)
         mask[0, np.asarray(legal, dtype=np.int64)] = logits[
             0, np.asarray(legal, dtype=np.int64)]
@@ -1595,7 +1980,7 @@ def _eval_fixed_opponent(agent, bot_pick, game_str, num_players, num_games,
         with torch.no_grad():
           x = torch.from_numpy(np.asarray(obs, dtype=np.float32))[None].to(
               agent.device)
-          logits = agent.network.actor(x)
+          logits = agent.network.dense_logits(x)
           mask = torch.full((1, logits.size(1)), -1e6, device=agent.device)
           la = np.asarray(legal, dtype=np.int64)
           mask[0, la] = logits[0, la]
@@ -1719,7 +2104,7 @@ def _eval_head2head(agent, opponent_net, agent_fn, num_actions, input_shape,
       with torch.no_grad():
         x = torch.from_numpy(np.asarray(obs, dtype=np.float32))[None].to(
             device)
-        logits = net.actor(x)
+        logits = net.dense_logits(x)
         mask = torch.full((1, logits.size(1)), -1e6).to(device)
         mask[0, np.asarray(legal, dtype=np.int64)] = logits[
             0, np.asarray(legal, dtype=np.int64)]
@@ -1770,6 +2155,7 @@ def _log_update(agent, episode_returns, recent_returns, writer, update,
     health = (f"  wipeout={dstats['wipeout_rate']:.2f}"
               f"  survivors={dstats['survivors']:.2f}/{agent.num_players}"
               f"  elim_round={dstats['mean_elim_round']:.2f}/8"
+              f"  rounds={dstats['rounds_reached']:.1f}/9"
               f"  vp_all={dstats['vp_all_seats_mean']:.2f}"
               f"  vp_best={dstats['vp_all_seats_max']:.2f}")
   _emit(f"[update {update}] steps={agent.total_steps_done}"
@@ -1786,6 +2172,14 @@ def _log_update(agent, episode_returns, recent_returns, writer, update,
       for key in ("wipeout_rate", "survivors", "mean_elim_round",
                   "rounds_reached", "vp_all_seats_mean", "vp_all_seats_max"):
         writer.add_scalar(f"health/{key}", dstats[key], agent.total_steps_done)
+    if diag is not None:
+      actor_means, all_means = diag.breakdown_summary()
+      if actor_means is not None:
+        for name, am, al in zip(diag.vp_categories, actor_means, all_means):
+          writer.add_scalar(f"vp_breakdown/actor_{name}", float(am),
+                            agent.total_steps_done)
+          writer.add_scalar(f"vp_breakdown/allseats_{name}", float(al),
+                            agent.total_steps_done)
 
 
 def _parse_game_string(game_str):
@@ -1905,11 +2299,14 @@ def main(_):
     # before spending GPU hours: an O(10) target with aux_coef=0.1 crowds the
     # policy gradient out of the global grad-norm clip.
     probe = aux_target_fn(np.array([40.0, 25.0, 10.0, 0.0], dtype=np.float32))
-    biggest = float(np.max(np.abs(probe)))
-    _emit(f"aux_tasks={aux_tasks} target_mode={FLAGS.aux_target_mode} "
-          f"max|target| at 40 VP = {biggest:.3f}")
-    if biggest > 3.0:
-      raise ValueError(
+    # Breakdown targets are normalized to [0,1] in the tensor, so the probe
+    # (which has no terminal obs) is skipped for that mode.
+    if probe is not None:
+      biggest = float(np.max(np.abs(probe)))
+      _emit(f"aux_tasks={aux_tasks} target_mode={FLAGS.aux_target_mode} "
+            f"max|target| at 40 VP = {biggest:.3f}")
+      if biggest > 3.0:
+        raise ValueError(
           f"aux target magnitude {biggest:.2f} is too large to sit next to a "
           f"policy loss of order 1e-2 under a global grad-norm clip; lower "
           f"--aux_coef or raise --aux_vp_scale")
@@ -1940,7 +2337,9 @@ def main(_):
         FLAGS.nn_width, FLAGS.nn_depth, tuple(aux_tasks or ()),
         norm=FLAGS.nn_norm, activation=FLAGS.nn_activation,
         separate_critic=FLAGS.separate_critic, factored_actions=factored,
-        encoder=FLAGS.encoder),
+        encoder=FLAGS.encoder, spatial_pointer=FLAGS.spatial_pointer,
+        channels_last=FLAGS.channels_last,
+        compile_encoder=FLAGS.compile_encoder),
       value_mode=FLAGS.value_mode,
       aux_tasks=aux_tasks,
       aux_target_fn=aux_target_fn,
@@ -1948,6 +2347,7 @@ def main(_):
       rank_vp_beta=(FLAGS.rank_vp_beta if FLAGS.value_mode == "win" else 0.0),
       rank_ce_coef=(FLAGS.rank_ce_coef if FLAGS.value_mode == "win"
                     else 0.0),
+      amp=FLAGS.amp,
   )
 
   # Device + resume telemetry before any training starts.
@@ -1958,7 +2358,9 @@ def main(_):
         FLAGS.nn_width, FLAGS.nn_depth, tuple(aux_tasks or ()),
         norm=FLAGS.nn_norm, activation=FLAGS.nn_activation,
         separate_critic=FLAGS.separate_critic, factored_actions=factored,
-        encoder=FLAGS.encoder)
+        encoder=FLAGS.encoder, spatial_pointer=FLAGS.spatial_pointer,
+        channels_last=FLAGS.channels_last,
+        compile_encoder=FLAGS.compile_encoder)
     resume_src = FLAGS.resume
     sd = None
     # Resolve roster ids ("main", "snap_u100", ...) whenever the roster dir
@@ -2030,7 +2432,9 @@ def main(_):
         FLAGS.nn_width, FLAGS.nn_depth, tuple(aux_tasks or ()),
         norm=FLAGS.nn_norm, activation=FLAGS.nn_activation,
         separate_critic=FLAGS.separate_critic, factored_actions=factored,
-        encoder=FLAGS.encoder)
+        encoder=FLAGS.encoder, spatial_pointer=FLAGS.spatial_pointer,
+        channels_last=FLAGS.channels_last,
+        compile_encoder=FLAGS.compile_encoder)
   num_actions = game.num_distinct_actions()
   roster = None
   matchmaker = None
@@ -2162,6 +2566,7 @@ def main(_):
         donor_idx = np.flatnonzero(step_arrays.dones)
         if donor_idx.size:
           diag.close_episodes(donor_idx, step_arrays.rewards)
+          diag.record_breakdown(obs_batch, agent.last_seats, donor_idx)
         for i in donor_idx:
           ret = float(step_arrays.rewards[i][0])
           episode_returns[i].append(ret)
@@ -2174,13 +2579,7 @@ def main(_):
           _tm[3] += t2b - t2
           _tm[4] += t3 - t2b
       agent.learn_np(step_arrays.obs, step_arrays.seats)
-      if FLAGS.anneal_lr:
-        # Drive the anneal off the agent's own counter: it is restored on
-        # resume, so a continued run keeps decaying from where it stopped
-        # instead of restarting at the base rate from the local loop counter.
-        # Clamp below num_updates so anneal never hits its frac<=0 guard.
-        agent.anneal_learning_rate(
-            min(agent.updates_done, num_updates - 1), num_updates)
+      _step_controllers(agent, writer, update, num_updates)
       if FLAGS.rank_vp_beta_anneal_to >= 0.0:
         agent.anneal_rank_vp_beta(agent.updates_done, num_updates,
                                   FLAGS.rank_vp_beta_anneal_to)
@@ -2291,6 +2690,7 @@ def main(_):
         if finished:
           diag.close_episodes(
               finished, {i: unreset[i].rewards for i in finished})
+          diag.record_breakdown(obs_batch, agent.last_seats, finished)
         for i in finished:
           ret = float(unreset[i].rewards[0])
           episode_returns[i].append(ret)
@@ -2298,9 +2698,7 @@ def main(_):
 
       agent.learn(time_step)
 
-      if FLAGS.anneal_lr:
-        agent.anneal_learning_rate(
-            min(agent.updates_done, num_updates - 1), num_updates)
+      _step_controllers(agent, writer, update, num_updates)
       if FLAGS.rank_vp_beta_anneal_to >= 0.0:
         agent.anneal_rank_vp_beta(agent.updates_done, num_updates,
                                   FLAGS.rank_vp_beta_anneal_to)

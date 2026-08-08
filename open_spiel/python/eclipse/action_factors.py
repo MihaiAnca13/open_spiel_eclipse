@@ -41,6 +41,8 @@ import re
 
 import numpy as np
 
+from open_spiel.python.eclipse import obs_layout
+
 # Every action gets exactly this many embedding slots. The widest family is
 # COLONY_SHIP: family + cell + slot + track. Unused slots point at a per-family
 # "absent" row, which is constant within a family and therefore acts as a family
@@ -74,13 +76,20 @@ class ActionFactorization:
     num_rows: number of embedding rows required.
     families: per-action family name (for reporting).
     stats: dict of family -> action count.
+    cell_id: (num_actions,) int64 array. The linear ``obs_layout.hex_to_index``
+      board cell an action targets, or -1 if the action string carries no
+      board coordinate (e.g. upgrade, move_unit/move_warp). Lets a spatial
+      actor head look up the per-cell conv feature for a cell-targeting
+      action; ``decode``'s cell slot is a row index into the shared factor
+      table and is NOT usable as a spatial index.
   """
 
-  def __init__(self, decode, num_rows, families, stats):
+  def __init__(self, decode, num_rows, families, stats, cell_id):
     self.decode = decode
     self.num_rows = num_rows
     self.families = families
     self.stats = stats
+    self.cell_id = cell_id
 
   def summary(self):
     factored = sum(n for f, n in self.stats.items() if f != "atom")
@@ -109,6 +118,7 @@ def build_action_factorization(action_strings):
     return rows[key]
 
   decode = np.zeros((num_actions, NUM_SLOTS), dtype=np.int64)
+  cell_id = np.full(num_actions, -1, dtype=np.int64)
   families = []
   stats = {}
   for action in range(num_actions):
@@ -130,6 +140,10 @@ def build_action_factorization(action_strings):
     else:
       slots = [row_of("family", family)]
       slots += [row_of(f, v) for f, v in values]
+      for f, v in values:
+        if f == "cell":
+          q, r = v.split("_")
+          cell_id[action] = obs_layout.hex_to_index(int(q), int(r))
     absent = row_of("absent", family)
     slots += [absent] * (NUM_SLOTS - len(slots))
     if len(slots) != NUM_SLOTS:
@@ -138,7 +152,7 @@ def build_action_factorization(action_strings):
     decode[action] = slots
     families.append(family)
     stats[family] = stats.get(family, 0) + 1
-  return ActionFactorization(decode, len(rows), families, stats)
+  return ActionFactorization(decode, len(rows), families, stats, cell_id)
 
 
 def factorization_from_game(game, player=0):

@@ -132,7 +132,9 @@ def main():
 
   print(f"\nnetwork params: {network_size_cpu / 1e6:.2f} M")
 
-  # Save machine-readable results for the STAGE0_RESULTS summary.
+  # Save machine-readable results alongside this script (the old
+  # STAGE0_RESULTS.md summary was deleted -- its numbers were for the
+  # 1,785-float observation and the obsolete dense MLP).
   out_dir = os.path.dirname(os.path.abspath(__file__))
   with open(out_dir + "/stage0_forward_results.txt", "w") as f:
     for num_envs, (cpu_ms, gpu_ms, speedup, per_env_us) in rows.items():
