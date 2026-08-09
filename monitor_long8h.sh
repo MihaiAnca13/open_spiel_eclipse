@@ -1,28 +1,25 @@
 #!/usr/bin/env bash
-# One monitoring tick for the long_v2 run. Prints a compact status block.
-# Safe to call repeatedly; read-only, touches nothing.
+# One monitoring tick for the long8h run. Prints a compact status block.
+# Read-only; safe to call repeatedly.
 set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$REPO_ROOT"
-DIR="${1:-runs/long_v2}"
+DIR="${1:-runs/long8h}"
 
 echo "### tick $(date +%F' '%H:%M:%S)"
-
 if pgrep -f "roster_dir=$DIR" > /dev/null; then
   echo "state: RUNNING"
 else
   echo "state: NOT RUNNING"
 fi
-
 echo "gpu: $(nvidia-smi --query-gpu=memory.used,utilization.gpu --format=csv,noheader 2>/dev/null)"
 echo "oom_lines: $(grep -c 'OutOfMemoryError' "$DIR/train.log" 2>/dev/null | head -1)"
 echo "progress: $(tr '\r' '\n' < "$DIR/train.log" 2>/dev/null | grep -oE '[0-9]+/1000000000' | tail -1) steps"
+echo "sps: $(tr '\r' '\n' < "$DIR/train.log" 2>/dev/null | grep -oE '[0-9.]+envstep/s' | tail -1)"
 echo "snapshots: $(ls "$DIR"/snap_u*.pt 2>/dev/null | wc -l)"
 
-# Learning-health scalars straight from tfevents (the console log is block-buffered,
-# so tfevents are the live source).
 .venv/bin/python - "$DIR" <<'PY' 2>/dev/null
-import glob, sys
+import glob, sys, os
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 d = sys.argv[1]
 fs = sorted(glob.glob(f"{d}/events*"))
@@ -39,14 +36,8 @@ for t, label in [("losses/entropy","entropy"), ("losses/approx_kl","kl"),
     s = series(t)
     if s: out.append(f"{label}={s[-1]:.4f}")
 print("scalars: " + "  ".join(out))
-# Plateau hint: compare the mean of the last 20% of episode-return points with the
-# 20% before it. This is a HINT ONLY -- return is not strength, the ladder is.
-r = series("charts/mean_episode_return")
-if len(r) >= 10:
-    n = len(r) // 5
-    prev, last = r[-2*n:-n], r[-n:]
-    pm, lm = sum(prev)/len(prev), sum(last)/len(last)
-    print(f"return_trend: prev={pm:.3f} last={lm:.3f} delta={lm-pm:+.3f} "
-          f"(HINT ONLY - judge strength with the ladder, never with return)")
 PY
 echo
+# Wall-clock sanity: steps / elapsed seconds since run start.
+ACT=$(date +%s); START=$(stat -c %Y "$DIR/train.log" 2>/dev/null || echo "$ACT")
+echo "elapsed_sec: $((ACT - START))"

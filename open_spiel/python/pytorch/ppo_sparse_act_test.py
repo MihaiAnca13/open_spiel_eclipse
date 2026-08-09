@@ -94,6 +94,34 @@ class SparseActParityTest(absltest.TestCase):
     self.assertTrue(np.allclose(value.numpy(), d_value.detach().numpy(), atol=1e-5),
                     f"value mismatch\n{value.numpy()}\n{d_value.detach().numpy()}")
 
+  def test_sparse_empty_legal_row_does_not_oob(self):
+    """A row with no legal entries must not leak the num_actions sentinel into
+    the gather kernel (an OOB device-side assert that killed a long run)."""
+    rng = np.random.RandomState(11)
+    agent = self._make_agent()
+    obs = torch.from_numpy(rng.randn(BATCH, OBS_SIZE).astype(np.float32))
+    # Rows 0..BATCH-2 have legal actions; the LAST row has none.
+    rows = []
+    cols = []
+    for i in range(BATCH - 1):
+      n = int(rng.randint(1, 12))
+      c = rng.choice(NUM_ACTIONS, size=n, replace=False)
+      rows.append(np.full(n, i, dtype=np.int64))
+      cols.append(c.astype(np.int64))
+    mask_rows = np.concatenate(rows)
+    mask_cols = np.concatenate(cols)
+    seats = np.tile(np.array([0, 1]), BATCH // 2)
+
+    # Must not throw: the empty row keeps the sentinel which is clamped to a
+    # valid index so the head_logits gather stays in bounds.
+    action, logprob, entropy, _ = agent._act_sparse(  # pylint: disable=protected-access
+        obs, mask_rows, mask_cols, seats)
+    self.assertTrue(bool((action < NUM_ACTIONS).all()))
+    # Every non-empty row still samples a legal action.
+    for i in range(BATCH - 1):
+      legal = set(mask_cols[mask_rows == i])
+      self.assertIn(int(action[i]), legal)
+
   def test_sparse_sample_distribution_matches_dense(self):
     """Empirical sampling distribution matches the dense masked categorical."""
     rng = np.random.RandomState(7)

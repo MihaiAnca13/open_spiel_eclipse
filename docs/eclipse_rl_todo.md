@@ -13,15 +13,14 @@ worth keeping" below for what's still true from it).
 ## Current state — read this first
 
 Items 0-5 below are all DONE and the observation/encoder/ladder/controller infrastructure all
-works. **The training run is plateaued anyway**, and this session found the actual root cause:
-the policy is architecturally board-blind (see below). This supersedes Item 5's conclusion that
-fixing the observation tensor "removed the binding constraint" — it removed *an* information
-constraint, but the encoder built on top throws most of that information away before it reaches
-the actor. That is the live problem. **the active next work is Item 7, the pointer/attention
-head, which routes every cell-indexed action to its own hex's conv features instead of
-average-pooling them away.** Item 6 (play-time MCTS + UI opponent) is explicitly **out of
-scope** for this cycle and stays gated behind Items 7 and 8; do not pick it up without checking
-with the user first and without Items 7+8 being complete.
+works, and the training plateau is ladder-confirmed. **The active direction has shifted
+(2026-08-08) from architecture to throughput/stability.** The spatial pointer head (Item 7)
+was a null result on the ladder; the live problems are (a) a crash bug that killed the 12h
+`long_v2` run at 47M steps, (b) redundant encoder compute on the act path, (c) verdict evals
+eating 71% of wall-clock, and (d) the GPU rollout buffer capping parallel envs at 128 and
+blocking the hide-and-seek batch-size test. See "long_v2 result (2026-08-08)" below; work is
+tracked in `docs/eclipse_rl_plan.md`. Item 6 (play-time MCTS + UI opponent) is explicitly
+**out of scope** this cycle; do not pick it up without checking with the user first.
 
 ---
 
@@ -302,6 +301,46 @@ far larger than 16,384 timesteps, and **that cannot be reached on this machine**
 (a) run big-batch experiments on a GPU cluster; (b) move the rollout buffer to CPU or store
 it fp16, which would free ~1.5 GiB and is a code change, not a flag. This box is best used
 for fast small-rollout iteration.
+
+## long_v2 result (2026-08-08) — run CRASHED; new root-cause bugs found
+
+`run_long_v2.sh` (12h target, baseline config + `--ent_coef=0.05` + `--gamma=0.998`
++ `--amp --compile_encoder`) reached **47.4M steps then crashed** with a CUDA
+device-side gather-OOB assert in `_act_sparse` → `value_from_obs` (traceback at
+`runs/long_v2/train.log:8324`, `ppo.py:1432`). It did **not** answer the
+"where does the plateau sit at 10x steps" question — the ladder was never run.
+
+Verified root cause (this session), two independent bugs, both in the sparse path:
+
+1. **The `chosen` sentinel OOB gather — the proximate crash.** `_gumbel_sample`
+   (`ppo.py:1364`) initializes `chosen` to the sentinel `num_actions` (11117). A
+   row whose legal segment is empty or whose logits are NaN never overwrites it,
+   then `_log_prob_chosen` (`ppo.py:1378`) → `head_logits` (`ppo.py:277`) does
+   `head.bias[chosen]` → gather index out of bounds. The empty-legal-row condition
+   is exactly what is guarded elsewhere (`ppo.py:1340-1348`) but was missed for
+   `chosen`. It surfaces asynchronously at the next CUDA call, so it looked like a
+   `value_from_obs` crash. **Every long run eventually hits this; fix before running.**
+2. **Redundant encoder recompute on the hot act path.** `_act_sparse` runs the
+   spatial encoder once for actor features (`shared_and_cells`, `ppo.py:1419`) then
+   **again** inside `value_from_obs` (`ppo.py:1432`). With `separate_critic=False`,
+   `critic_trunk is shared`, so the conv tower runs twice per decision. Use
+   `value_from_features` when the critic shares the trunk — halves act-path encoder cost.
+
+**Verdict evals ate 71% of wall-clock** (measured at 7.75h / 47.4M steps): `charts/SPS`
+reads 5855 but that is per-update (16,384/2.80s); real wall-clock average is ~1700
+steps/s because `--verdict_every_sec=1800` pauses ~27 min every 30 min for 12 verdict
+games vs the saturated Greedy. `final_steps/elapsed_seconds` is the true rate, never
+the logged SPS. Future runs: raise `--verdict_every_sec` (7200+) and/or cut
+`--eval_games`/`--eval_envs`.
+
+**"Tens of thousands of parallel games" is VRAM-bound, not stepper-bound.** The engine
+is already C++ bound via pybind11; env stepping is ~24% of step time. The real cap is
+the GPU rollout obs buffer (`self.obs`, `ppo.py:414`): 128 x 128 x 24714 fp32 = 1.51
+GiB parked on VRAM, and 1k envs would need ~11.8 GiB of obs alone before any compute.
+The obs also doesn't need to be on the GPU at all (the learn loop only touches one
+minibatch at a time). Fix: move the rollout buffer off-GPU / fp16 and stream
+minibatches; that is what lifts 128 → 512+ envs on this 12 GiB box, and is the
+prerequisite for testing the hide-and-seek batch-size floor.
 
 ## How to resume
 

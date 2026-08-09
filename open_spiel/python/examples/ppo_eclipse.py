@@ -401,9 +401,13 @@ flags.DEFINE_bool(
     "At the eval cadence, pit main against a snapshots-only eval squad and "
     "report win rate / avg rank (no heuristics in v1).")
 flags.DEFINE_integer(
-    "verdict_every_sec", 1800,
+    "verdict_every_sec", 7200,
     "Minimum wall-clock gap (seconds) between full verdict evals (main "
-    "seats 0,1 vs fixed Random / fixed Greedy / snapshot squad).")
+    "seats 0,1 vs fixed Random / fixed Greedy / snapshot squad). Default 7200 "
+    "(2h). The verdict is measured against Greedy, which is a saturated and "
+    "worthless strength signal (the ladder is the judge), and each eval pauses "
+    "training ~27 min at 128 envs -- a 1800s default let evals eat 71% of "
+    "wall-clock on a 12h run. Override down only to debug.")
 flags.DEFINE_integer(
     "max_seconds", 0,
     "Hard wall-clock cap (seconds) for fail-fast runs: at this deadline emit "
@@ -791,6 +795,11 @@ class EclipsePPOAgent(nn.Module):
     else:
       self.shared = self._trunk(in_features, width, depth, norm, activation)
     self.separate_critic = separate_critic
+    # When the critic shares the actor trunk, the sparse paths can read the
+    # value straight off the features they already computed (shared_and_cells)
+    # instead of re-running the whole conv encoder a second time via
+    # value_from_obs. This flag tells ppo.py to prefer value_from_features.
+    self.value_from_actor_features = not separate_critic
 
     if separate_critic:
       # An independent trunk for the value/aux objectives. With a shared trunk

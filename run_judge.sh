@@ -67,7 +67,8 @@ pick "$TRIM/baseline" runs/roster
 DIRS="$TRIM/baseline"
 # Every arm dir that has a finished main.pt joins the same tournament.
 for src in runs/exp1_combined runs/exp1_pointer \
-           runs/w3_sep runs/w3_ent runs/w3_fact runs/w3_ptr runs/w3_wide; do
+           runs/w3_sep runs/w3_ent runs/w3_fact runs/w3_ptr runs/w3_wide \
+           runs/long8h; do
   [ -f "$src/main.pt" ] || continue
   tag="$(basename "$src")"
   pick "$TRIM/$tag" "$src"

@@ -411,8 +411,13 @@ class PPO(nn.Module):
     self.legal_actions_mask = torch.zeros(
         (mask_steps, self.num_envs, self.num_actions),
         dtype=torch.bool).to(device)
+    # Obs rollout storage lives on CPU (not device). The GPU only ever sees one
+    # minibatch's obs at a time during learning (see _learn_core), so the full
+    # (steps, envs, obs) history stops consuming VRAM that scales 1:1 with
+    # num_envs. This is what lifts the 128-env cap on a 12 GiB card and what
+    # lets a bigger batch (hide-and-seek's batch-size floor) be reached here.
     self.obs = torch.zeros((self.steps_per_batch, self.num_envs) +
-                           self.input_shape).to(device)
+                           self.input_shape)
     self.actions = torch.zeros((self.steps_per_batch, self.num_envs)).to(device)
     self.logprobs = torch.zeros(
         (self.steps_per_batch, self.num_envs)).to(device)
@@ -769,7 +774,10 @@ class PPO(nn.Module):
           dtype=torch.bool)
       self.trainable_cpu[row] = trainable_row
       self.trainable[row] = trainable_row.to(self.device)
-      self.obs[row] = obs
+      # Store the CPU-side obs (obs_cpu is the shared-memory numpy array) into
+      # the CPU rollout buffer -- no GPU round-trip. self.obs is CPU on purpose;
+      # see the allocation comment: only minibatches touch the GPU during learn.
+      self.obs[row] = torch.from_numpy(obs_cpu)
       self.actions[row] = action
       self.logprobs[row] = logprob
       self.values[row] = value.flatten()
@@ -1361,6 +1369,9 @@ class PPO(nn.Module):
     mx = torch.full((batch_size,), float("-inf"), device=self.device)
     mx.scatter_reduce_(0, rows, u, reduce="amax", include_self=False)
     maxima = (u == mx[rows])
+    # Sentinel num_actions marks a row with an empty legal segment or NaN logits
+    # (the bookkeeping slip documented at _segment_lse_entropy). Clamped below to
+    # a valid index so the gather can never OOB; healthy rows keep a real col.
     chosen = torch.full((batch_size,), self.num_actions, dtype=torch.long,
                         device=self.device)
     mrows = rows[maxima]
@@ -1369,7 +1380,11 @@ class PPO(nn.Module):
       # 'amin' over the (measure-zero) tied maxima columns; include_self=False
       # so healthy rows get exactly one valid col.
       chosen.scatter_reduce_(0, mrows, mcols, reduce="amin", include_self=False)
-    return chosen
+    # Map any surviving sentinel to a valid action id. A degenerate row's logprob
+    # is discarded by the same zero-guard _segment_lse_entropy applies to lse, so
+    # this keeps the downstream gather in bounds without changing healthy rows at
+    # all (their chosen is already < num_actions).
+    return chosen.clamp(max=self.num_actions - 1)
 
   def _log_prob_chosen(self, features, cells, chosen, lse, head):
     """(B,) log_prob of ``chosen`` under the masked distribution with known
@@ -1428,7 +1443,12 @@ class PPO(nn.Module):
       chosen = self._gumbel_sample(logits_e, rows, cols, n)
       lse, ent = self._segment_lse_entropy(logits_e, rows, n)
       lp = self._log_prob_chosen(features, cells, chosen, lse, net.actor[-1])
-      if hasattr(net, "value_from_obs"):
+      if getattr(net, "value_from_actor_features", False):
+        # Critic shares the actor trunk: features are already computed, so read
+        # the value from them instead of re-running the whole encoder via
+        # value_from_obs (a ~2x encoder cost on the hot act path).
+        v = net.value_from_features(features).view(-1)
+      elif hasattr(net, "value_from_obs"):
         v = net.value_from_obs(obs[idx]).view(-1)
       elif hasattr(net, "value_from_features"):
         v = net.value_from_features(features).view(-1)
@@ -1490,8 +1510,10 @@ class PPO(nn.Module):
     # with no bootstrapping.
     n_extra = len(self._extra_samples)
     if n_extra:
-      ex_obs = torch.Tensor(np.array([e[2] for e in self._extra_samples])
-                           ).to(self.device)
+      # ex_obs stays on CPU (default) so b_obs keeps one dtype/device through
+      # the concat -- self.obs is a CPU rollout buffer; minibatches move to GPU
+      # inside the minibatch loop only.
+      ex_obs = torch.Tensor(np.array([e[2] for e in self._extra_samples]))
       ex_actions = torch.tensor([e[4]
                                  for e in self._extra_samples]).to(self.device)
       ex_logprobs = torch.tensor([e[5]
@@ -1624,17 +1646,25 @@ class PPO(nn.Module):
       for start in range(0, batch_size, minibatch_size):
         end = start + minibatch_size
         mb_inds = b_inds[start:end]
+        # Stream one minibatch's obs to the GPU at a time: b_obs is a CPU
+        # rollout buffer (self.obs is CPU, see the allocation comment), so only
+        # MB rows touch device memory per update, keeping VRAM bounded and
+        # decoupling the env count from the 12 GiB card's capacity.
+        mb_obs = b_obs[mb_inds].to(self.device)
 
         with torch.autocast(device_type=amp_device_type, dtype=torch.bfloat16,
                             enabled=self.amp):
           if use_sparse:
             # Slice the packed legal entries for this minibatch (vectorized via
             # the per-sample cumulative offsets).
-            features, cells = shared_and_cells(self.network, b_obs[mb_inds])
+            features, cells = shared_and_cells(self.network, mb_obs)
             # A network with its own critic trunk must not have its value read off
-            # the *actor* features; value_from_obs runs the right trunk.
-            if hasattr(self.network, "value_from_obs"):
-              newvalue = self.network.value_from_obs(b_obs[mb_inds])
+            # the *actor* features; value_from_obs runs the right trunk. When the
+            # critic shares the actor trunk, reuse the already-computed features.
+            if getattr(self.network, "value_from_actor_features", False):
+              newvalue = self._value_from_features(features)
+            elif hasattr(self.network, "value_from_obs"):
+              newvalue = self.network.value_from_obs(mb_obs)
             else:
               newvalue = self._value_from_features(features)
             cnt_mb = sparse_counts[mb_inds].astype(np.int64)
@@ -1650,12 +1680,12 @@ class PPO(nn.Module):
                   b_actions.long()[mb_inds], self.network.actor[-1])
             else:
               # Degenerate empty minibatch: uniform, zero-entropy losses.
-              b = b_obs[mb_inds].shape[0]
+              b = mb_obs.shape[0]
               logprob = torch.zeros(b, device=self.device)
               entropy = torch.zeros(b, device=self.device)
           else:
             _, newlogprob, entropy, newvalue, _ = self.get_action_and_value(
-                b_obs[mb_inds],
+                mb_obs,
                 legal_actions_mask=b_legal_actions_mask[mb_inds],
                 action=b_actions.long()[mb_inds])
             logprob = newlogprob
@@ -1721,7 +1751,7 @@ class PPO(nn.Module):
                     "trained.")
           if self.num_aux and features is not None:
             if hasattr(self.network, "aux_from_obs"):
-              pred = self.network.aux_from_obs(b_obs[mb_inds])
+              pred = self.network.aux_from_obs(mb_obs)
             else:
               pred = self.network.get_aux(features)
             tgt = b_aux[mb_inds]
@@ -1743,7 +1773,7 @@ class PPO(nn.Module):
           if self.rank_ce_coef and hasattr(self.network, "rank_logits_from_obs"):
             msk = b_rank_mask[mb_inds]
             if float(msk.sum()) > 0:
-              logits_r = self.network.rank_logits_from_obs(b_obs[mb_inds])
+              logits_r = self.network.rank_logits_from_obs(mb_obs)
               per_row = nn.functional.cross_entropy(
                   logits_r, b_ranks[mb_inds], reduction="none")
               rank_ce = (per_row * msk).sum() / msk.sum()
