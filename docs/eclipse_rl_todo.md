@@ -794,6 +794,84 @@ which play-time search never re-resolves.
 - Separate small issue: `broadcast_lobby` (`api/main.py:340-350`) sends the full state to every
   websocket client — an information leak for human-vs-human play in the UI.
 
+### 6b. Actor-only MCTS plan (design agreed 2026-08-10) — build later, this is the notes to pick up
+
+> **Decision made with the user (2026-08-10):** use **vanilla MCTS with an actor-ONLY evaluator**
+> (no critic as leaf evaluator) for live UI play. Rejected using the shared-trunk `win` critic as
+> the leaf value. Rationale recorded below.
+>
+> **The incumbent config was never a proven winner, it is just what was always run.** No ladder
+> ever varied `--value_mode` — every run used the default `"win"` (`ppo_eclipse.py:259`). And
+> `separate_critic=False` is the baseline default, not a tested best: when `--separate_critic` was
+> tested in isolation it scored BELOW baseline (`w3_sep:main` 0.9609 vs `baseline:main` 1.0288,
+> wave3 ladder). The actual winner was `--ent_coef=0.05` alone (`w3_ent:main` 1.1071) — a
+> training-time exploration knob, irrelevant at MCTS inference. Wave-3 lesson (todo:224-225 "do not
+> infer strength from mean_episode_return / VP proxies") reinforces that value/util signals are
+> decoupled from real strength, so handing MCTS the shared-trunk `win` critic as a ranker is an
+> untested-calibration risk. Hence: **actor-only for now.**
+
+**Building blocks (all already in repo — no MCTS from scratch):**
+- `open_spiel/python/algorithms/async_mcts.py` — `MCTSBot` (line 362) with built-in
+  `ThreadPoolExecutor` parallel leaf eval, `virtual_loss`, `batch_size`, `timeout`. Expects an
+  `Evaluator` with **`prior_and_value(state) -> (prior_list, values_ndarray)`** (lines 181-185).
+  This gives thread-parallel rollouts + virtual-loss for free, and solves the "can we parallelize
+  the UCB-seq rollouts" question: keep selection sequential, batch the per-leaf evaluations.
+- `EclipsePPOAgent.dense_logits(x)` (`ppo_eclipse.py:891`) — the (B, num_actions) eval/argmax
+  entry point; routes through `SpatialFactoredActorHead` for spatial/factored configs (else plain
+  `self.actor`). Relation to `get_action_and_value` (line 910): that does
+  `CategoricalMasked(...).sample()`; single-state rollout just needs `dense_logits` + mask.
+- Raw-state obs: `state.observation_tensor()` (template `alpha_zero/evaluator.py:61`) →
+  `np.float32` → `[None]` → `.to(device)` → `dense_logits` (pattern `ppo_eclipse.py:2108-2121`).
+- Chance nodes: real explicit `chance_outcomes()` in Eclipse (`eclipse.cc:1602-1653`); evaluator
+  returns `state.chance_outcomes()` as prior for chance nodes.
+- Existing UI targets (todo:787-791): `apps/eclipse_ui/run.sh:12` PYTHONPATH bug,
+  `api/main.py:300` (`random.choice(legal)`), `api/open_spiel_bridge.py` (dead-code helpers),
+  pyspiel import in `api/main.py`.
+
+**New code (minimal) — `ActorRolloutEvaluator(Evaluator)`** in `ppo_eclipse.py`:
+- `prior_and_value(state)`:
+  - chance node → `prior = state.chance_outcomes()`
+  - else → `prior` = actor softmax over legal actions (this feeds UCT's `+c*prior*sqrt(...)`
+    term, i.e. what makes search policy-guided); `value` = `_actor_rollout(state.clone())`.
+- `_actor_rollout(state)` — full playout to terminal using the actor ONLY (no critic anywhere);
+  at chance nodes sample `chance_outcomes()`; return `np.array(state.returns())`.
+- Build `async_mcts.MCTSBot(game, uct_c, max_simulations, evaluator, batch_size, virtual_loss,
+  timeout)`; feed `step(state)` into `_autoplay_ai` (main.py:279/300) using
+  `pyspiel.deserialize_state` on the lobby blob.
+
+**OPEN QUESTIONS to settle at build time:**
+1. **Obs equivalence — RESOLVED, not a risk.** `dense_logits` was trained on `info_state`
+   (`time_step.observations["info_state"]`), but with `ObservationType.OBSERVATION` (forced at all
+   env sites, ppo_eclipse.py:1852/1940/1981/2104/2274) the dict key `"info_state"` actually holds
+   `_state.observation_tensor(player_id)` (rl_environment.py:316-318) — the key name is a fixed
+   misnomer in OpenSpiel. Eclipse `provides_observation_tensor=true`,
+   `provides_information_state_tensor=false` (eclipse.cc:204-206), pure perfect-info. So training
+   `info_state` and MCTS `state.observation_tensor()` are the SAME array. Phase 0: one-line assert
+   `obs == info_state` to confirm, do not treat as a design risk.
+2. **GIL/GPU contention in the thread pool.** Option A runs each rollout step's 64-wide MLP
+   forward from worker threads → GIL-serialized for the model. Real win from `batch_size` threads
+   is likely overlapping the C++ engine's `apply_action` (which releases the GIL). Start
+   `batch_size` modest (4-8), measure single-thread vs threaded.
+3. **Rollout depth / budget.** Eclipse runs to round 7-8 (hundreds of moves); full playout per
+   leaf × `max_simulations` is the dominant cost. `async_mcts.MCTSBot` `timeout` (default 5.0s)
+   bounds total search — matches the "few seconds/move" budget. Pick `max_simulations` + `timeout`
+   + `uct_c`, confirm it holds at 1 game / 1 AI seat.
+4. **Chance-node `value` in the `prior_and_value` contract.** async_mcts calls `prior_and_value`
+   once per leaf; for a chance leaf we must still return a value. Confirm the async tree-policy
+   deepens through chance nodes (as vanilla mcts.py:349-356 does) or return weighted expectation.
+
+**Phased execution:**
+- **Phase 0 — correctness gate (before UI wiring):** standalone script: build
+  `ActorRolloutEvaluator`, run `async_mcts.MCTSBot` on an all-AI headless game from
+  `runs/roster/main.pt`; verify legal full games, `obs==info_state`, and beats random + beats own
+  greedy argmax in a small match.
+- **Phase 1 — perf:** measure sims/s single-threaded vs `batch_size ∈ {1,4,8}`; tune
+  `max_simulations`/`timeout`/`uct_c` to the budget.
+- **Phase 2 — UI wiring (todo Item 6):** fix run.sh PYTHONPATH, import pyspiel, deserialize blob,
+  swap `_autoplay_ai`, rebuild both `.so` targets.
+- **GATE — Item 8 (the ~22% blind-action engine bug, todo:883) must be 100% first.** A blind
+  action inside a rollout corrupts the search. Do not wire UI until this lands.
+
 ### 7. Pointer/attention head — the board-blindness fix (IMPLEMENTED + VERIFIED 2026-08-07, not yet trained)
 
 > **Status: landed behind `--spatial_pointer` (default off). Not yet validated on the ladder —

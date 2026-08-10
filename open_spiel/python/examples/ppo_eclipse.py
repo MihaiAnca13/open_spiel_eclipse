@@ -362,10 +362,11 @@ flags.DEFINE_bool(
     "global-average-pooled trunk feature otherwise never sees). Requires "
     "--encoder=spatial and --factored_actions.")
 flags.DEFINE_bool(
-    "amp", False,
+    "amp", True,
     "bf16 autocast (torch.autocast) around the PPO learn-path minibatch "
     "forward+loss only -- never the rollout/act path. See PPO.__init__'s "
-    "`amp` docstring for why. No-op (bit-identical) when off.")
+    "`amp` docstring for why. On by default since the 8h long run promoted "
+    "the 1.57x wall-clock throughput win; pass --noamp to disable.")
 flags.DEFINE_bool(
     "channels_last", False,
     "Run SpatialEclipseEncoder's conv tower in channels_last memory format. "
@@ -374,7 +375,7 @@ flags.DEFINE_bool(
     "14.44ms channels_last, fwd only, 4096 rows); this makes that copy "
     "explicit and cheaper. No-op (bit-identical) when off.")
 flags.DEFINE_bool(
-    "compile_encoder", False,
+    "compile_encoder", True,
     "torch.compile SpatialEclipseEncoder._encode. Falls back to eager with a "
     "warning if compilation fails. No-op when off or --encoder=flat.")
 
