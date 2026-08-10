@@ -1312,7 +1312,7 @@ bool StepCombat(::State& state) {
             for (int q = -GALAXY_RADIUS; q <= GALAXY_RADIUS; ++q) {
                 for (int r = -GALAXY_RADIUS; r <= GALAXY_RADIUS; ++r) {
                     if (!in_galaxy_bounds(q, r)) continue;
-                    const Sector& s = state.galaxy.at(q, r);
+                    Sector& s = state.galaxy.at(q, r);
                     if (s.sector_id == 0) continue;
                     if (!s.discovery_tile_present) continue;
                     for (uint8_t p = 0; p < state.players.size(); ++p) {
@@ -1320,6 +1320,7 @@ bool StepCombat(::State& state) {
                             if (u.sector_id == s.sector_id && u.player_id == p) {
                                 cs.discovery_decision_sector = s.sector_id;
                                 cs.discovery_decision_player = p;
+                                RevealDiscovery(state, s);
                                 return true;
                             }
                         }

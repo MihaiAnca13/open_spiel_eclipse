@@ -222,6 +222,12 @@ struct State {
 
     // Discovery tile bag
     FixedVector<DiscoveryBit, 40> discovery_bag;
+    // Public knowledge of discovery tiles. `current_revealed_discovery` is set
+    // before a reward-versus-VP decision; the histogram remembers discoveries
+    // that have subsequently left the board. Face-down sector identities stay
+    // private in Sector::discovery_tile.
+    std::array<uint8_t, 30> revealed_discovery_counts{};
+    DiscoveryBit current_revealed_discovery = DiscoveryBit::NONE;
 
     // Turn tracking and passing queue
     uint8_t current_player = 255;
@@ -308,6 +314,28 @@ struct State {
     std::array<uint8_t, GALAXY_CELL_COUNT * 6> warp_link_dest_dir{};
 };
 
+// Reveal through this single path so a tile is counted once regardless of
+// whether its decision came from Explore or Combat.
+inline DiscoveryBit RevealDiscovery(State& state, Sector& sector) {
+    if (state.current_revealed_discovery != DiscoveryBit::NONE) {
+        return state.current_revealed_discovery;
+    }
+    DiscoveryBit drawn = sector.discovery_tile;
+    if (drawn == DiscoveryBit::NONE && !state.discovery_bag.empty()) {
+        drawn = state.discovery_bag.back();
+        state.discovery_bag.pop_back();
+    }
+    state.current_revealed_discovery = drawn;
+    const uint64_t bit = static_cast<uint64_t>(drawn);
+    if (bit != 0 && (bit & (bit - 1)) == 0) {
+        const int index = __builtin_ctzll(bit) - 1;
+        if (index >= 0 && index < static_cast<int>(state.revealed_discovery_counts.size())) {
+            ++state.revealed_discovery_counts[index];
+        }
+    }
+    return drawn;
+}
+
 
 inline void to_json(nlohmann::json& j, const State& s) {
     nlohmann::json tray_j = nlohmann::json::object();
@@ -348,6 +376,8 @@ inline void to_json(nlohmann::json& j, const State& s) {
         {"tech_tray", tray_j},
         {"tech_bag", s.tech_bag},
         {"discovery_bag", s.discovery_bag},
+        {"revealed_discovery_counts", s.revealed_discovery_counts},
+        {"current_revealed_discovery", s.current_revealed_discovery},
         {"sector_bag_inner", s.sector_bag_inner},
         {"sector_bag_middle", s.sector_bag_middle},
         {"sector_bag_outer", s.sector_bag_outer},
@@ -411,6 +441,16 @@ inline void from_json(const nlohmann::json& j, State& s) {
         j.at("discovery_bag").get_to(s.discovery_bag);
     } else {
         s.discovery_bag.clear();
+    }
+    if (j.contains("revealed_discovery_counts")) {
+        j.at("revealed_discovery_counts").get_to(s.revealed_discovery_counts);
+    } else {
+        s.revealed_discovery_counts.fill(0);
+    }
+    if (j.contains("current_revealed_discovery")) {
+        j.at("current_revealed_discovery").get_to(s.current_revealed_discovery);
+    } else {
+        s.current_revealed_discovery = DiscoveryBit::NONE;
     }
     if (j.contains("sector_bag_inner")) {
         j.at("sector_bag_inner").get_to(s.sector_bag_inner);

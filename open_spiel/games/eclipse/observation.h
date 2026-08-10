@@ -93,6 +93,50 @@ constexpr int kDieFaces = 6;
 // Bounded queue exposure for the two unbounded std::vector queues.
 constexpr int kPendingReturnCap = 8;
 
+// ── V2 keyed entity block ────────────────────────────────────────────────
+// These tables are deliberately appended as a checkpoint-incompatible V2
+// extension. Rows retain the engine/action keys instead of pooling them away.
+constexpr int kDiscoveryBitCount = 30;
+constexpr int kUnitRows = 128;
+constexpr int kPlanetSlotsPerCell = 8;
+constexpr int kPlanetSlotRows = kGalaxyCells * kPlanetSlotsPerCell;
+constexpr int kUnitRowSize =
+    1 +                     // valid / registry key is row index
+    kRelSeatWidth +          // owner, viewer-relative
+    kShipTypeCount +         // type
+    1 +                      // source cell id
+    2 +                      // source q, r
+    1 +                      // damage
+    1 +                      // arrival order
+    1 +                      // active move
+    1 +                      // pending warp
+    1;                       // legal combat-die target
+constexpr int kUnitRouteSize = kHexDirections;  // destination cell per direction; -1 is zero
+constexpr int kPlanetSlotSize = 4;              // valid, type, occupied, orbital
+constexpr int kV2GlobalSize =
+    kMaxSeats +              // viewer absolute-seat routing key
+    kTechBitCount +          // exact tech-bag histogram
+    kDiscoveryBitCount +     // public revealed-discovery histogram
+    (kDiscoveryBitCount + 1);  // currently revealed discovery, NONE at 0
+constexpr int kV2SeatSize = 2 + kTechTrackCount * kTechBitCount;
+// valid, absolute-seat routing key, then the three distinct 40-bit tracks.
+constexpr int kV2CellSize = 2;  // sector definition id, rotation
+constexpr int kV2BattleRecordSize = 3 + kParticipantsCap * 2;
+constexpr int kV2DestroyedRecordSize = 4;
+constexpr int kV2DieRecordSize = 2;
+constexpr int kV2RetreatRecordSize = 4;
+constexpr int kV2CombatSize =
+    kBattleQueueCap * kV2BattleRecordSize +
+    32 * kV2DestroyedRecordSize +
+    kInitiativeCap * kShipTypeCount +
+    64 * kV2DieRecordSize +
+    kRetreatingCap * kV2RetreatRecordSize +
+    1;  // population-attack target cell
+constexpr int kV2KeyedSize =
+    kV2GlobalSize + kSeatSlots * kV2SeatSize + kGalaxyCells * kV2CellSize +
+    kUnitRows * kUnitRowSize + kUnitRows * kUnitRouteSize +
+    kPlanetSlotRows * kPlanetSlotSize + kV2CombatSize;
+
 // ── Feature-group sizes ───────────────────────────────────────────────────
 // A tile's intrinsic, publicly-visible shape. Used both per galaxy cell and
 // for the tiles held in ExploreState (so the agent can actually evaluate the
@@ -442,13 +486,30 @@ constexpr int kTechMarketStart = kGalaxyStart + kGalaxySize;
 constexpr int kCombatStart = kTechMarketStart + kTechMarketSize;
 constexpr int kUpkeepStart = kCombatStart + kCombatSize;
 constexpr int kActionStatesStart = kUpkeepStart + kUpkeepSize;
-constexpr int kTotalSize = kActionStatesStart + kActionStatesSize;
+constexpr int kV2KeyedStart = kActionStatesStart + kActionStatesSize;
+constexpr int kTotalSize = kV2KeyedStart + kV2KeyedSize;
 
 constexpr int PlayerBlockStart(int slot) {
   return kPlayersStart + slot * kPlayerSize;
 }
 constexpr int CellStart(int cell) {
   return kGalaxyStart + cell * kCellChannels;
+}
+constexpr int V2UnitStart(int unit) {
+  return kV2KeyedStart + kV2GlobalSize + kSeatSlots * kV2SeatSize +
+         kGalaxyCells * kV2CellSize +
+         unit * kUnitRowSize;
+}
+constexpr int V2UnitRoutesStart(int unit) {
+  return kV2KeyedStart + kV2GlobalSize + kSeatSlots * kV2SeatSize +
+         kGalaxyCells * kV2CellSize +
+         kUnitRows * kUnitRowSize + unit * kUnitRouteSize;
+}
+constexpr int V2PlanetSlotStart(int cell, int slot) {
+  return kV2KeyedStart + kV2GlobalSize + kSeatSlots * kV2SeatSize +
+         kGalaxyCells * kV2CellSize +
+         kUnitRows * (kUnitRowSize + kUnitRouteSize) +
+         (cell * kPlanetSlotsPerCell + slot) * kPlanetSlotSize;
 }
 
 // Writes the full observation for `player` into `values` (size kTotalSize).

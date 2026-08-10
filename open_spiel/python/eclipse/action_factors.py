@@ -84,12 +84,18 @@ class ActionFactorization:
       table and is NOT usable as a spatial index.
   """
 
-  def __init__(self, decode, num_rows, families, stats, cell_id):
+  def __init__(self, decode, num_rows, families, stats, cell_id, unit_id,
+               slot_id, seat_id, direction_id, family_id):
     self.decode = decode
     self.num_rows = num_rows
     self.families = families
     self.stats = stats
     self.cell_id = cell_id
+    self.unit_id = unit_id
+    self.slot_id = slot_id
+    self.seat_id = seat_id
+    self.direction_id = direction_id
+    self.family_id = family_id
 
   def summary(self):
     factored = sum(n for f, n in self.stats.items() if f != "atom")
@@ -119,6 +125,10 @@ def build_action_factorization(action_strings):
 
   decode = np.zeros((num_actions, NUM_SLOTS), dtype=np.int64)
   cell_id = np.full(num_actions, -1, dtype=np.int64)
+  unit_id = np.full(num_actions, -1, dtype=np.int64)
+  slot_id = np.full(num_actions, -1, dtype=np.int64)
+  seat_id = np.full(num_actions, -1, dtype=np.int64)
+  direction_id = np.full(num_actions, -1, dtype=np.int64)
   families = []
   stats = {}
   for action in range(num_actions):
@@ -144,6 +154,15 @@ def build_action_factorization(action_strings):
         if f == "cell":
           q, r = v.split("_")
           cell_id[action] = obs_layout.hex_to_index(int(q), int(r))
+        elif f == "unit":
+          unit_id[action] = int(v)
+        elif f == "slot":
+          # Colony slots are keyed by (cell, slot); upgrade slots are not
+          # board entities and intentionally remain ungrounded.
+          if family == "colony":
+            slot_id[action] = int(v)
+        elif f == "dir":
+          direction_id[action] = ("E", "NE", "NW", "W", "SW", "SE").index(v)
     absent = row_of("absent", family)
     slots += [absent] * (NUM_SLOTS - len(slots))
     if len(slots) != NUM_SLOTS:
@@ -152,7 +171,25 @@ def build_action_factorization(action_strings):
     decode[action] = slots
     families.append(family)
     stats[family] = stats.get(family, 0) + 1
-  return ActionFactorization(decode, len(rows), families, stats, cell_id)
+  # Unit combat targets and diplomacy predate the original product parser.
+  # Their ids are entity keys, not arbitrary atoms.
+  for action, text in enumerate(action_strings):
+    match = re.match(r"^COMBAT_TARGET_UNIT_(\d+)$", text)
+    if match:
+      unit_id[action] = int(match.group(1))
+      families[action] = "combat_target"
+    match = re.match(r"^COMBAT_POP_TARGET_(\d+)$", text)
+    if match:
+      slot_id[action] = int(match.group(1))
+      families[action] = "combat_population"
+    match = re.match(r"^DIPLOMACY_PROPOSE_(\d+)_(\d+)$", text)
+    if match:
+      seat_id[action] = int(match.group(2))
+      families[action] = "diplomacy"
+  family_rows = {name: i for i, name in enumerate(sorted(set(families)))}
+  family_id = np.asarray([family_rows[name] for name in families], dtype=np.int64)
+  return ActionFactorization(decode, len(rows), families, stats, cell_id,
+                             unit_id, slot_id, seat_id, direction_id, family_id)
 
 
 def factorization_from_game(game, player=0):

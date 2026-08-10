@@ -2655,11 +2655,8 @@ void EclipseState::ApplyCombatSubAction(Action action_id) {
       if (discovery_sector == nullptr) return;
       if (action_id == action_combat_discovery_reward) {
         const uint8_t p = cs.discovery_decision_player;
-        DiscoveryBit drawn = discovery_sector->discovery_tile;
-        if (drawn == DiscoveryBit::NONE && !s.discovery_bag.empty()) {
-          drawn = s.discovery_bag.back();
-          s.discovery_bag.pop_back();
-        }
+        DiscoveryBit drawn = s.current_revealed_discovery;
+        if (drawn == DiscoveryBit::NONE) drawn = RevealDiscovery(s, *discovery_sector);
         if (drawn == DiscoveryBit::NONE ||
             !apply_discovery_reward(s, p, *discovery_sector, drawn)) {
           s.players[p].discovery_vp_tiles_kept++;
@@ -2669,6 +2666,7 @@ void EclipseState::ApplyCombatSubAction(Action action_id) {
       }
       discovery_sector->discovery_tile_present = false;
       discovery_sector->discovery_tile = DiscoveryBit::NONE;
+      s.current_revealed_discovery = DiscoveryBit::NONE;
       cs.discovery_decision_player = kNoPlayer;
       cs.discovery_decision_sector = 0;
       return;

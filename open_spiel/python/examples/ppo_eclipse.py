@@ -334,7 +334,7 @@ flags.DEFINE_enum("nn_activation", "tanh", ["tanh", "gelu"],
                   "Hidden activation. Tanh saturates; gelu is the C1 default "
                   "for the wider trunk.")
 flags.DEFINE_bool(
-    "factored_actions", False,
+    "factored_actions", True,
     "Replace the flat Linear(width, 11117) actor head with a sum of factor "
     "embeddings recovered from the engine's own action layout. The flat head is "
     "80-86% of all parameters and shares nothing between, say, the 5400 "
@@ -354,13 +354,6 @@ flags.DEFINE_enum(
     "tower + viewer self block + tail blocks + a relational masked mean+max "
     "seat pool (the flat Linear(24714, width) first layer was a ~5.1x "
     "throughput collapse). 'flat' preserves the old dense trunk as a control.")
-flags.DEFINE_bool(
-    "spatial_pointer", False,
-    "Add a pointer/attention term from the spatial encoder's per-cell conv "
-    "features into FactoredActorHead's cell-indexed logits ("
-    "'colonize cell 42' should depend on cell 42's actual state, which a "
-    "global-average-pooled trunk feature otherwise never sees). Requires "
-    "--encoder=spatial and --factored_actions.")
 flags.DEFINE_bool(
     "amp", True,
     "bf16 autocast (torch.autocast) around the PPO learn-path minibatch "
@@ -450,6 +443,10 @@ flags.DEFINE_float("exploit_lr", 1e-3,
                    "Learning rate used in exploiter mode (higher than main).")
 
 
+PointerContext = collections.namedtuple(
+    "PointerContext", "cells units slots seats routes seat_abs pop_cell")
+
+
 class SpatialEclipseEncoder(nn.Module):
   """Spatial + relational encoder for the flat Eclipse observation tensor.
 
@@ -474,8 +471,7 @@ class SpatialEclipseEncoder(nn.Module):
   batch stats would be wrong in one path or the other.
   """
 
-  # Conv tower output channels -- a class attribute (not a bare literal) so
-  # SpatialFactoredActorHead's pointer query can size itself off it.
+  # Conv tower output channels -- shared with the typed cell-pointer query.
   CELL_FEATURE_CHANNELS = 64
 
   def __init__(self, width, depth=1, activation="gelu", device=None,
@@ -510,8 +506,15 @@ class SpatialEclipseEncoder(nn.Module):
     self.seat_mlp = self._mlp(obs_layout.PLAYER_SIZE, width, depth, act)
     self.rel_fc = layer_init(nn.Linear(2 * width, width))
 
-    # ── Fuse the four branch latents to (B, width) ──────────────────────────
-    self.fuse = layer_init(nn.Linear(4 * width, width))
+    # ── Keyed V2 entity rows; the heads retain these embeddings for pointers.
+    self.unit_mlp = self._mlp(obs_layout.UNIT_ROW_SIZE + width + c, width,
+                              depth, act)
+    self.slot_mlp = self._mlp(obs_layout.PLANET_SLOT_SIZE + c, width, depth,
+                              act)
+    self.entity_fc = layer_init(nn.Linear(4 * width, width))
+
+    # ── Fuse branch latents to (B, width) ───────────────────────────────────
+    self.fuse = layer_init(nn.Linear(5 * width, width))
 
     # --channels_last: obs_layout.galaxy_view returns a permuted (non-
     # contiguous) view, which cudnn otherwise silently re-copies to contiguous
@@ -548,18 +551,9 @@ class SpatialEclipseEncoder(nn.Module):
   def forward(self, x):
     return self._encode(x)[0]
 
-  def forward_with_cells(self, x):
-    """Like ``forward``, but also returns the pre-pool per-cell conv features.
-
-    Returns:
-      fused: (B, width) -- byte-identical to ``forward(x)``.
-      h_cells: (B, CELL_FEATURE_CHANNELS, 225) conv features per board cell,
-        indexed by ``obs_layout.hex_to_index(q, r)`` (see the flatten check in
-        ``forward``/module docstring: galaxy_view's last two dims are
-        (q_idx, r_idx), and a plain reshape preserves that as the linear cell
-        id -- no permute needed).
-    """
-    return self._encode(x)
+  def forward_with_context(self, x):
+    """Returns features and keyed V2 embeddings for typed action pointers."""
+    return self._encode_context(x)
 
   def _encode(self, x):
     """Dispatches to the (optionally torch.compile'd) encoder body.
@@ -581,6 +575,10 @@ class SpatialEclipseEncoder(nn.Module):
       return self._encode_impl(x)
 
   def _encode_impl(self, x):
+    features, context = self._encode_context(x)
+    return features, context.cells
+
+  def _encode_context(self, x):
     b = x.shape[0]
     x = x.reshape(b, -1)
 
@@ -627,9 +625,59 @@ class SpatialEclipseEncoder(nn.Module):
         mask, seat_h, torch.full_like(seat_h, neg)).max(dim=1).values
     rel_lat = self.rel_fc(torch.cat([mean, masked_max], dim=1))
 
+    # V2 unit rows keep registry indices stable. Owner and source-cell context
+    # are gathered before pooling so a unit key remains tied to its state.
+    units = x[:, obs_layout.V2_UNITS_START:
+              obs_layout.V2_UNITS_START +
+              obs_layout.UNIT_ROWS * obs_layout.UNIT_ROW_SIZE].reshape(
+                  b, obs_layout.UNIT_ROWS, obs_layout.UNIT_ROW_SIZE)
+    owner = units[:, :, obs_layout.U_OWNER:obs_layout.U_OWNER +
+                  obs_layout.REL_SEAT_WIDTH].argmax(dim=-1).clamp(
+                      max=obs_layout.SEAT_SLOTS - 1)
+    owner_h = seat_h.gather(
+        1, owner.unsqueeze(-1).expand(-1, -1, seat_h.shape[-1]))
+    unit_cell = (units[:, :, obs_layout.U_CELL] *
+                 (obs_layout.GALAXY_CELLS - 1)).round().long().clamp(
+                     0, obs_layout.GALAXY_CELLS - 1)
+    unit_cell_h = h_cells.transpose(1, 2).gather(
+        1, unit_cell.unsqueeze(-1).expand(-1, -1, h_cells.shape[1]))
+    unit_h = self.unit_mlp(torch.cat([units, owner_h, unit_cell_h], dim=-1))
+
+    slots = x[:, obs_layout.V2_PLANET_SLOTS_START:
+              obs_layout.V2_PLANET_SLOTS_START +
+              obs_layout.PLANET_SLOT_ROWS * obs_layout.PLANET_SLOT_SIZE].reshape(
+                  b, obs_layout.PLANET_SLOT_ROWS, obs_layout.PLANET_SLOT_SIZE)
+    slot_cells = h_cells.transpose(1, 2).repeat_interleave(
+        obs_layout.PLANET_SLOTS_PER_CELL, dim=1)
+    slot_h = self.slot_mlp(torch.cat([slots, slot_cells], dim=-1))
+
+    def masked_mean_max(values, valid):
+      mask = valid.unsqueeze(-1)
+      denom = valid.float().sum(dim=1, keepdim=True).clamp(min=1.0)
+      mean = (values * mask).sum(dim=1) / denom
+      maximum = torch.where(mask, values,
+                            torch.full_like(values, -1e9)).max(dim=1).values
+      return mean, maximum
+
+    unit_mean, unit_max = masked_mean_max(unit_h, units[:, :, obs_layout.U_VALID] >= .5)
+    slot_mean, slot_max = masked_mean_max(slot_h, slots[:, :, 0] >= .5)
+    entity_lat = self.entity_fc(torch.cat(
+        [unit_mean, unit_max, slot_mean, slot_max], dim=1))
+    routes = x[:, obs_layout.V2_UNIT_ROUTES_START:
+               obs_layout.V2_UNIT_ROUTES_START +
+               obs_layout.UNIT_ROWS * obs_layout.UNIT_ROUTE_SIZE].reshape(
+                   b, obs_layout.UNIT_ROWS, obs_layout.UNIT_ROUTE_SIZE)
+    seat_abs = (x[:, obs_layout.V2_SEATS_START + 1:
+                  obs_layout.V2_SEATS_START +
+                  obs_layout.SEAT_SLOTS * obs_layout.V2_SEAT_SIZE:
+                  obs_layout.V2_SEAT_SIZE] * (obs_layout.MAX_SEATS - 1)).round().long()
+    pop_cell = (x[:, obs_layout.V2_COMBAT_START + obs_layout.V2_COMBAT_SIZE - 1] *
+                obs_layout.GALAXY_CELLS).round().long() - 1
+    context = PointerContext(h_cells, unit_h, slot_h, seat_h, routes, seat_abs,
+                             pop_cell)
     fused = self.fuse(torch.cat(
-        [gal_lat, self_lat, tail_lat, rel_lat], dim=1))
-    return fused, h_cells
+        [gal_lat, self_lat, tail_lat, rel_lat, entity_lat], dim=1))
+    return fused, context
 
 
 class FactoredActorHead(nn.Module):
@@ -670,71 +718,107 @@ class FactoredActorHead(nn.Module):
     return features @ self.full_weight().t() + self.bias
 
 
-class SpatialFactoredActorHead(FactoredActorHead):
-  """FactoredActorHead + a pointer term into the per-cell conv features.
+class TypedPointerActorHead(FactoredActorHead):
+  """Factored flat API with state-conditioned pointers to V2 entity keys."""
 
-  The base class's ``W[a] = sum_slot E[decode[a, slot]]`` weight is a pure
-  function of the action id: the state of board cell 42 never influences the
-  logit for "colonize cell 42" because nothing in that weight depends on the
-  observation. This adds, for every action with a real board coordinate
-  (``cell_id[a] >= 0``), a joint term between the observation and the action:
+  DENSE_CHUNK_SIZE = 256
 
-      logit[a] = base[a] + <query(features), h_cells[:, :, cell_id[a]]>
-
-  where ``h_cells`` is ``SpatialEclipseEncoder``'s pre-pool per-cell conv
-  output (see ``forward_with_cells``). ``query`` is ``layer_init(..., std=0.01)``
-  so the pointer term starts near zero and cannot destabilise early training.
-
-  TRAP: this class inherits ``rows_for``/``full_weight`` from FactoredActorHead
-  UNCHANGED, and those return the BASE term ONLY -- they have no ``cells``
-  argument to add the pointer term through. Any code path that does
-  ``hasattr(head, 'rows_for')`` and calls it directly (instead of going through
-  ``logits_for`` or ``forward(features, cells)``) will silently get the
-  pre-fix, cell-blind policy. Never call ``rows_for``/``full_weight`` on this
-  head expecting complete logits.
-  """
-
-  def __init__(self, decode, num_rows, num_actions, width, cell_id,
+  def __init__(self, decode, num_rows, num_actions, width, factors,
                cell_channels):
     super().__init__(decode, num_rows, num_actions, width)
-    cell_id = np.asarray(cell_id, dtype=np.int64)
-    self.register_buffer("cell_id", torch.from_numpy(cell_id))
-    self.register_buffer("is_cell", torch.from_numpy(cell_id >= 0))
-    self.query = layer_init(nn.Linear(width, cell_channels), std=0.01)
+    self.register_buffer("cell_id", torch.from_numpy(factors.cell_id))
+    self.register_buffer("unit_id", torch.from_numpy(factors.unit_id))
+    self.register_buffer("slot_id", torch.from_numpy(factors.slot_id))
+    self.register_buffer("seat_id", torch.from_numpy(factors.seat_id))
+    self.register_buffer("direction_id", torch.from_numpy(factors.direction_id))
+    self.register_buffer("family_id", torch.from_numpy(factors.family_id))
+    family_count = int(factors.family_id.max()) + 1
+    self.cell_query = layer_init(nn.Linear(width, cell_channels), std=.01)
+    self.unit_query = layer_init(nn.Linear(width, width), std=.01)
+    self.slot_query = layer_init(nn.Linear(width, width), std=.01)
+    self.seat_query = layer_init(nn.Linear(width, width), std=.01)
+    self.cell_family = nn.Embedding(family_count, cell_channels)
+    self.unit_family = nn.Embedding(family_count, width)
+    self.slot_family = nn.Embedding(family_count, width)
+    self.seat_family = nn.Embedding(family_count, width)
+    for table in (self.cell_family, self.unit_family, self.slot_family,
+                  self.seat_family):
+      nn.init.zeros_(table.weight)
 
-  def _pointer_term(self, q, cell_feat, is_cell):
-    """<q, cell_feat> gated to 0 where the action has no board cell."""
-    pointer = (q * cell_feat).sum(-1)
-    return torch.where(is_cell, pointer, torch.zeros_like(pointer))
+  @staticmethod
+  def _gather(values, ids):
+    return values.gather(
+        1, ids.clamp(min=0, max=values.shape[1] - 1).unsqueeze(1)).squeeze(1)
 
-  def logits_for(self, features, cells, rows, cols):
-    """(M,) logits for the (rows[i], cols[i]) pairs (sparse path).
+  def _pairs(self, features, context, rows, cols):
+    base = ((features[rows] * self.rows_for(cols)).sum(-1) + self.bias[cols])
+    family = self.family_id[cols]
+    result = base
+    cell_q = self.cell_query(features[rows]) + self.cell_family(family)
+    cell_logits = (cell_q.unsqueeze(-1) * context.cells[rows]).sum(1)
+    cell = self.cell_id[cols]
+    has_cell = cell >= 0
+    result = result + torch.where(has_cell, self._gather(cell_logits, cell),
+                                  torch.zeros_like(result))
 
-    ``features``: (B, width) shared features. ``cells``: (B, cell_channels,
-    225) per-cell conv features, or None (base-only, e.g. --spatial_pointer
-    off or the flat encoder). ``rows``/``cols``: (M,) torch tensors.
-    """
-    base = ((features[rows] * self.rows_for(cols)).sum(-1)
-            + self.bias[cols])
-    if cells is None:
-      return base
-    is_cell = self.is_cell[cols]
-    q = self.query(features[rows])                      # (M, cell_channels)
-    cid = self.cell_id[cols].clamp(min=0)                # safe dummy index
-    cell_feat = cells[rows].gather(
-        2, cid.view(-1, 1, 1).expand(-1, cells.shape[1], 1)).squeeze(-1)
-    return base + self._pointer_term(q, cell_feat, is_cell)
+    unit = self.unit_id[cols]
+    has_unit = unit >= 0
+    unit_q = self.unit_query(features[rows]) + self.unit_family(family)
+    unit_logits = (unit_q.unsqueeze(1) * context.units[rows]).sum(-1)
+    result = result + torch.where(has_unit, self._gather(unit_logits, unit),
+                                  torch.zeros_like(result))
+    # A normal MOVE_UNIT action points both at its registry row and the
+    # destination resolved from that row/direction in the current universe.
+    direction = self.direction_id[cols]
+    has_route = has_unit & (direction >= 0)
+    if has_route.any():
+      route = context.routes[rows, unit.clamp(min=0), direction.clamp(min=0)]
+      destination = (route * obs_layout.GALAXY_CELLS).round().long() - 1
+      has_route = has_route & (route > 0)
+      result = result + torch.where(has_route,
+                                    self._gather(cell_logits, destination),
+                                    torch.zeros_like(result))
 
-  def forward(self, features, cells=None):
-    """(B, num_actions) dense logits. ``cells`` as in ``logits_for``."""
-    base = features @ self.full_weight().t() + self.bias
-    if cells is None:
-      return base
-    q = self.query(features)                             # (B, cell_channels)
-    cell_logits = torch.einsum("bc,bcn->bn", q, cells)    # (B, 225)
-    cid = self.cell_id.clamp(min=0)                       # (num_actions,)
-    pointer = cell_logits[:, cid] * self.is_cell.to(cell_logits.dtype)
-    return base + pointer
+    slot = self.slot_id[cols]
+    # Colony slots are globally keyed as cell*8+slot; combat population uses
+    # its V2 current-target-cell key with the same local slot number.
+    colony_slot = torch.where(
+        cell >= 0, cell * obs_layout.PLANET_SLOTS_PER_CELL + slot,
+        context.pop_cell[rows] * obs_layout.PLANET_SLOTS_PER_CELL + slot)
+    has_slot = slot.ge(0) & ((cell >= 0) | (context.pop_cell[rows] >= 0))
+    slot_q = self.slot_query(features[rows]) + self.slot_family(family)
+    slot_logits = (slot_q.unsqueeze(1) * context.slots[rows]).sum(-1)
+    result = result + torch.where(has_slot, self._gather(slot_logits, colony_slot),
+                                  torch.zeros_like(result))
+
+    target_seat = self.seat_id[cols]
+    has_seat = target_seat >= 0
+    seat_q = self.seat_query(features[rows]) + self.seat_family(family)
+    seat_logits = (seat_q.unsqueeze(1) * context.seats[rows]).sum(-1)
+    matches = context.seat_abs[rows].eq(target_seat.unsqueeze(-1))
+    selected = torch.where(matches, seat_logits,
+                           torch.full_like(seat_logits, -1e9)).max(dim=1).values
+    result = result + torch.where(has_seat, selected, torch.zeros_like(result))
+    return result
+
+  def logits_for(self, features, context, rows, cols):
+    return self._pairs(features, context, rows, cols)
+
+  def forward(self, features, context=None):
+    if context is None:
+      return super().forward(features)
+    # `_pairs` gathers one entity tensor per action. Chunking prevents dense
+    # eval from materialising B * 11,117 * 225 cell features at once.
+    batch = features.shape[0]
+    chunks = []
+    for start in range(0, self.num_actions, self.DENSE_CHUNK_SIZE):
+      cols = torch.arange(start, min(start + self.DENSE_CHUNK_SIZE,
+                                     self.num_actions), device=features.device)
+      width = cols.numel()
+      chunk_rows = torch.arange(batch, device=features.device).repeat_interleave(width)
+      chunk_cols = cols.repeat(batch)
+      chunks.append(self._pairs(features, context, chunk_rows, chunk_cols).reshape(batch, width))
+    return torch.cat(chunks, dim=1)
 
 
 class EclipsePPOAgent(nn.Module):
@@ -773,22 +857,11 @@ class EclipsePPOAgent(nn.Module):
   def __init__(self, num_actions, observation_shape, device, width=64,
                depth=2, aux_tasks=("final_vp",), norm=False,
                activation="tanh", separate_critic=False,
-               factored_actions=None, encoder="flat", spatial_pointer=False,
+               factored_actions=None, encoder="flat",
                channels_last=False, compile_encoder=False):
     super().__init__()
     in_features = int(np.array(observation_shape).prod())
     self.encoder = encoder
-    if spatial_pointer and encoder != "spatial":
-      raise ValueError(
-          "--spatial_pointer requires --encoder=spatial: a flat trunk has no "
-          "per-cell features for the pointer term to read, and silently "
-          "degrading to the base-only head would defeat the point of the flag.")
-    if spatial_pointer and factored_actions is None:
-      raise ValueError(
-          "--spatial_pointer requires --factored_actions: the pointer term "
-          "needs the per-action cell_id table that only the factorization "
-          "carries.")
-
     if encoder == "spatial":
       self.shared = SpatialEclipseEncoder(
           width, depth=max(1, depth), activation=activation, device=device,
@@ -823,16 +896,14 @@ class EclipsePPOAgent(nn.Module):
     )
     if factored_actions is None:
       actor_head = layer_init(nn.Linear(width, num_actions), std=0.01)
-    elif spatial_pointer:
-      actor_head = SpatialFactoredActorHead(
+    elif encoder == "spatial":
+      actor_head = TypedPointerActorHead(
           factored_actions.decode, factored_actions.num_rows, num_actions,
-          width, factored_actions.cell_id,
-          SpatialEclipseEncoder.CELL_FEATURE_CHANNELS)
+          width, factored_actions, SpatialEclipseEncoder.CELL_FEATURE_CHANNELS)
     else:
       actor_head = FactoredActorHead(
           factored_actions.decode, factored_actions.num_rows, num_actions,
           width)
-    self.spatial_pointer = spatial_pointer
     self.actor = nn.Sequential(self.shared, actor_head)
     # Auxiliary heads hang off the critic trunk (they are terminal-outcome
     # regressions, same job as the value head).
@@ -898,14 +969,13 @@ class EclipsePPOAgent(nn.Module):
     cannot flow through it. This bypasses the Sequential to route ``cells``
     into the head when both the trunk and the head support it, so eval scores
     the actual policy being trained rather than a base-only approximation of
-    it; it falls back to plain ``self.actor(x)`` otherwise (flat encoder, no
-    factored head, or --spatial_pointer off).
+    it; it falls back to plain ``self.actor(x)`` for flat or unfactored runs.
     """
-    forward_with_cells = getattr(self.shared, "forward_with_cells", None)
+    forward_with_context = getattr(self.shared, "forward_with_context", None)
     head = self.actor[-1]
-    if forward_with_cells is not None and hasattr(head, "cell_id"):
-      features, cells = forward_with_cells(x)
-      return head.forward(features, cells)
+    if forward_with_context is not None and hasattr(head, "logits_for"):
+      features, context = forward_with_context(x)
+      return head.forward(features, context)
     return self.actor(x)
 
   def get_action_and_value(self, x, legal_actions_mask=None, action=None):
@@ -924,7 +994,7 @@ class EclipsePPOAgent(nn.Module):
 def make_agent_fn(width, depth, aux_tasks=("final_vp",), norm=False,
                   activation="tanh", separate_critic=False,
                   factored_actions=None, encoder="flat",
-                  spatial_pointer=False, channels_last=False,
+                  channels_last=False,
                   compile_encoder=False):
   def agent_fn(num_actions, observation_shape, device):
     return EclipsePPOAgent(num_actions, observation_shape, device,
@@ -932,7 +1002,7 @@ def make_agent_fn(width, depth, aux_tasks=("final_vp",), norm=False,
                            norm=norm, activation=activation,
                            separate_critic=separate_critic,
                            factored_actions=factored_actions,
-                           encoder=encoder, spatial_pointer=spatial_pointer,
+                           encoder=encoder,
                            channels_last=channels_last,
                            compile_encoder=compile_encoder)
 
@@ -1668,7 +1738,6 @@ def _write_arch(roster_dir, num_actions, input_shape, aux_tasks):
       "num_actions": int(num_actions),
       "input_shape": list(input_shape),
       "encoder": FLAGS.encoder,
-      "spatial_pointer": bool(FLAGS.spatial_pointer),
   }
   with open(os.path.join(str(roster_dir), "arch.json"), "w") as f:
     json.dump(arch, f, indent=2)
@@ -2347,7 +2416,7 @@ def main(_):
         FLAGS.nn_width, FLAGS.nn_depth, tuple(aux_tasks or ()),
         norm=FLAGS.nn_norm, activation=FLAGS.nn_activation,
         separate_critic=FLAGS.separate_critic, factored_actions=factored,
-        encoder=FLAGS.encoder, spatial_pointer=FLAGS.spatial_pointer,
+        encoder=FLAGS.encoder,
         channels_last=FLAGS.channels_last,
         compile_encoder=FLAGS.compile_encoder),
       value_mode=FLAGS.value_mode,
@@ -2368,7 +2437,7 @@ def main(_):
         FLAGS.nn_width, FLAGS.nn_depth, tuple(aux_tasks or ()),
         norm=FLAGS.nn_norm, activation=FLAGS.nn_activation,
         separate_critic=FLAGS.separate_critic, factored_actions=factored,
-        encoder=FLAGS.encoder, spatial_pointer=FLAGS.spatial_pointer,
+        encoder=FLAGS.encoder,
         channels_last=FLAGS.channels_last,
         compile_encoder=FLAGS.compile_encoder)
     resume_src = FLAGS.resume
@@ -2442,7 +2511,7 @@ def main(_):
         FLAGS.nn_width, FLAGS.nn_depth, tuple(aux_tasks or ()),
         norm=FLAGS.nn_norm, activation=FLAGS.nn_activation,
         separate_critic=FLAGS.separate_critic, factored_actions=factored,
-        encoder=FLAGS.encoder, spatial_pointer=FLAGS.spatial_pointer,
+        encoder=FLAGS.encoder,
         channels_last=FLAGS.channels_last,
         compile_encoder=FLAGS.compile_encoder)
   num_actions = game.num_distinct_actions()

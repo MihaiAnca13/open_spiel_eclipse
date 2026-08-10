@@ -278,16 +278,14 @@ def head_logits(head, features, cells, rows, cols):
 
 
 def shared_and_cells(net, x):
-  """(features, cells) from the shared trunk, one forward either way.
+  """(features, pointer context) from the shared trunk, one forward either way.
 
-  ``cells`` is the per-cell conv tensor when the trunk exposes
-  ``forward_with_cells`` (the spatial encoder), so a spatial pointer head can
-  read it via ``head_logits``; otherwise ``cells`` is None and every head
-  falls back to its cell-blind logit. Never calls the trunk twice.
+  A trunk exposing ``forward_with_context`` supplies its action-pointer
+  context; otherwise the second result is None. Never calls the trunk twice.
   """
-  forward_with_cells = getattr(net.shared, "forward_with_cells", None)
-  if forward_with_cells is not None:
-    return forward_with_cells(x)
+  forward_with_context = getattr(net.shared, "forward_with_context", None)
+  if forward_with_context is not None:
+    return forward_with_context(x)
   return net.shared(x), None
 
 

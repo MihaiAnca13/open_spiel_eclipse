@@ -142,7 +142,6 @@ def _resolve_arch(roster_dir, num_actions, input_shape):
       "num_actions": int(num_actions),
       "input_shape": [int(s) for s in input_shape],
       "encoder": FLAGS.encoder,
-      "spatial_pointer": bool(FLAGS.spatial_pointer),
   }
 
 
@@ -362,18 +361,13 @@ def main(_):
         norm=bool(arch["norm"]), activation=arch["activation"],
         separate_critic=bool(arch["separate_critic"]),
         factored_actions=factored,
-        encoder=str(arch.get("encoder", "flat")),
-        # Must be threaded through: a pointer-head roster rebuilt without this
-        # loads into a base-only head, so the ladder would silently rate a
-        # different (board-blind) policy than the one that was trained.
-        spatial_pointer=bool(arch.get("spatial_pointer", False)))
+        encoder=str(arch.get("encoder", "flat")))
     print(f"rating roster      : {roster_dir}  (tag={tag})")
     print(f"arch (arch.json?)  : width={arch['width']} depth={arch['depth']} "
           f"norm={arch['norm']} act={arch['activation']} "
           f"sep_critic={arch['separate_critic']} "
           f"factored={arch['factored_actions']} aux={arch.get('aux_tasks')} "
-          f"encoder={arch.get('encoder')} "
-          f"spatial_pointer={bool(arch.get('spatial_pointer', False))}")
+          f"encoder={arch.get('encoder')}")
 
     roster = PolicyRoster(roster_dir)
     # Nets: snapshots in birth order, then main.

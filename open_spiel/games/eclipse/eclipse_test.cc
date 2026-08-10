@@ -1784,6 +1784,24 @@ void ObservationLayoutTest() {
     SPIEL_CHECK_GT(t[obs::CellStart(cell) + obs::kCellPlanetPopulated + type0], 0.0f);
     // Sector VP value is visible.
     SPIEL_CHECK_GT(t[obs::CellStart(cell) + obs::kCellPoints], 0.0f);
+
+    // V2 keeps the exact slot key rather than only its aggregate type count.
+    const int slot0 = obs::V2PlanetSlotStart(cell, 0);
+    SPIEL_CHECK_EQ(t[slot0], 1.0f);
+    SPIEL_CHECK_EQ(t[slot0 + 2], 1.0f);
+  }
+
+  // V2 unit rows preserve the registry key and per-unit mutable state.
+  if (!raw.unit_registry.empty()) {
+    std::vector<float> before(n, 0.0f);
+    state->ObservationTensor(0, absl::MakeSpan(before));
+    const uint8_t old_damage = raw.unit_registry[0].damage;
+    raw.unit_registry[0].damage = old_damage + 1;
+    std::vector<float> after(n, 0.0f);
+    state->ObservationTensor(0, absl::MakeSpan(after));
+    SPIEL_CHECK_NE(before[obs::V2UnitStart(0) + 19],
+                   after[obs::V2UnitStart(0) + 19]);
+    raw.unit_registry[0].damage = old_damage;
   }
 
   // ── diplomacy: WHO a relation is with is now readable ────────────────────

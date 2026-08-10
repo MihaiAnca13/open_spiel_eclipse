@@ -888,6 +888,174 @@ void WriteObservationTensor(const ::State& state, int player, int num_players,
     }
 
     o += 4;  // reserve
+    SPIEL_CHECK_EQ(o, kV2KeyedStart);
+  }
+
+  // ── Block H: V2 keyed public entities ─────────────────────────────────
+  // Keep these rows unpooled. The Python actor scores action keys against the
+  // matching rows, while the encoder may still pool them for its global value.
+  {
+    int o = kV2KeyedStart;
+    OneHot(values, o, player, kMaxSeats);
+    o += kMaxSeats;
+    for (const TechBit tech : state.tech_bag) {
+      const uint64_t bit = static_cast<uint64_t>(tech);
+      if (bit != 0 && (bit & (bit - 1)) == 0) {
+        const int idx = __builtin_ctzll(bit) - 1;
+        if (idx >= 0 && idx < kTechBitCount) values[o + idx] += 1.0f / 8.0f;
+      }
+    }
+    o += kTechBitCount;
+    for (int i = 0; i < kDiscoveryBitCount; ++i) {
+      Frac(values, o + i, static_cast<float>(state.revealed_discovery_counts[i]), 4.0f);
+    }
+    o += kDiscoveryBitCount;
+    const uint64_t revealed = static_cast<uint64_t>(state.current_revealed_discovery);
+    const int revealed_idx = revealed == 0 ? 0 : __builtin_ctzll(revealed);
+    OneHot(values, o, revealed_idx, kDiscoveryBitCount + 1);
+    o += kDiscoveryBitCount + 1;
+
+    for (int slot = 0; slot < kSeatSlots; ++slot) {
+      if (slot < num_players) {
+        Flag(values, o, true);
+        Frac(values, o + 1, static_cast<float>(SeatForSlot(slot, player, num_players)),
+             static_cast<float>(kMaxSeats - 1));
+        const ::Player& seat_player = state.players[SeatForSlot(slot, player, num_players)];
+        Bits(values, o + 2, seat_player.researched_techs_military >> 1, kTechBitCount);
+        Bits(values, o + 2 + kTechBitCount, seat_player.researched_techs_grid >> 1, kTechBitCount);
+        Bits(values, o + 2 + 2 * kTechBitCount, seat_player.researched_techs_nano >> 1, kTechBitCount);
+      }
+      o += kV2SeatSize;
+    }
+
+    // Definition ids and rotations are categorical spatial identity. They are
+    // separate from face-down discovery identities, which remain hidden.
+    for (int cell = 0; cell < kGalaxyCells; ++cell) {
+      const HexCoord hc = index_to_hex(cell);
+      const Sector& sec = state.galaxy.at(hc.q, hc.r);
+      Frac(values, o++, static_cast<float>(sec.sector_id), 395.0f);
+      Frac(values, o++, static_cast<float>(sec.rotation), kHexDirections - 1);
+    }
+
+    for (int i = 0; i < std::min<int>(state.unit_registry.size(), kUnitRows); ++i) {
+      const Unit& u = state.unit_registry[i];
+      int r = V2UnitStart(i);
+      Flag(values, r++, true);
+      OneHot(values, r, RelSeatOrNpc(u.player_id, player, num_players), kRelSeatWidth);
+      r += kRelSeatWidth;
+      OneHot(values, r, static_cast<int>(u.type), kShipTypeCount);
+      r += kShipTypeCount;
+      const HexCoord source = state.galaxy.FindSectorCoord(u.sector_id);
+      const bool source_valid = source.q != -128 && in_galaxy_bounds(source.q, source.r);
+      const int source_cell = source_valid ? hex_to_index(source.q, source.r) : -1;
+      Frac(values, r++, static_cast<float>(std::max(source_cell, 0)), kGalaxyCells - 1);
+      Frac(values, r++, source_valid ? static_cast<float>(source.q) : 0.0f, GALAXY_RADIUS);
+      Frac(values, r++, source_valid ? static_cast<float>(source.r) : 0.0f, GALAXY_RADIUS);
+      Frac(values, r++, static_cast<float>(u.damage), 8.0f);
+      Frac(values, r++, static_cast<float>(u.arrival_order), 400.0f);
+      Flag(values, r++, state.move_state.active_unit_idx == i);
+      Flag(values, r++, state.move_state.warp_unit_idx == i);
+      bool legal_target = false;
+      for (int j = 0; j < std::min<int>(state.combat_state.pending_target_count,
+                                        state.combat_state.pending_target_indices.size()); ++j) {
+        legal_target = legal_target || state.combat_state.pending_target_indices[j] == i;
+      }
+      Flag(values, r++, legal_target);
+      SPIEL_CHECK_EQ(r, V2UnitStart(i + 1));
+
+      for (int d = 0; d < kHexDirections; ++d) {
+        int destination = -1;
+        if (source_valid) {
+          HexCoord target{static_cast<int8_t>(source.q + HEX_DIRECTIONS[d].first),
+                          static_cast<int8_t>(source.r + HEX_DIRECTIONS[d].second)};
+          if (state.warped_universe) {
+            const uint8_t linked = state.warp_link_dest_cell[source_cell * kHexDirections + d];
+            if (linked != 255) target = index_to_hex(linked);
+          }
+          if (in_galaxy_bounds(target.q, target.r)) destination = hex_to_index(target.q, target.r);
+        }
+        // Invalid is the explicit zero sentinel; valid cells are offset by one.
+        Frac(values, V2UnitRoutesStart(i) + d,
+             static_cast<float>(destination + 1), kGalaxyCells);
+      }
+    }
+    o = V2UnitRoutesStart(kUnitRows);
+
+    for (int cell = 0; cell < kGalaxyCells; ++cell) {
+      const HexCoord hc = index_to_hex(cell);
+      const Sector& sec = state.galaxy.at(hc.q, hc.r);
+      const SectorDefinition* def = sec.sector_id == 0 ? nullptr : get_sector_definition(sec.sector_id);
+      const int printed = def == nullptr ? 0 : static_cast<int>(def->slots.size());
+      SPIEL_CHECK_LE(printed, kPlanetSlotsPerCell);
+      for (int slot = 0; slot < kPlanetSlotsPerCell; ++slot) {
+        const int s = V2PlanetSlotStart(cell, slot);
+        const bool orbital = def != nullptr && sec.orbital_built && slot == printed;
+        const bool valid = (def != nullptr && slot < printed) || orbital;
+        Flag(values, s, valid);
+        if (slot < printed) {
+          Frac(values, s + 1, static_cast<float>(def->slots[slot].type), kPlanetTypeCount - 1);
+          Flag(values, s + 2, (sec.occupied_slots_mask >> slot) & 1u);
+        } else if (orbital) {
+          Frac(values, s + 1, static_cast<float>(PlanetType::MONEY), kPlanetTypeCount - 1);
+          Flag(values, s + 2, (sec.occupied_slots_mask >> printed) & 1u);
+        }
+        Flag(values, s + 3, orbital);
+      }
+    }
+    o += kPlanetSlotRows * kPlanetSlotSize;
+
+    const CombatState& cs = state.combat_state;
+    for (int i = 0; i < kBattleQueueCap; ++i) {
+      const int e = o + i * kV2BattleRecordSize;
+      if (i >= cs.battle_queue_size) continue;
+      const CombatSectorInfo& battle = cs.battle_queue[i];
+      Flag(values, e, true);
+      const HexCoord hc = state.galaxy.FindSectorCoord(battle.sector_id);
+      Frac(values, e + 1, hc.q == -128 ? 0.0f : static_cast<float>(hex_to_index(hc.q, hc.r) + 1), kGalaxyCells);
+      Frac(values, e + 2, static_cast<float>(battle.participant_count), kParticipantsCap);
+      for (int p = 0; p < kParticipantsCap; ++p) {
+        if (p >= battle.participant_count) continue;
+        Frac(values, e + 3 + p * 2,
+             static_cast<float>(RelSeatOrNpc(battle.participant_ids[p], player, num_players)), kRelSeatWidth - 1);
+        Frac(values, e + 4 + p * 2, static_cast<float>(battle.latest_arrival[p]), 400.0f);
+      }
+    }
+    o += kBattleQueueCap * kV2BattleRecordSize;
+    for (int i = 0; i < 32; ++i) {
+      const int e = o + i * kV2DestroyedRecordSize;
+      if (i >= cs.destroyed_ships_size) continue;
+      const DestroyedShipRecord& d = cs.destroyed_ships[i];
+      Flag(values, e, true);
+      Frac(values, e + 1, static_cast<float>(RelSeatOrNpc(d.player_id, player, num_players)), kRelSeatWidth - 1);
+      Frac(values, e + 2, static_cast<float>(d.type), kShipTypeCount - 1);
+      Frac(values, e + 3, static_cast<float>(RelSeatOrNpc(d.destroyed_by, player, num_players)), kRelSeatWidth - 1);
+    }
+    o += 32 * kV2DestroyedRecordSize;
+    for (int i = 0; i < kInitiativeCap; ++i) {
+      if (i < cs.ship_order_size) OneHot(values, o + i * kShipTypeCount,
+                                          static_cast<int>(cs.ship_order_queue[i]), kShipTypeCount);
+    }
+    o += kInitiativeCap * kShipTypeCount;
+    for (int i = 0; i < 64; ++i) {
+      if (i < cs.pending_die_count) {
+        Frac(values, o + i * kV2DieRecordSize, static_cast<float>(cs.pending_die_values[i]), kDieFaces);
+        Frac(values, o + i * kV2DieRecordSize + 1, static_cast<float>(cs.pending_die_colors[i]), kDieColorCount);
+      }
+    }
+    o += 64 * kV2DieRecordSize;
+    for (int i = 0; i < kRetreatingCap; ++i) {
+      const int e = o + i * kV2RetreatRecordSize;
+      if (i >= cs.retreating_group_count) continue;
+      Flag(values, e, true);
+      Frac(values, e + 1, static_cast<float>(RelSeatOrNpc(cs.retreating_players[i], player, num_players)), kRelSeatWidth - 1);
+      Frac(values, e + 2, static_cast<float>(cs.retreating_types[i]), kShipTypeCount - 1);
+      const HexCoord hc = state.galaxy.FindSectorCoord(cs.retreating_destinations[i]);
+      Frac(values, e + 3, hc.q == -128 ? 0.0f : static_cast<float>(hex_to_index(hc.q, hc.r) + 1), kGalaxyCells);
+    }
+    o += kRetreatingCap * kV2RetreatRecordSize;
+    const HexCoord pop_cell = state.galaxy.FindSectorCoord(cs.pop_attack_sector_id);
+    Frac(values, o++, pop_cell.q == -128 ? 0.0f :
+         static_cast<float>(hex_to_index(pop_cell.q, pop_cell.r) + 1), kGalaxyCells);
     SPIEL_CHECK_EQ(o, kTotalSize);
   }
 }

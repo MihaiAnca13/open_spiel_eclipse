@@ -9,9 +9,12 @@ if (OPEN_SPIEL_BUILDING_WHEEL)
   endif()
 else()
   message(NOTICE "Not building wheel. Finding Python normally...")
-  find_package(Python3 COMPONENTS Interpreter Development)
-  set(OPEN_SPIEL_PYTHONPATH ${CMAKE_CURRENT_BINARY_DIR}:${CMAKE_CURRENT_SOURCE_DIR}/../..;)
+find_package(Python3 COMPONENTS Interpreter Development)
+set(OPEN_SPIEL_PYTHONPATH ${CMAKE_CURRENT_BINARY_DIR}:${CMAKE_CURRENT_SOURCE_DIR}/../..;)
 endif()
+
+# FCM core (libfcm_migration_core.a) links OpenSSL; pyspiel needs it too.
+find_package(OpenSSL REQUIRED)
 
 message(NOTICE "Python executable: ${Python3_EXECUTABLE}")
 message(NOTICE "Python include dirs: ${Python3_INCLUDE_DIRS}")
@@ -22,6 +25,21 @@ if(Python3_VERSION VERSION_LESS "3.8.0")
   message(FATAL_ERROR
     "Python found ${Python3_VERSION} < 3.8.0")
 endif()
+
+# FCM: the OpenSpiel view over the FCM (Fast Food Magnate) engine. The thin
+# adapter (fcm_openspiel_state.cc/.h) lives in, and is owned by, the FCM repo;
+# it is referenced by source path here (option: never copied) and linked against
+# FCM's prebuilt fcm_migration_core static library. The adapter is the only FCM
+# source compiled into the OpenSpiel tree; all engine sources stay in FCM.
+set (FCM_CORE_DIR "/home/mihai/personal/FCM" CACHE PATH
+     "Path to the FCM repository root (source of the OpenSpiel adapter and fcm_migration_core lib)")
+set (FCM_CORE_BUILD "${FCM_CORE_DIR}/build" CACHE PATH
+     "Path to the FCM build dir containing libfcm_migration_core.a")
+include_directories(${FCM_CORE_DIR}/target/include)
+set(PYTHON_BINDINGS ${PYTHON_BINDINGS}
+    ${FCM_CORE_DIR}/target/src/fcm_openspiel_state.cc
+    ${FCM_CORE_DIR}/target/include/fcm/fcm_openspiel_state.h
+)
 
 # List of all Python bindings to add to pyspiel.
 include_directories (../pybind11_abseil ../../pybind11/include)
@@ -151,6 +169,8 @@ target_link_libraries(pyspiel PRIVATE
   absl::str_format
   absl::strings
   absl::time
+  ${FCM_CORE_BUILD}/libfcm_migration_core.a
+  OpenSSL::Crypto
 )
 
 # Without this, the binary is called `libpyspiel.so`

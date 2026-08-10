@@ -514,6 +514,7 @@ bool claim_explore_control(State& state, uint8_t player_id, bool take_control) {
     // Discovery is only awarded immediately from an undefended sector; Ancient
     // sectors defer the tile to the Combat Phase discovery_award step.
     if (cell.discovery_tile_present && !has_ancients) {
+        RevealDiscovery(state, cell);
         es.phase = ExplorePhase::discovery_reward;
     } else {
         end_explore_activation(state);
@@ -527,11 +528,8 @@ bool resolve_explore_discovery(State& state, uint8_t player_id, bool take_reward
 
     Sector& cell = state.galaxy.at(es.zone_q, es.zone_r);
     if (take_reward) {
-        DiscoveryBit drawn = cell.discovery_tile;
-        if (drawn == DiscoveryBit::NONE && !state.discovery_bag.empty()) {
-            drawn = state.discovery_bag.back();
-            state.discovery_bag.pop_back();
-        }
+        DiscoveryBit drawn = state.current_revealed_discovery;
+        if (drawn == DiscoveryBit::NONE) drawn = RevealDiscovery(state, cell);
 
         ShipPartId part = ShipPartId::NONE;
         if (drawn == DiscoveryBit::MUON_SOURCE) {
@@ -552,6 +550,7 @@ bool resolve_explore_discovery(State& state, uint8_t player_id, bool take_reward
 
             cell.discovery_tile_present = false;
             cell.discovery_tile = DiscoveryBit::NONE;
+            state.current_revealed_discovery = DiscoveryBit::NONE;
             return true;
         }
 
@@ -564,6 +563,7 @@ bool resolve_explore_discovery(State& state, uint8_t player_id, bool take_reward
     }
     cell.discovery_tile_present = false;
     cell.discovery_tile = DiscoveryBit::NONE;
+    state.current_revealed_discovery = DiscoveryBit::NONE;
     end_explore_activation(state);
     return true;
 }

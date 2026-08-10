@@ -82,17 +82,21 @@ class FactoredActorHeadTest(absltest.TestCase):
                agent_fn=lambda n, s, d: net, value_mode="win")
 
   def _assert_sparse_matches_dense(self, net, agent, batch):
-    feats = net.shared(batch)
+    context_fn = getattr(net.shared, "forward_with_context", None)
+    if context_fn is None:
+      feats, context = net.shared(batch), None
+    else:
+      feats, context = context_fn(batch)
     legal = [sorted(np.random.RandomState(k).choice(
         self.num_actions, size=40, replace=False).tolist())
         for k in range(batch.shape[0])]
     rows = np.concatenate([[i] * len(l) for i, l in enumerate(legal)])
     cols = np.concatenate(legal).astype(np.int64)
 
-    packed = agent._pack_logits(feats, None,
+    packed = agent._pack_logits(feats, context,
                                torch.from_numpy(rows.astype(np.int64)),
                                torch.from_numpy(cols), net.actor[-1])
-    dense = net.actor(batch)
+    dense = net.dense_logits(batch)
     reference = dense[torch.from_numpy(rows.astype(np.int64)),
                       torch.from_numpy(cols)]
     self.assertLess(float((packed - reference).abs().max().detach()), 1e-5)
@@ -136,7 +140,7 @@ class FactoredActorHeadTest(absltest.TestCase):
     # input is not), so an unlucky random draw sends logits to ~1e8 and the
     # dense-vs-sparse comparison's *absolute* 1e-5 tolerance below sees plain
     # float32 rounding as a mismatch -- pre-existing on git HEAD too (repro'd
-    # with seeds 1,4,5,7,9,13 before this test ever mentioned spatial_pointer).
+    # with seeds 1,4,5,7,9,13 before this test covered typed pointers).
     # Fix the *test's* tolerance/scale if this ever needs unseeding.
     torch.manual_seed(0)
     net = EclipsePPOAgent(
@@ -162,57 +166,27 @@ class FactoredActorHeadTest(absltest.TestCase):
     self.assertTrue(all(float(grad[r].abs().sum()) == 0
                         for r in list(untouched)[:50]))
 
-  def test_spatial_pointer_requires_spatial_encoder_and_factored_actions(self):
-    with self.assertRaises(ValueError):
-      EclipsePPOAgent(self.num_actions, (self.obs_size,), "cpu", width=64,
-                      depth=2, factored_actions=self.fz, encoder="flat",
-                      spatial_pointer=True)
-    with self.assertRaises(ValueError):
-      EclipsePPOAgent(self.num_actions, (self.obs_size,), "cpu", width=64,
-                      depth=2, factored_actions=None, encoder="spatial",
-                      spatial_pointer=True)
-
-  def test_spatial_pointer_reads_the_actual_targeted_cell(self):
-    """Direct falsifier for the bug: cell 42's state must reach the logit for
-    "colonize cell 42". Swap two cells' conv features between each other and
-    the pointer contribution to the two actions' logits must swap with them
-    -- this fails against the pre-fix head (no pointer term at all, hence no
-    ``logits_for``) and would also fail against a "fix" that feeds the query
-    a globally-pooled vector instead of the specific targeted cell.
-
-    The comparison is on the pointer term alone (full logit minus the
-    ``cells=None`` base-only logit), not the raw logit: two *different*
-    actions on different cells generally have different base weights (that's
-    the whole point of the factorization -- each cell keeps its own row), so
-    the full logits have no reason to swap to numerically identical values;
-    only the spatial contribution this task adds does.
-    """
+  def test_v2_typed_dense_sparse_equivalence(self):
+    """Every action's typed V2 dense and sparse logit must agree exactly."""
     net = EclipsePPOAgent(
-        self.num_actions, (self.obs_size,), "cpu", width=64, depth=2,
-        aux_tasks=("final_rank",), factored_actions=self.fz, encoder="spatial",
-        spatial_pointer=True)
-    head = net.actor[-1]
-    x = torch.randn(2, self.obs_size)
+        self.num_actions, (self.obs_size,), "cpu", width=8, depth=1,
+        aux_tasks=("final_rank",), factored_actions=self.fz, encoder="spatial")
+    net.actor[-1].DENSE_CHUNK_SIZE = 32
+    agent = self._sparse_agent(net)
+    state = self.game.new_initial_state()
+    while state.is_chance_node():
+      state.apply_action(state.chance_outcomes()[0][0])
+    x = torch.tensor([state.observation_tensor(0)], dtype=torch.float32)
     with torch.no_grad():
-      features, cells = net.shared.forward_with_cells(x)
-
-      # Two colony-ship actions targeting different board cells, same row.
-      action_cell0 = int(np.flatnonzero(self.fz.cell_id == 0)[0])
-      action_cell1 = int(np.flatnonzero(self.fz.cell_id == 1)[0])
-      rows = torch.tensor([0, 0])
-      cols = torch.tensor([action_cell0, action_cell1])
-
-      base_only = head.logits_for(features, None, rows, cols)
-      before = head.logits_for(features, cells, rows, cols) - base_only
-      self.assertNotAlmostEqual(float(before[0]), float(before[1]), places=5)
-
-      swapped = cells.clone()
-      swapped[0, :, 0] = cells[0, :, 1]
-      swapped[0, :, 1] = cells[0, :, 0]
-      after = head.logits_for(features, swapped, rows, cols) - base_only
-
-    self.assertTrue(torch.allclose(after[0], before[1], atol=1e-5))
-    self.assertTrue(torch.allclose(after[1], before[0], atol=1e-5))
+      features, context = net.shared.forward_with_context(x)
+      dense = net.dense_logits(x)
+      for start in range(0, self.num_actions, 32):
+        cols = torch.arange(start, min(start + 32, self.num_actions))
+        rows = torch.arange(x.shape[0]).repeat_interleave(cols.numel())
+        sparse = agent._pack_logits(
+            features, context, rows, cols.repeat(x.shape[0]), net.actor[-1])
+        self.assertTrue(torch.allclose(
+            sparse, dense[:, start:start + cols.numel()].reshape(-1), atol=1e-5))
 
 
 class BuildAuxTargetsBreakdownTest(absltest.TestCase):
