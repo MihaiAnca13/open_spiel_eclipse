@@ -58,19 +58,27 @@ def main():
   # Full random playout to terminal.
   steps = 0
   rng = random.Random(SEED)
+  # FcmGame::MaxGameLength == 100000; long FCM games (many turns with marketing
+  # multi-step selectors) can exceed 20000 policy-level actions, so this cap is
+  # the engine's own bound, not a smaller guess.
+  max_steps = 100000
   while not state.is_terminal():
     legal = state.legal_actions()
     if not legal:
       check(False, "terminal misdetected (no legal actions but not terminal)")
-      print("STUCK-STATE-SERIALIZED-START")
-      print(state.serialize())
-      print("STUCK-STATE-SERIALIZED-END")
       break
     action = rng.choice(legal)
-    state.apply_action(action)
+    try:
+      state.apply_action(action)
+    except RuntimeError as e:
+      print("APPLY-ERR-START action=%s err=%s" % (action, e))
+      print(state.serialize())
+      print("APPLY-ERR-END")
+      check(False, "apply_action raised at step %d" % steps)
+      break
     steps += 1
-    if steps > 20000:  # safety cap; FCM games are long
-      check(False, "playout exceeded step cap without reaching terminal")
+    if steps > max_steps:  # engine MaxGameLength bound
+      check(False, "playout exceeded MaxGameLength without reaching terminal")
       break
   check(state.is_terminal(), "random playout reached terminal in %d steps" % steps)
   ret = state.returns()
