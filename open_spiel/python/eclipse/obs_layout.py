@@ -113,6 +113,39 @@ V2_PLANET_SLOTS_START = V2_UNIT_ROUTES_START + UNIT_ROWS * UNIT_ROUTE_SIZE
 V2_COMBAT_START = V2_PLANET_SLOTS_START + PLANET_SLOT_ROWS * PLANET_SLOT_SIZE
 TOTAL = V2_KEYED_START + V2_KEYED_SIZE
 
+# ── offsets INSIDE the V2 global sub-block ────────────────────────────────
+# These were written by observation.cpp from the first V2 commit but never read
+# by any encoder, so the tech bag, the revealed-discovery ledger and the
+# currently-revealed tile were dead weight in the tensor. Named here so the
+# encoder can actually consume them.
+VG_VIEWER_SEAT = 0                            # + MAX_SEATS one-hot
+VG_TECH_BAG = VG_VIEWER_SEAT + MAX_SEATS      # + TECH_BIT_COUNT histogram
+VG_DISCOVERY_LEDGER = VG_TECH_BAG + TECH_BIT_COUNT   # + DISCOVERY_BIT_COUNT
+VG_CURRENT_DISCOVERY = VG_DISCOVERY_LEDGER + DISCOVERY_BIT_COUNT
+# + DISCOVERY_BIT_COUNT + 1 one-hot, index 0 == NONE
+
+# ── offsets INSIDE one V2 seat row ────────────────────────────────────────
+VS_VALID = 0
+VS_SEAT_ABS = 1
+VS_TECH_TRACKS = 2                            # + 3 * TECH_BIT_COUNT
+
+# ── offsets INSIDE the V2 cell row ────────────────────────────────────────
+VC_SECTOR_ID = 0                              # categorical, 0..395 (embed it)
+VC_ROTATION = 1                               # categorical, 0..5 (embed it)
+
+# ── V2 combat sub-block record layout ─────────────────────────────────────
+BATTLE_QUEUE_CAP = 8
+DESTROYED_CAP = 32
+INITIATIVE_CAP = 16
+DIE_CAP = 64
+RETREATING_CAP = 16
+VCB_BATTLE = 0
+VCB_DESTROYED = VCB_BATTLE + BATTLE_QUEUE_CAP * V2_BATTLE_RECORD_SIZE
+VCB_SHIP_ORDER = VCB_DESTROYED + DESTROYED_CAP * V2_DESTROYED_RECORD_SIZE
+VCB_DICE = VCB_SHIP_ORDER + INITIATIVE_CAP * SHIP_TYPE_COUNT
+VCB_RETREATING = VCB_DICE + DIE_CAP * V2_DIE_RECORD_SIZE
+VCB_POP_CELL = VCB_RETREATING + RETREATING_CAP * V2_RETREAT_RECORD_SIZE
+
 # Offsets within a keyed unit row.
 U_VALID = 0
 U_OWNER = 1                       # + REL_SEAT_WIDTH
@@ -275,6 +308,14 @@ def _self_check():
   assert U_LEGAL_DIE_TARGET + 1 == UNIT_ROW_SIZE
   assert V2_COMBAT_START + V2_COMBAT_SIZE == TOTAL
   assert TOTAL == 37596, TOTAL
+  # The V2 sub-block offsets must tile their blocks exactly, or the encoder
+  # reads one field while believing it reads another.
+  assert VG_CURRENT_DISCOVERY + DISCOVERY_BIT_COUNT + 1 == V2_GLOBAL_SIZE
+  assert VS_TECH_TRACKS + TECH_TRACK_COUNT * TECH_BIT_COUNT == V2_SEAT_SIZE
+  assert VC_ROTATION + 1 == V2_CELL_SIZE
+  assert VCB_POP_CELL + 1 == V2_COMBAT_SIZE
+  assert V2_UNITS_START == V2_SEATS_START + SEAT_SLOTS * V2_SEAT_SIZE + \
+      GALAXY_CELLS * V2_CELL_SIZE
 
 
 _self_check()

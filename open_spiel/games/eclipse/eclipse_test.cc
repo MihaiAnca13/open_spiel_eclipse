@@ -1692,6 +1692,75 @@ void UpkeepObservationTensorTest() {
 
 // The observation must expose every seat identically and must NEVER leak the
 // identity of a face-down discovery tile.
+// RevealDiscovery is the single reveal path the V2 ledger depends on, and it was
+// shipped with no test and no runtime evidence of ever executing: across 8 full
+// random games the ledger and current-revealed channels stayed identically zero,
+// even though a discovery tile was on the board in 901 of 901 sampled states.
+// That is because discovery tiles sit mostly on Ancient sectors, so the reward
+// defers to the Combat phase's discovery_award step, which random play never
+// reaches. This drives the state to the reveal directly.
+void RevealDiscoveryLedgerTest() {
+  namespace obs = open_spiel::eclipse::obs;
+  std::shared_ptr<const Game> game = LoadEclipseGame(2, 7);
+  std::unique_ptr<State> state = game->NewInitialState();
+  state->ApplyAction(0);
+  EclipseState* eclipse_state = static_cast<EclipseState*>(state.get());
+  ::State& raw = const_cast<::State&>(eclipse_state->RawState());
+
+  // Find any placed sector and give it a known face-down discovery tile.
+  Sector* target = nullptr;
+  for (int q = -GALAXY_RADIUS; q <= GALAXY_RADIUS && target == nullptr; ++q) {
+    for (int r = -GALAXY_RADIUS; r <= GALAXY_RADIUS; ++r) {
+      if (!in_galaxy_bounds(q, r)) continue;
+      Sector& s = raw.galaxy.at(q, r);
+      if (s.sector_id != 0) { target = &s; break; }
+    }
+  }
+  SPIEL_CHECK_TRUE(target != nullptr);
+  target->discovery_tile_present = true;
+  target->discovery_tile = DiscoveryBit::MUON_SOURCE;
+
+  const int bit = __builtin_ctzll(
+      static_cast<uint64_t>(DiscoveryBit::MUON_SOURCE)) - 1;
+  SPIEL_CHECK_GE(bit, 0);
+  SPIEL_CHECK_LT(bit, obs::kDiscoveryBitCount);
+  SPIEL_CHECK_EQ(raw.revealed_discovery_counts[bit], 0);
+
+  // The reveal is what the ledger hangs off, and it must return the tile that
+  // was actually face down on that sector -- not a fresh bag draw.
+  const DiscoveryBit drawn = RevealDiscovery(raw, *target);
+  SPIEL_CHECK_TRUE(drawn == DiscoveryBit::MUON_SOURCE);
+  SPIEL_CHECK_EQ(raw.revealed_discovery_counts[bit], 1);
+  SPIEL_CHECK_TRUE(raw.current_revealed_discovery == DiscoveryBit::MUON_SOURCE);
+
+  // Called again for the same pending decision (Explore reveals, then the
+  // reward/VP handler asks again) it must NOT double-count.
+  const DiscoveryBit again = RevealDiscovery(raw, *target);
+  SPIEL_CHECK_TRUE(again == DiscoveryBit::MUON_SOURCE);
+  SPIEL_CHECK_EQ(raw.revealed_discovery_counts[bit], 1);
+
+  // Both V2 channels must now be readable by the agent: the ledger count and
+  // the currently-revealed identity one-hot (index 0 is NONE).
+  const int n = game->ObservationTensorShape()[0];
+  std::vector<float> t(n, 0.0f);
+  state->ObservationTensor(0, absl::MakeSpan(t));
+  const int ledger = obs::kV2KeyedStart + obs::kMaxSeats + obs::kTechBitCount;
+  SPIEL_CHECK_GT(t[ledger + bit], 0.0f);
+  const int current = ledger + obs::kDiscoveryBitCount;
+  SPIEL_CHECK_EQ(t[current], 0.0f);            // NONE slot must be cold
+  SPIEL_CHECK_EQ(t[current + 1 + bit], 1.0f);  // the revealed tile is hot
+
+  // A tile that leaves the board stays in the ledger -- that is the whole point
+  // of a public history -- while the "currently revealed" slot clears.
+  raw.current_revealed_discovery = DiscoveryBit::NONE;
+  target->discovery_tile_present = false;
+  target->discovery_tile = DiscoveryBit::NONE;
+  std::vector<float> after(n, 0.0f);
+  state->ObservationTensor(0, absl::MakeSpan(after));
+  SPIEL_CHECK_GT(after[ledger + bit], 0.0f);
+  SPIEL_CHECK_EQ(after[current], 1.0f);  // back to NONE
+}
+
 void ObservationLayoutTest() {
   namespace obs = open_spiel::eclipse::obs;
   std::shared_ptr<const Game> game = LoadEclipseGame(2, 7);
@@ -3315,6 +3384,7 @@ int main(int argc, char** argv) {
   RUN_TEST(RoundEightCleanupEndsGameTest);
   RUN_TEST(UpkeepObservationTensorTest);
   RUN_TEST(ObservationLayoutTest);
+  RUN_TEST(RevealDiscoveryLedgerTest);
   RUN_TEST(CombatDiceChanceFlowTest);
   RUN_TEST(TiedInitiativeOrderTest);
   RUN_TEST(TiedInitiativeMissileEdgeTest);

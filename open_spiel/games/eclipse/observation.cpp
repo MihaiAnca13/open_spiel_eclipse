@@ -952,7 +952,13 @@ void WriteObservationTensor(const ::State& state, int player, int num_players,
       Frac(values, r++, source_valid ? static_cast<float>(source.q) : 0.0f, GALAXY_RADIUS);
       Frac(values, r++, source_valid ? static_cast<float>(source.r) : 0.0f, GALAXY_RADIUS);
       Frac(values, r++, static_cast<float>(u.damage), 8.0f);
-      Frac(values, r++, static_cast<float>(u.arrival_order), 400.0f);
+      // Arrival order is RELATIVE to the live counter, not a fixed /400: the
+      // absolute counter only ever reached ~12 in a full game, so the old
+      // divisor spent 97% of its range on values that never occur and left
+      // every unit's arrival indistinguishable from every other's. Combat's
+      // arrival tiebreak only cares about recency, which this is.
+      Frac(values, r++, static_cast<float>(u.arrival_order),
+           static_cast<float>(std::max<uint32_t>(state.next_arrival_order, 1u)));
       Flag(values, r++, state.move_state.active_unit_idx == i);
       Flag(values, r++, state.move_state.warp_unit_idx == i);
       bool legal_target = false;
@@ -986,7 +992,12 @@ void WriteObservationTensor(const ::State& state, int player, int num_players,
       const Sector& sec = state.galaxy.at(hc.q, hc.r);
       const SectorDefinition* def = sec.sector_id == 0 ? nullptr : get_sector_definition(sec.sector_id);
       const int printed = def == nullptr ? 0 : static_cast<int>(def->slots.size());
-      SPIEL_CHECK_LE(printed, kPlanetSlotsPerCell);
+      // Strictly less than: the Orbital occupies row `printed`, so a tile with
+      // kPlanetSlotsPerCell printed slots would silently lose its orbital row
+      // (and its occupancy bit) off the end of the table. Widest real tile has
+      // 6 slots, so this is a guard, not a live constraint -- but it must fail
+      // loudly rather than drop a colonisable slot the action space still offers.
+      SPIEL_CHECK_LT(printed, kPlanetSlotsPerCell);
       for (int slot = 0; slot < kPlanetSlotsPerCell; ++slot) {
         const int s = V2PlanetSlotStart(cell, slot);
         const bool orbital = def != nullptr && sec.orbital_built && slot == printed;
@@ -1017,7 +1028,8 @@ void WriteObservationTensor(const ::State& state, int player, int num_players,
         if (p >= battle.participant_count) continue;
         Frac(values, e + 3 + p * 2,
              static_cast<float>(RelSeatOrNpc(battle.participant_ids[p], player, num_players)), kRelSeatWidth - 1);
-        Frac(values, e + 4 + p * 2, static_cast<float>(battle.latest_arrival[p]), 400.0f);
+        Frac(values, e + 4 + p * 2, static_cast<float>(battle.latest_arrival[p]),
+             static_cast<float>(std::max<uint32_t>(state.next_arrival_order, 1u)));
       }
     }
     o += kBattleQueueCap * kV2BattleRecordSize;

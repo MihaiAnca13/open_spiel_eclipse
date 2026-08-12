@@ -41,6 +41,7 @@ from datetime import datetime
 import json
 import os
 import random
+import sys
 import time
 import warnings
 from absl import app
@@ -99,12 +100,20 @@ _ACTIVE_PBAR = None
 
 
 def _emit(message):
-  """Print outside the progress bar (above it) when one is active."""
+  """Print outside the progress bar (above it) when one is active.
+
+  Flushed explicitly. The progress bar writes to stderr, but ``tqdm.write`` goes
+  to stdout, which is BLOCK-buffered as soon as the log is redirected to a file
+  -- so every [gate], [timing] and verdict line sat invisible in an 8 KB buffer
+  while the bar scrolled past in real time. A supervisor tailing train.log saw
+  them only in delayed chunks, and lost them entirely if the run was killed.
+  """
   bar = _ACTIVE_PBAR
   if bar is not None:
     bar.write(message)
   else:
     print(message)
+  sys.stdout.flush()
 
 FLAGS = flags.FLAGS
 
@@ -120,9 +129,12 @@ flags.DEFINE_bool(
     "throughput benchmarking; no scalar diagnostics are persisted.")
 flags.DEFINE_bool(
     "timing", False,
-    "Emit per-phase wall-clock timings (ms/env-step) for the async loop "
-    "every --timing_every updates. Phases: act (PPO step_np), env "
-    "(AsyncVectorEnv.step_np nearest draw), shape (potential), learn.")
+    "Emit per-phase wall-clock timings for the async loop every "
+    "--timing_every updates. Rollout phases are ms per env-step: act (PPO "
+    "step_np), env (AsyncVectorEnv.step_np), shape+refresh (potential), post. "
+    "The learn phase is reported separately in seconds/update with its share "
+    "of update wall-clock, because it happens once per update, not per step -- "
+    "and because it is typically the majority of the time.")
 flags.DEFINE_integer("timing_every", 10,
                      "Cadence (updates) for --timing per-phase report.")
 
@@ -443,8 +455,14 @@ flags.DEFINE_float("exploit_lr", 1e-3,
                    "Learning rate used in exploiter mode (higher than main).")
 
 
+# ``slots`` are the RAW (B, 1800, 4) planet-slot rows, deliberately not embedded
+# here: only the handful of rows an action actually points at ever need an
+# embedding, and doing it per-pointer in the head costs O(M) instead of
+# O(1800 * B). ``seat_valid`` is load-bearing -- padding seat rows decode to
+# absolute seat 0 and must never win a seat pointer.
 PointerContext = collections.namedtuple(
-    "PointerContext", "cells units slots seats routes seat_abs pop_cell")
+    "PointerContext",
+    "cells units slots seats routes seat_abs seat_valid pop_cell")
 
 
 class SpatialEclipseEncoder(nn.Module):
@@ -494,24 +512,61 @@ class SpatialEclipseEncoder(nn.Module):
     )
     self.galaxy_fc = layer_init(nn.Linear(c, width))
 
+    # ── Per-cell categorical identity, embedded (not read as a scalar) ──────
+    # sector_id is a 396-way categorical and rotation a 6-way one. Both were
+    # written into the V2 cell block from the first V2 commit and read by
+    # NOTHING; feeding a normalised id straight into a Linear would make the
+    # net learn a 396-way lookup along one dimension.
+    #
+    # These add residually onto post-GroupNorm conv features (so O(1) scale).
+    # std=0.02 rather than zeros: zero-init would make the block inert until
+    # gradients accumulate, which is indistinguishable from never having wired
+    # it up -- the exact failure mode this whole block just came out of. 2% of
+    # the feature scale informs without destabilising.
+    self.sector_embed = nn.Embedding(396, c)
+    self.rotation_embed = nn.Embedding(obs_layout.HEX_DIRECTIONS, c)
+    nn.init.normal_(self.sector_embed.weight, std=0.02)
+    nn.init.normal_(self.rotation_embed.weight, std=0.02)
+
     # ── Viewer self block: (547,) MLP ───────────────────────────────────────
     self.self_mlp = self._mlp(obs_layout.PLAYER_SIZE, width, depth, act)
 
     # ── Tail blocks (tech market + combat + upkeep + action states) ─────────
+    # V2 global (tech-bag histogram, revealed-discovery ledger, currently
+    # revealed tile) and V2 combat (keyed battle/destroyed/initiative/dice/
+    # retreat records) are appended here. They were 659 of the 1,835 V2 floats
+    # that were written every step and never reached the network.
+    # ponytail: flat into the tail MLP rather than their own pooled branches --
+    # V1's combat block already carries the pooled forms and IS consumed, so
+    # this adds the ordering/exactness for one wider Linear. Give them a
+    # per-record branch if a gradient probe shows the tail is ignoring them.
     tail_size = (obs_layout.TECH_MARKET_SIZE + obs_layout.COMBAT_SIZE
-                 + obs_layout.UPKEEP_SIZE + obs_layout.ACTION_STATES_SIZE)
+                 + obs_layout.UPKEEP_SIZE + obs_layout.ACTION_STATES_SIZE
+                 + obs_layout.V2_GLOBAL_SIZE + obs_layout.V2_COMBAT_SIZE)
     self.tail_mlp = self._mlp(tail_size, width, depth, act)
 
     # ── Relational: shared per-seat MLP -> masked mean+max pool ─────────────
-    self.seat_mlp = self._mlp(obs_layout.PLAYER_SIZE, width, depth, act)
+    # The V2 seat row (absolute-seat key + the three distinct 40-bit tech
+    # tracks) is concatenated onto the V1 block: 726 more previously-dead
+    # floats, and it is the seat pointer's target embedding.
+    self.seat_mlp = self._mlp(obs_layout.PLAYER_SIZE + obs_layout.V2_SEAT_SIZE,
+                              width, depth, act)
     self.rel_fc = layer_init(nn.Linear(2 * width, width))
 
     # ── Keyed V2 entity rows; the heads retain these embeddings for pointers.
     self.unit_mlp = self._mlp(obs_layout.UNIT_ROW_SIZE + width + c, width,
                               depth, act)
-    self.slot_mlp = self._mlp(obs_layout.PLANET_SLOT_SIZE + c, width, depth,
-                              act)
-    self.entity_fc = layer_init(nn.Linear(4 * width, width))
+    # Owner context must span all 8 relative-seat codes, not just the 6 seat
+    # blocks: kRelNpc == 6 and kRelNone == 7. Two learned rows extend the seat
+    # bank so an NPC unit stops borrowing a (usually empty) player block.
+    self.nonplayer_owner = nn.Parameter(torch.zeros(1, 2, width))
+    # Entity self-attention over the unit rows -- the OF5/AlphaStar mechanism
+    # this keyed block was modelled on. Units only: slot-slot attention would
+    # be O(1800^2) and the conv tower already relates slots spatially.
+    heads = next(h for h in (8, 4, 2, 1) if width % h == 0)
+    self.unit_attn = nn.MultiheadAttention(width, heads, batch_first=True)
+    self.unit_norm = nn.LayerNorm(width)
+    self.entity_fc = layer_init(nn.Linear(2 * width, width))
 
     # ── Fuse branch latents to (B, width) ───────────────────────────────────
     self.fuse = layer_init(nn.Linear(5 * width, width))
@@ -537,7 +592,11 @@ class SpatialEclipseEncoder(nn.Module):
       # Compiling per-shape would mean a recompile per distinct batch size on
       # the act path (a recompile storm); one dynamic-shape compile serves
       # both call sites.
-      self._compiled_encode = torch.compile(self._encode_impl, dynamic=True)
+      # Compile _encode_context, NOT a wrapper around it: every hot call site
+      # (ppo.shared_and_cells, dense_logits) goes through forward_with_context,
+      # so compiling anything above that left the compiled graph unreachable
+      # and silently dropped the measured 1.57x --compile_encoder win.
+      self._compiled_encode = torch.compile(self._encode_context, dynamic=True)
 
   def _mlp(self, in_features, width, depth, act):
     layers = []
@@ -553,7 +612,7 @@ class SpatialEclipseEncoder(nn.Module):
 
   def forward_with_context(self, x):
     """Returns features and keyed V2 embeddings for typed action pointers."""
-    return self._encode_context(x)
+    return self._encode(x)
 
   def _encode(self, x):
     """Dispatches to the (optionally torch.compile'd) encoder body.
@@ -564,7 +623,7 @@ class SpatialEclipseEncoder(nn.Module):
     crashing training.
     """
     if self._compiled_encode is None:
-      return self._encode_impl(x)
+      return self._encode_context(x)
     try:
       return self._compiled_encode(x)
     except Exception as e:  # pylint: disable=broad-except
@@ -572,11 +631,7 @@ class SpatialEclipseEncoder(nn.Module):
           f"torch.compile(SpatialEclipseEncoder) failed at runtime ({e!r}); "
           "falling back to eager for the rest of this run.")
       self._compiled_encode = None
-      return self._encode_impl(x)
-
-  def _encode_impl(self, x):
-    features, context = self._encode_context(x)
-    return features, context.cells
+      return self._encode_context(x)
 
   def _encode_context(self, x):
     b = x.shape[0]
@@ -589,6 +644,21 @@ class SpatialEclipseEncoder(nn.Module):
     h = self.conv(gal)
     h = h + self.conv_res(h)
     h_cells = h.reshape(b, self.CELL_FEATURE_CHANNELS, obs_layout.GALAXY_CELLS)
+
+    # V2 per-cell identity: decode the normalised ids back to integers and add
+    # their embeddings to the conv features, so every downstream cell pointer
+    # sees tile identity and rotation as categoricals rather than as one float.
+    v2cells = x[:, obs_layout.V2_CELLS_START:
+                obs_layout.V2_CELLS_START +
+                obs_layout.GALAXY_CELLS * obs_layout.V2_CELL_SIZE].reshape(
+                    b, obs_layout.GALAXY_CELLS, obs_layout.V2_CELL_SIZE)
+    sector_id = (v2cells[:, :, obs_layout.VC_SECTOR_ID] * 395.0
+                 ).round().long().clamp(0, 395)
+    rotation = (v2cells[:, :, obs_layout.VC_ROTATION] *
+                (obs_layout.HEX_DIRECTIONS - 1)).round().long().clamp(
+                    0, obs_layout.HEX_DIRECTIONS - 1)
+    h_cells = h_cells + (self.sector_embed(sector_id) +
+                         self.rotation_embed(rotation)).transpose(1, 2)
     gal_lat = self.galaxy_fc(h_cells.mean(dim=-1))  # global avg pool -> (B,width)
 
     # Viewer self block (slot 0 is always the viewer).
@@ -606,6 +676,10 @@ class SpatialEclipseEncoder(nn.Module):
           obs_layout.UPKEEP_START + obs_layout.UPKEEP_SIZE],
         x[:, obs_layout.ACTION_STATES_START:
           obs_layout.ACTION_STATES_START + obs_layout.ACTION_STATES_SIZE],
+      x[:, obs_layout.V2_GLOBAL_START:
+          obs_layout.V2_GLOBAL_START + obs_layout.V2_GLOBAL_SIZE],
+      x[:, obs_layout.V2_COMBAT_START:
+          obs_layout.V2_COMBAT_START + obs_layout.V2_COMBAT_SIZE],
     ], dim=1)
     tail_lat = self.tail_mlp(tail)
 
@@ -615,7 +689,11 @@ class SpatialEclipseEncoder(nn.Module):
               obs_layout.PLAYERS_START +
               obs_layout.SEAT_SLOTS * obs_layout.PLAYER_SIZE
               ].reshape(b, obs_layout.SEAT_SLOTS, obs_layout.PLAYER_SIZE)
-    seat_h = self.seat_mlp(seats)                # (B, 6, width)
+    v2seats = x[:, obs_layout.V2_SEATS_START:
+                obs_layout.V2_SEATS_START +
+                obs_layout.SEAT_SLOTS * obs_layout.V2_SEAT_SIZE
+                ].reshape(b, obs_layout.SEAT_SLOTS, obs_layout.V2_SEAT_SIZE)
+    seat_h = self.seat_mlp(torch.cat([seats, v2seats], dim=-1))   # (B, 6, width)
     occ = seats[:, :, obs_layout.P_OCCUPIED] >= 0.5   # (B, 6)
     mask = occ.unsqueeze(-1)
     denom = occ.float().sum(dim=1, keepdim=True).clamp(min=1.0)
@@ -631,11 +709,17 @@ class SpatialEclipseEncoder(nn.Module):
               obs_layout.V2_UNITS_START +
               obs_layout.UNIT_ROWS * obs_layout.UNIT_ROW_SIZE].reshape(
                   b, obs_layout.UNIT_ROWS, obs_layout.UNIT_ROW_SIZE)
+    unit_valid = units[:, :, obs_layout.U_VALID] >= .5
+    # NO clamp to SEAT_SLOTS-1: kRelNpc == 6 and kRelNone == 7, so clamping sent
+    # every NPC unit (measured 61% of live units) to seat slot 5 -- an empty
+    # padding block in any game with fewer than 6 players. The bank is extended
+    # with two learned rows instead so the code keeps its own identity.
     owner = units[:, :, obs_layout.U_OWNER:obs_layout.U_OWNER +
-                  obs_layout.REL_SEAT_WIDTH].argmax(dim=-1).clamp(
-                      max=obs_layout.SEAT_SLOTS - 1)
-    owner_h = seat_h.gather(
-        1, owner.unsqueeze(-1).expand(-1, -1, seat_h.shape[-1]))
+                  obs_layout.REL_SEAT_WIDTH].argmax(dim=-1)
+    owner_bank = torch.cat(
+        [seat_h, self.nonplayer_owner.expand(b, -1, -1).to(seat_h.dtype)], dim=1)
+    owner_h = owner_bank.gather(
+        1, owner.unsqueeze(-1).expand(-1, -1, owner_bank.shape[-1]))
     unit_cell = (units[:, :, obs_layout.U_CELL] *
                  (obs_layout.GALAXY_CELLS - 1)).round().long().clamp(
                      0, obs_layout.GALAXY_CELLS - 1)
@@ -643,13 +727,24 @@ class SpatialEclipseEncoder(nn.Module):
         1, unit_cell.unsqueeze(-1).expand(-1, -1, h_cells.shape[1]))
     unit_h = self.unit_mlp(torch.cat([units, owner_h, unit_cell_h], dim=-1))
 
-    slots = x[:, obs_layout.V2_PLANET_SLOTS_START:
-              obs_layout.V2_PLANET_SLOTS_START +
-              obs_layout.PLANET_SLOT_ROWS * obs_layout.PLANET_SLOT_SIZE].reshape(
-                  b, obs_layout.PLANET_SLOT_ROWS, obs_layout.PLANET_SLOT_SIZE)
-    slot_cells = h_cells.transpose(1, 2).repeat_interleave(
-        obs_layout.PLANET_SLOTS_PER_CELL, dim=1)
-    slot_h = self.slot_mlp(torch.cat([slots, slot_cells], dim=-1))
+    # Entity self-attention so units see each other (fleet composition, who is
+    # stacked with whom) instead of only being mean/max pooled. Padding rows are
+    # masked out of the keys; row 0 stays unmasked because a fully-masked query
+    # row makes MultiheadAttention emit NaN.
+    pad = ~unit_valid
+    keep_first = torch.zeros_like(pad)
+    keep_first[:, 0] = True
+    # Row 0 is un-masked ONLY when a sample has no valid unit at all: a query
+    # row whose every key is masked makes MultiheadAttention emit NaN. When
+    # there IS a real unit, mask all padding so a unit never attends to a zero
+    # row and picks up its constant embedding.
+    has_any = unit_valid.any(dim=1, keepdim=True)
+    attn, _ = self.unit_attn(unit_h, unit_h, unit_h,
+                             key_padding_mask=pad & (has_any | ~keep_first),
+                             need_weights=False)
+    unit_h = self.unit_norm(
+        unit_h + torch.where(unit_valid.unsqueeze(-1), attn,
+                             torch.zeros_like(attn)))
 
     def masked_mean_max(values, valid):
       mask = valid.unsqueeze(-1)
@@ -659,22 +754,29 @@ class SpatialEclipseEncoder(nn.Module):
                             torch.full_like(values, -1e9)).max(dim=1).values
       return mean, maximum
 
-    unit_mean, unit_max = masked_mean_max(unit_h, units[:, :, obs_layout.U_VALID] >= .5)
-    slot_mean, slot_max = masked_mean_max(slot_h, slots[:, :, 0] >= .5)
-    entity_lat = self.entity_fc(torch.cat(
-        [unit_mean, unit_max, slot_mean, slot_max], dim=1))
+    unit_mean, unit_max = masked_mean_max(unit_h, unit_valid)
+    entity_lat = self.entity_fc(torch.cat([unit_mean, unit_max], dim=1))
+
+    # Planet slots stay RAW here. 98.2% of the 1,800 rows are padding (measured:
+    # 32 valid), and the old per-row MLP over all of them was the single largest
+    # cost in the encoder. The head embeds only the rows an action points at, and
+    # what the pool would have contributed is already in the conv tower via V1's
+    # C_PLANET_PRINTED / C_PLANET_POPULATED channels.
+    slots = x[:, obs_layout.V2_PLANET_SLOTS_START:
+              obs_layout.V2_PLANET_SLOTS_START +
+              obs_layout.PLANET_SLOT_ROWS * obs_layout.PLANET_SLOT_SIZE].reshape(
+                  b, obs_layout.PLANET_SLOT_ROWS, obs_layout.PLANET_SLOT_SIZE)
     routes = x[:, obs_layout.V2_UNIT_ROUTES_START:
                obs_layout.V2_UNIT_ROUTES_START +
                obs_layout.UNIT_ROWS * obs_layout.UNIT_ROUTE_SIZE].reshape(
                    b, obs_layout.UNIT_ROWS, obs_layout.UNIT_ROUTE_SIZE)
-    seat_abs = (x[:, obs_layout.V2_SEATS_START + 1:
-                  obs_layout.V2_SEATS_START +
-                  obs_layout.SEAT_SLOTS * obs_layout.V2_SEAT_SIZE:
-                  obs_layout.V2_SEAT_SIZE] * (obs_layout.MAX_SEATS - 1)).round().long()
-    pop_cell = (x[:, obs_layout.V2_COMBAT_START + obs_layout.V2_COMBAT_SIZE - 1] *
+    seat_abs = (v2seats[:, :, obs_layout.VS_SEAT_ABS] *
+                (obs_layout.MAX_SEATS - 1)).round().long()
+    seat_valid = v2seats[:, :, obs_layout.VS_VALID] >= .5
+    pop_cell = (x[:, obs_layout.V2_COMBAT_START + obs_layout.VCB_POP_CELL] *
                 obs_layout.GALAXY_CELLS).round().long() - 1
-    context = PointerContext(h_cells, unit_h, slot_h, seat_h, routes, seat_abs,
-                             pop_cell)
+    context = PointerContext(h_cells, unit_h, slots, seat_h, routes, seat_abs,
+                             seat_valid, pop_cell)
     fused = self.fuse(torch.cat(
         [gal_lat, self_lat, tail_lat, rel_lat, entity_lat], dim=1))
     return fused, context
@@ -719,12 +821,30 @@ class FactoredActorHead(nn.Module):
 
 
 class TypedPointerActorHead(FactoredActorHead):
-  """Factored flat API with state-conditioned pointers to V2 entity keys."""
+  """Factored flat API with state-conditioned pointers to V2 entity keys.
 
-  DENSE_CHUNK_SIZE = 256
+  Each action id already names its target entity (action 5,412 IS "colonize
+  cell 42 slot 3"), and legality masking turns the flat softmax over legal
+  actions into the pointer distribution. So a pointer needs exactly ONE score
+  per (state, action) pair -- the entity that action names.
+
+  That is why every pointer here gathers its target row and then dots, rather
+  than dotting against all N entity rows and gathering one score out. The two
+  are algebraically identical -- gather_j(q . S) == q . S_j, verified bitwise on
+  both values and gradients -- but the score-all form allocated
+  (M, 1800, width) for the slot pointer alone, which is ~135 GB at the real
+  minibatch geometry (8,192 states x ~18 legal actions). Do not "simplify" this
+  back into a full matmul.
+
+  TRAP: ``rows_for``/``full_weight`` are inherited UNCHANGED and return the BASE
+  term only. Anything calling them directly gets the entity-blind policy; go
+  through ``logits_for`` or ``forward(features, context)``.
+  """
+
+  DENSE_CHUNK_SIZE = 1024
 
   def __init__(self, decode, num_rows, num_actions, width, factors,
-               cell_channels):
+               cell_channels, activation="gelu"):
     super().__init__(decode, num_rows, num_actions, width)
     self.register_buffer("cell_id", torch.from_numpy(factors.cell_id))
     self.register_buffer("unit_id", torch.from_numpy(factors.unit_id))
@@ -744,61 +864,93 @@ class TypedPointerActorHead(FactoredActorHead):
     for table in (self.cell_family, self.unit_family, self.slot_family,
                   self.seat_family):
       nn.init.zeros_(table.weight)
+    # A colony/population pointer's whole view of its target used to be the 4
+    # raw floats of the slot row, with the 8-way PlanetType as an ORDINAL scalar
+    # (MONEY vs ADV_MONEY differing by 0.14 in one channel) -- for 5,400 of the
+    # 11,117 actions. The type is decoded back to an integer and embedded, and
+    # the target's own cell features are joined in.
+    act = nn.GELU if activation == "gelu" else nn.Tanh
+    self.planet_type_embed = nn.Embedding(obs_layout.PLANET_TYPE_COUNT, 16)
+    self.slot_target = nn.Sequential(
+        layer_init(nn.Linear(obs_layout.PLANET_SLOT_SIZE + 16 + cell_channels,
+                             width)),
+        act(),
+        layer_init(nn.Linear(width, width)),
+    )
 
-  @staticmethod
-  def _gather(values, ids):
-    return values.gather(
-        1, ids.clamp(min=0, max=values.shape[1] - 1).unsqueeze(1)).squeeze(1)
+  def _pick(self, table, rows, idx):
+    """The single row (rows[i], idx[i]) of a (B, N, D) table -> (M, D).
+
+    Both index tensors are applied in ONE advanced-indexing step. Indexing rows
+    first (``table[rows]``) would materialise (M, N, D) -- the exact allocation
+    that made this head unrunnable.
+    """
+    return table[rows, idx.clamp(min=0, max=table.shape[1] - 1)]
 
   def _pairs(self, features, context, rows, cols):
-    base = ((features[rows] * self.rows_for(cols)).sum(-1) + self.bias[cols])
+    f = features[rows]
+    result = (f * self.rows_for(cols)).sum(-1) + self.bias[cols]
+    zero = torch.zeros_like(result)
     family = self.family_id[cols]
-    result = base
-    cell_q = self.cell_query(features[rows]) + self.cell_family(family)
-    cell_logits = (cell_q.unsqueeze(-1) * context.cells[rows]).sum(1)
+    cells_t = context.cells.transpose(1, 2)      # (B, 225, C), a view
+
     cell = self.cell_id[cols]
-    has_cell = cell >= 0
-    result = result + torch.where(has_cell, self._gather(cell_logits, cell),
-                                  torch.zeros_like(result))
+    cell_q = self.cell_query(f) + self.cell_family(family)
+    result = result + torch.where(
+        cell >= 0, (cell_q * self._pick(cells_t, rows, cell)).sum(-1), zero)
 
     unit = self.unit_id[cols]
-    has_unit = unit >= 0
-    unit_q = self.unit_query(features[rows]) + self.unit_family(family)
-    unit_logits = (unit_q.unsqueeze(1) * context.units[rows]).sum(-1)
-    result = result + torch.where(has_unit, self._gather(unit_logits, unit),
-                                  torch.zeros_like(result))
+    unit_q = self.unit_query(f) + self.unit_family(family)
+    result = result + torch.where(
+        unit >= 0, (unit_q * self._pick(context.units, rows, unit)).sum(-1),
+        zero)
+
     # A normal MOVE_UNIT action points both at its registry row and the
     # destination resolved from that row/direction in the current universe.
     direction = self.direction_id[cols]
-    has_route = has_unit & (direction >= 0)
-    if has_route.any():
-      route = context.routes[rows, unit.clamp(min=0), direction.clamp(min=0)]
-      destination = (route * obs_layout.GALAXY_CELLS).round().long() - 1
-      has_route = has_route & (route > 0)
-      result = result + torch.where(has_route,
-                                    self._gather(cell_logits, destination),
-                                    torch.zeros_like(result))
+    route = context.routes[rows, unit.clamp(min=0), direction.clamp(min=0)]
+    destination = (route * obs_layout.GALAXY_CELLS).round().long() - 1
+    has_route = (unit >= 0) & (direction >= 0) & (route > 0)
+    result = result + torch.where(
+        has_route, (cell_q * self._pick(cells_t, rows, destination)).sum(-1),
+        zero)
 
+    # Colony slots are globally keyed as cell*8+slot; combat population uses its
+    # V2 current-target-cell key with the same local slot number. The engine
+    # offers COMBAT_POP_TARGET_0..15 against an 8-wide table, so slot >= 8 must
+    # be rejected here -- otherwise cell*8+slot silently aliases into the NEXT
+    # cell's rows (the clamp inside _pick only bounds the flat array end).
     slot = self.slot_id[cols]
-    # Colony slots are globally keyed as cell*8+slot; combat population uses
-    # its V2 current-target-cell key with the same local slot number.
-    colony_slot = torch.where(
+    pop_cell = context.pop_cell[rows]
+    keyed_slot = torch.where(
         cell >= 0, cell * obs_layout.PLANET_SLOTS_PER_CELL + slot,
-        context.pop_cell[rows] * obs_layout.PLANET_SLOTS_PER_CELL + slot)
-    has_slot = slot.ge(0) & ((cell >= 0) | (context.pop_cell[rows] >= 0))
-    slot_q = self.slot_query(features[rows]) + self.slot_family(family)
-    slot_logits = (slot_q.unsqueeze(1) * context.slots[rows]).sum(-1)
-    result = result + torch.where(has_slot, self._gather(slot_logits, colony_slot),
-                                  torch.zeros_like(result))
+        pop_cell * obs_layout.PLANET_SLOTS_PER_CELL + slot)
+    has_slot = ((slot >= 0) & (slot < obs_layout.PLANET_SLOTS_PER_CELL)
+                & ((cell >= 0) | (pop_cell >= 0)))
+    slot_row = self._pick(context.slots, rows, keyed_slot)
+    ptype = (slot_row[:, 1] * (obs_layout.PLANET_TYPE_COUNT - 1)
+             ).round().long().clamp(0, obs_layout.PLANET_TYPE_COUNT - 1)
+    slot_cell = self._pick(
+        cells_t, rows,
+        torch.div(keyed_slot, obs_layout.PLANET_SLOTS_PER_CELL,
+                  rounding_mode="floor"))
+    slot_h = self.slot_target(
+        torch.cat([slot_row, self.planet_type_embed(ptype), slot_cell], dim=-1))
+    slot_q = self.slot_query(f) + self.slot_family(family)
+    result = result + torch.where(has_slot, (slot_q * slot_h).sum(-1), zero)
 
+    # Seats: finding the block that holds an ABSOLUTE seat id is a search over
+    # the 6 slots, so this one genuinely reduces -- but only over VALID slots.
+    # Padding rows decode to absolute seat 0, so an unmasked reduction let
+    # "propose to seat 0" be won by a constant padding embedding.
     target_seat = self.seat_id[cols]
-    has_seat = target_seat >= 0
-    seat_q = self.seat_query(features[rows]) + self.seat_family(family)
-    seat_logits = (seat_q.unsqueeze(1) * context.seats[rows]).sum(-1)
-    matches = context.seat_abs[rows].eq(target_seat.unsqueeze(-1))
-    selected = torch.where(matches, seat_logits,
-                           torch.full_like(seat_logits, -1e9)).max(dim=1).values
-    result = result + torch.where(has_seat, selected, torch.zeros_like(result))
+    matches = (context.seat_abs[rows].eq(target_seat.unsqueeze(-1))
+               & context.seat_valid[rows])
+    seat_q = self.seat_query(f) + self.seat_family(family)
+    seat_h = self._pick(context.seats, rows, matches.float().argmax(dim=1))
+    result = result + torch.where(
+        (target_seat >= 0) & matches.any(dim=1),
+        (seat_q * seat_h).sum(-1), zero)
     return result
 
   def logits_for(self, features, context, rows, cols):
@@ -899,7 +1051,8 @@ class EclipsePPOAgent(nn.Module):
     elif encoder == "spatial":
       actor_head = TypedPointerActorHead(
           factored_actions.decode, factored_actions.num_rows, num_actions,
-          width, factored_actions, SpatialEclipseEncoder.CELL_FEATURE_CHANNELS)
+          width, factored_actions, SpatialEclipseEncoder.CELL_FEATURE_CHANNELS,
+          activation=activation)
     else:
       actor_head = FactoredActorHead(
           factored_actions.decode, factored_actions.num_rows, num_actions,
@@ -1923,7 +2076,13 @@ def evaluate_batched(policies, lineup, game_strs, num_players, num_games,
           observations_as_numpy=True)
       for i in range(num_envs)
   ]
-  vec = AsyncVectorEnv(envs, num_workers=min(num_workers, num_envs),
+  # max(1, ...): --num_workers defaults to 0, which for the TRAINING loop means
+  # "run synchronously" (use_async is `> 0`). AsyncVectorEnv cannot honour 0 --
+  # it divides num_envs by it -- so a caller that forwarded the raw flag crashed
+  # with ZeroDivisionError. main()'s verdict path already clamped; roster_ladder
+  # did not, which made the ladder unusable at default flags. Clamping in this
+  # shared helper covers every caller instead of one at a time.
+  vec = AsyncVectorEnv(envs, num_workers=max(1, min(num_workers, num_envs)),
                        sampler_seeds=[1 + i for i in range(num_envs)],
                        game_strs=game_strs, max_legal=max_legal)
   diag = EpisodeDiagnostics(num_envs, num_players, history=max(num_games, 1))
@@ -2451,6 +2610,18 @@ def main(_):
                                 input_shape, device)
       if net_r is not None:
         sd = net_r.state_dict()
+    if sd is None and os.path.isdir(resume_src):
+      # A roster DIRECTORY is the natural thing to reach for when extending a
+      # run, but this flag wants a policy id or a .pt file. torch.load on a
+      # directory raised IsADirectoryError from deep inside serialization, and
+      # because the env workers were already up the process then HUNG instead of
+      # exiting -- a supervisor would wait forever on a typo.
+      cand = os.path.join(resume_src, "main.pt")
+      raise ValueError(
+          f"--resume={resume_src} is a directory. Pass a roster policy id "
+          f"(e.g. --resume=main with --roster_dir={resume_src}) or an explicit "
+          f"checkpoint path"
+          + (f" such as {cand}" if os.path.exists(cand) else ""))
     if sd is None and os.path.exists(resume_src):
       sd = torch.load(resume_src, map_location=device, weights_only=True)
     if sd is None:
@@ -2579,7 +2750,8 @@ def main(_):
   if use_async:
     _ = envs.reset(players="current")
     step_arrays = envs.reset_np()
-    _tm = (np.zeros(5, dtype=np.float64) if FLAGS.timing else None)
+    # act, act+phi, env, shape+refresh, post, learn
+    _tm = (np.zeros(6, dtype=np.float64) if FLAGS.timing else None)
     _tm_scale = 1.0 / max(1, FLAGS.num_steps)
     _run_t0 = time.time()
     _last_verdict_ts = [_run_t0]
@@ -2657,17 +2829,30 @@ def main(_):
           _tm[2] += t2 - t1b
           _tm[3] += t2b - t2
           _tm[4] += t3 - t2b
+      _t_learn = time.perf_counter() if _tm is not None else None
       agent.learn_np(step_arrays.obs, step_arrays.seats)
+      if _tm is not None:
+        _tm[5] = time.perf_counter() - _t_learn
       _step_controllers(agent, writer, update, num_updates)
       if FLAGS.rank_vp_beta_anneal_to >= 0.0:
         agent.anneal_rank_vp_beta(agent.updates_done, num_updates,
                                   FLAGS.rank_vp_beta_anneal_to)
       if _tm is not None and update % FLAGS.timing_every == 0:
+        # rollout excludes _tm[0]: act+phi ALREADY contains act, so the old
+        # `_tm.sum()` counted act twice and overstated the rollout by ~40%.
+        # learn is per-update, not per-rollout-step, so it is reported in
+        # seconds/update next to the rollout's own seconds/update -- otherwise
+        # the phase that actually dominates stays invisible. It was not measured
+        # at all before, which is why "act dominates" survived as folklore.
+        _roll = (_tm[1] + _tm[2] + _tm[3] + _tm[4])
+        _upd = _roll + _tm[5]
         _emit(f"[timing u{update}] act={_tm[0]*1e3*_tm_scale:.2f}ms/env"
               f"  act+phi={_tm[1]*1e3*_tm_scale:.2f}  env={_tm[2]*1e3*_tm_scale:.2f}"
               f"  shape+refresh={_tm[3]*1e3*_tm_scale:.2f}"
               f"  post={_tm[4]*1e3*_tm_scale:.2f}"
-              f"  total={_tm.sum()*1e3*_tm_scale:.2f}")
+              f"  rollout={_roll*1e3*_tm_scale:.2f}ms/env"
+              f"  || per update: rollout={_roll:.2f}s learn={_tm[5]:.2f}s"
+              f"  learn_share={100.0 * _tm[5] / max(_upd, 1e-9):.0f}%")
       if pbar is not None:
         pbar.update(FLAGS.num_envs * FLAGS.num_steps)
         _pbar_postfix()
