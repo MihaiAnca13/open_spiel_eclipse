@@ -214,7 +214,7 @@ class Matchmaker(object):
 
   def __init__(self, roster, num_envs, num_players, train_pid="main",
                selfplay_fraction=0.5, old_fraction=0.15, seed=0,
-               rng=None):
+               rng=None, max_live_opponents=4, live_refresh=2000):
     self.roster = roster
     self.num_envs = num_envs
     self.num_players = num_players
@@ -222,6 +222,48 @@ class Matchmaker(object):
     self.selfplay_fraction = selfplay_fraction
     self.old_fraction = old_fraction
     self.rng = rng if rng is not None else np.random.RandomState(seed)
+    # See _live_opponents. 0 disables the bound (pre-2026-08-13 behaviour).
+    self.max_live_opponents = int(max_live_opponents)
+    self.live_refresh = int(live_refresh)
+    self._live = None
+    self._live_age = 0
+
+  def _live_opponents(self):
+    """A bounded, periodically-resampled subset of the roster to draw from.
+
+    Sampling uniformly over the whole roster makes throughput decay as the run
+    gets longer, and the mechanism is not obvious. ``PPO._act_sparse`` groups the
+    batch by policy id and runs **one encoder forward per distinct policy**
+    (ppo.py: `groups = [flatnonzero(pids == p) for p in unique(pids)]`). The
+    total row count is unchanged, but the launches get smaller and more numerous.
+    Measured on an RTX 4080 Laptop, 256 rows through the production encoder:
+
+        K distinct policies :   1     2     4     8    16    32
+        cost vs K=1         : 1.00x 1.00x 1.12x 2.05x 4.26x 8.32x
+
+    An unbounded roster grows K without limit -- an 8h run at
+    --snapshot_every=100 reaches ~35 snapshots, i.e. several times the act cost
+    it started with, decaying continuously. Observed directly: a league smoke run
+    with 10 snapshots had already grown act from 22.8 to 41.7 ms/step.
+
+    Bounding the *live* set keeps K small while leaving long-run coverage
+    uniform: every snapshot still enters play, just clustered in time rather than
+    interleaved. This is the usual shape of large-scale league play (a fixed
+    number of opponent slots per rollout batch) rather than a new idea.
+    """
+    ids = self.roster.opponent_ids(exclude_main=True)
+    if self.max_live_opponents <= 0 or len(ids) <= self.max_live_opponents:
+      return ids
+    stale = (self._live is None
+             or self._live_age >= self.live_refresh
+             # A snapshot in the live set was removed from the roster.
+             or not set(self._live).issubset(ids))
+    if stale:
+      self._live = [str(p) for p in self.rng.choice(
+          ids, size=self.max_live_opponents, replace=False)]
+      self._live_age = 0
+    self._live_age += 1
+    return self._live
 
   def sample_lineup(self):
     """One (num_players,) lineup of policy ids.
@@ -231,7 +273,7 @@ class Matchmaker(object):
     """
     if self.rng.rand() < self.selfplay_fraction:
       return [self.train_pid] * self.num_players
-    opponents = self.roster.opponent_ids(exclude_main=True)
+    opponents = self._live_opponents()
     picks = [self.train_pid]
     for _ in range(1, self.num_players):
       if opponents and self.rng.rand() < (1.0 - self.old_fraction):

@@ -424,6 +424,17 @@ flags.DEFINE_float("selfplay_fraction", 0.5,
                    "Fraction of (re)spawned lineups that are pure self-play.")
 flags.DEFINE_float("old_fraction", 0.125,
                    "Within mixed lineups, chance a seat is a weak/old policy.")
+flags.DEFINE_integer(
+    "max_live_opponents", 4,
+    "Cap on how many DISTINCT roster snapshots may appear in one rollout "
+    "batch. The act path runs one encoder forward per distinct policy, so an "
+    "unbounded roster makes throughput decay all run (measured: 256 rows cost "
+    "1.12x at 4 policies, 2.05x at 8, 8.32x at 32). Every snapshot still enters "
+    "play, clustered in time rather than interleaved. 0 = unbounded (the old "
+    "behaviour).")
+flags.DEFINE_integer(
+    "live_opponent_refresh", 2000,
+    "Lineup samples between resamples of the live opponent set.")
 flags.DEFINE_bool(
     "eval_squad", False,
     "At the eval cadence, pit main against a snapshots-only eval squad and "
@@ -2743,7 +2754,9 @@ def main(_):
     matchmaker = Matchmaker(
         roster, FLAGS.num_envs, num_players,
         selfplay_fraction=FLAGS.selfplay_fraction,
-        old_fraction=FLAGS.old_fraction, seed=FLAGS.seed + 12345)
+        old_fraction=FLAGS.old_fraction, seed=FLAGS.seed + 12345,
+        max_live_opponents=FLAGS.max_live_opponents,
+        live_refresh=FLAGS.live_opponent_refresh)
     _league_setup(agent, roster, matchmaker, agent_fn, num_actions,
                   input_shape, device)
   elif FLAGS.exploit_victim:

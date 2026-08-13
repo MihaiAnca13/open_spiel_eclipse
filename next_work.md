@@ -59,6 +59,44 @@ both together           : 4.505e-03
 Seven orders of magnitude apart, and combining them does not compound. **Do not
 pin `--obs_buffer_dtype=float32` for the long run.**
 
+### The league had a throughput cliff that would have eaten the long run
+
+Found by running the thing rather than reasoning about it. A `--league` smoke run
+showed `act` climbing monotonically **22.8 -> 41.7 ms/step over 45 updates and
+still rising**, while `env` and `learn` stayed flat.
+
+Cause: `PPO._act_sparse` (`ppo.py:1594-1602`) groups the batch by policy id and
+runs **one encoder forward per distinct policy**. Total rows are unchanged, but
+the launches get smaller and more numerous. Measured, 256 rows through the
+production encoder:
+
+| K distinct policies | 1 | 2 | 4 | 8 | 16 | 32 |
+|---|---|---|---|---|---|---|
+| cost vs K=1 | 1.00x | 1.00x | **1.12x** | 2.05x | 4.26x | 8.32x |
+
+`Matchmaker.sample_lineup` drew from `roster.opponent_ids()` -- **the entire
+roster, unbounded**. So K grew all run. At `--snapshot_every=100` an 8h run
+reaches ~35 snapshots; the run would have decayed toward the 4-8x column while
+looking perfectly healthy in every loss and rating metric.
+
+Fixed by bounding the *live* opponent set (`--max_live_opponents`, default 4;
+`--live_opponent_refresh`, default 2000 lineup samples; 0 restores the old
+behaviour). Every snapshot still enters play -- clustered in time instead of
+interleaved -- which is the usual shape of large-scale league play. Same smoke
+run after the fix:
+
+| update | 10 | 25 | 35 | 45 | 55 |
+|---|---|---|---|---|---|
+| act, unbounded | 22.8 | 28.9 | 36.7 | 41.7 | (still rising) |
+| act, bounded | 15.6 | 21.3 | 21.2 | **21.1** | **22.1** (flat) |
+
+`act` now **plateaus** once the live set fills, instead of growing without bound.
+At update 45 that is 2x, and the gap widens with run length. `league_test`
+asserts both halves: a batch stays within 2x the cap (the transient around a
+refresh, since an env holds its lineup until its episode ends), *and* >20 of 30
+snapshots still enter play over many refreshes -- because bounding without
+refreshing would be a silent quality regression instead of a speed one.
+
 ### Corrections to this file's own numbers
 
 - **"env-step is 68% of a 19 us step" is no longer the right frame.** The env

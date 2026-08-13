@@ -111,6 +111,67 @@ class MatchmakerTest(absltest.TestCase):
       self.assertIn("main", ids)
       self.assertIn("snap_u2", ids)
 
+  def test_live_opponent_set_is_bounded_but_still_covers_the_roster(self):
+    """A batch may hold few distinct opponents; the run must still see them all.
+
+    ``PPO._act_sparse`` runs one encoder forward per distinct policy in the
+    batch, so per-batch policy count is a throughput term, not a free parameter:
+    256 rows measured 1.12x at 4 distinct policies, 2.05x at 8 and 8.32x at 32
+    versus a single group. Left unbounded it grows with the roster and the run
+    decays -- a league smoke run went from 22.8 to 41.7 ms/step act over 45
+    updates, still climbing.
+
+    Both halves matter. Bounding without refresh would train against a fixed
+    handful of snapshots forever, which is a silent *quality* regression rather
+    than a speed one, so assert coverage too.
+
+    The bound is 2x the cap, not the cap: around a refresh the outgoing and
+    incoming live sets briefly coexist. That is not a test artifact -- in real
+    training an env keeps its lineup until its episode ends, so opponents from
+    the previous live set stay in play for some steps after the switch. 2x8 =
+    the 2.05x point on the cost curve, transiently, which the measured act
+    plateau (~21 ms flat from update 25 to 55) confirms is fine.
+    """
+    with tempfile.TemporaryDirectory() as d:
+      roster = PolicyRoster(d)
+      roster.record_main(_TinyNet(5), update=1)
+      for u in range(2, 32):
+        roster.add_snapshot(_TinyNet(5), update=u)
+      self.assertGreaterEqual(len(roster.opponent_ids(exclude_main=True)), 30)
+
+      mm = Matchmaker(roster, num_envs=64, num_players=4, train_pid="main",
+                      selfplay_fraction=0.0, old_fraction=0.0, seed=3,
+                      max_live_opponents=4, live_refresh=200)
+
+      # Any single batch stays inside the cap, allowing for one refresh
+      # straddling it. Without the bound this would be ~30.
+      for _ in range(20):
+        batch = set(mm.lineups().reshape(-1).tolist()) - {"main"}
+        self.assertLessEqual(
+            len(batch), 8,
+            f"{len(batch)} distinct opponents in one batch exceeds 2x the cap")
+
+      # ...but over many refreshes the run reaches most of the roster.
+      seen = set()
+      for _ in range(400):
+        seen.update(set(mm.lineups().reshape(-1).tolist()) - {"main"})
+      self.assertGreater(
+          len(seen), 20,
+          f"only {len(seen)} of 30 snapshots ever entered play; the live set is "
+          f"not refreshing and the league has quietly become fixed-opponent")
+
+  def test_max_live_opponents_zero_restores_unbounded_sampling(self):
+    with tempfile.TemporaryDirectory() as d:
+      roster = PolicyRoster(d)
+      roster.record_main(_TinyNet(5), update=1)
+      for u in range(2, 20):
+        roster.add_snapshot(_TinyNet(5), update=u)
+      mm = Matchmaker(roster, num_envs=256, num_players=4, train_pid="main",
+                      selfplay_fraction=0.0, old_fraction=0.0, seed=4,
+                      max_live_opponents=0)
+      batch = set(mm.lineups().reshape(-1).tolist()) - {"main"}
+      self.assertGreater(len(batch), 4)
+
 
 if __name__ == "__main__":
   absltest.main()
