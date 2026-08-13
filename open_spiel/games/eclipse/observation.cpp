@@ -415,6 +415,7 @@ void WriteObservationTensor(const ::State& state, int player, int num_players,
       float npc[kNpcShipTypes] = {0};
       float damage = 0.0f;
       bool my_ship = false;
+      bool any = false;
     };
     std::array<CellUnits, kGalaxyCells> cells{};
     for (const Unit& u : state.unit_registry) {
@@ -422,6 +423,7 @@ void WriteObservationTensor(const ::State& state, int player, int num_players,
       if (hc.q == -128) continue;
       if (!in_galaxy_bounds(hc.q, hc.r)) continue;
       CellUnits& cu = cells[hex_to_index(hc.q, hc.r)];
+      cu.any = true;
       cu.damage += static_cast<float>(u.damage);
       const int t = static_cast<int>(u.type);
       if (u.player_id == NPC_PLAYER_ID) {
@@ -458,22 +460,25 @@ void WriteObservationTensor(const ::State& state, int player, int num_players,
                    static_cast<float>(dc), static_cast<float>(kGalaxyCells));
               Frac(values, b + kCellWarpDestDir + d,
                    static_cast<float>(state.warp_link_dest_dir[idx]), 6.0f);
-            } else {
-              values[b + kCellWarpDestCell + d] = 0.0f;
-              values[b + kCellWarpDestDir + d] = 0.0f;
             }
+            // No else: the span is already zero-filled, so writing 0.0f here was
+            // pure store traffic.
           }
         }
         // Units are reported even on an unplaced cell (they cannot be there,
-        // but the write is harmless and keeps the loop branch-free).
-        for (int t = 0; t < kPlayerShipTypes; ++t) {
-          Frac(values, b + kCellMyShips + t, cu.mine[t], 8.0f);
-          Frac(values, b + kCellEnemyShips + t, cu.enemy[t], 8.0f);
+        // but the write is harmless). Skipped entirely when the cell holds no
+        // units -- every one of these 12 values is 0 then, and the span is
+        // already zeroed. ~214 of 225 cells are empty in a real game.
+        if (cu.any) {
+          for (int t = 0; t < kPlayerShipTypes; ++t) {
+            Frac(values, b + kCellMyShips + t, cu.mine[t], 8.0f);
+            Frac(values, b + kCellEnemyShips + t, cu.enemy[t], 8.0f);
+          }
+          for (int t = 0; t < kNpcShipTypes; ++t) {
+            Frac(values, b + kCellNpcShips + t, cu.npc[t], 8.0f);
+          }
+          Frac(values, b + kCellDamage, cu.damage, 16.0f);
         }
-        for (int t = 0; t < kNpcShipTypes; ++t) {
-          Frac(values, b + kCellNpcShips + t, cu.npc[t], 8.0f);
-        }
-        Frac(values, b + kCellDamage, cu.damage, 16.0f);
 
         if (sec.sector_id == 0) continue;
 
@@ -991,14 +996,23 @@ void WriteObservationTensor(const ::State& state, int player, int num_players,
       const HexCoord hc = index_to_hex(cell);
       const Sector& sec = state.galaxy.at(hc.q, hc.r);
       const SectorDefinition* def = sec.sector_id == 0 ? nullptr : get_sector_definition(sec.sector_id);
-      const int printed = def == nullptr ? 0 : static_cast<int>(def->slots.size());
+      // An unplaced cell has no valid slot and no orbital, so all four floats of
+      // all eight of its rows are zero and the span is already zeroed. Skipping
+      // drops ~214 of 225 cells, i.e. ~1,712 of the 1,800 rows.
+      if (def == nullptr) continue;
+      const int printed = static_cast<int>(def->slots.size());
       // Strictly less than: the Orbital occupies row `printed`, so a tile with
       // kPlanetSlotsPerCell printed slots would silently lose its orbital row
       // (and its occupancy bit) off the end of the table. Widest real tile has
       // 6 slots, so this is a guard, not a live constraint -- but it must fail
       // loudly rather than drop a colonisable slot the action space still offers.
       SPIEL_CHECK_LT(printed, kPlanetSlotsPerCell);
-      for (int slot = 0; slot < kPlanetSlotsPerCell; ++slot) {
+      // Rows above the orbital row are all-zero by construction (valid=false,
+      // orbital=false, and the type/occupied fields are only written under one
+      // of those), so stop at the last row that can carry a value instead of
+      // walking the full kPlanetSlotsPerCell capacity.
+      const int last_row = sec.orbital_built ? printed : printed - 1;
+      for (int slot = 0; slot <= last_row; ++slot) {
         const int s = V2PlanetSlotStart(cell, slot);
         const bool orbital = def != nullptr && sec.orbital_built && slot == printed;
         const bool valid = (def != nullptr && slot < printed) || orbital;

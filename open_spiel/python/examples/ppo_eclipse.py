@@ -2557,6 +2557,11 @@ def main(_):
     envs = SyncVectorEnv(envs_list)
     game = envs.envs[0]._game  # pylint: disable=protected-access
   input_shape = tuple(game.observation_tensor_shape())
+  # The encoder addresses every block by a hardcoded offset from obs_layout. If
+  # the C++ layout moved, a size change surfaces as an opaque Linear shape error
+  # and a *reordering* does not surface at all -- it silently trains on
+  # mis-addressed floats. This was only ever checked from the test suite.
+  obs_layout.validate(game)
   num_players = game.num_players()
 
   factored = None
@@ -2790,8 +2795,15 @@ def main(_):
   if use_async:
     _ = envs.reset(players="current")
     step_arrays = envs.reset_np()
-    # act, act+phi, env, shape+refresh, post, learn
-    _tm = (np.zeros(6, dtype=np.float64) if FLAGS.timing else None)
+    # act, act+phi, env, shape+refresh, post, learn, WALL-CLOCK rollout
+    # Slot 6 is not a phase: it brackets the whole step loop with one
+    # perf_counter pair. The per-phase slots are a *sum of durations*, which is
+    # only equal to elapsed time while the phases are strictly serialized. Any
+    # overlap (acting one env group while another group's envs step) makes two
+    # slots cover the same real seconds, so a phase-sum "update" over-counts and
+    # the derived sps goes DOWN as the run gets faster. Everything reported as
+    # per-update seconds is therefore driven off slot 6.
+    _tm = (np.zeros(7, dtype=np.float64) if FLAGS.timing else None)
     _tm_scale = 1.0 / max(1, FLAGS.num_steps)
     _run_t0 = time.time()
     _last_verdict_ts = [_run_t0]
@@ -2810,6 +2822,7 @@ def main(_):
         break
       if _tm is not None:
         _tm[:] = 0.0
+      _wall_roll0 = time.perf_counter() if _tm is not None else None
       for step in range(FLAGS.num_steps):
         t0 = time.perf_counter() if _tm is not None else None
         acts = agent.step_np(step_arrays)
@@ -2869,6 +2882,8 @@ def main(_):
           _tm[2] += t2 - t1b
           _tm[3] += t2b - t2
           _tm[4] += t3 - t2b
+      if _tm is not None:
+        _tm[6] += time.perf_counter() - _wall_roll0
       # learn() was outside every timer, so the breakdown could not show the
       # phase that actually dominates the update (the PPO minibatch loop runs
       # update_epochs*num_minibatches forward+backward passes over the whole
@@ -2890,14 +2905,20 @@ def main(_):
         # seconds/update next to the rollout's own seconds/update -- otherwise
         # the phase that actually dominates stays invisible. It was not measured
         # at all before, which is why "act dominates" survived as folklore.
-        _roll = _tm[1] + _tm[2] + _tm[3] + _tm[4]
+        _roll = _tm[6]
+        _phase_sum = _tm[1] + _tm[2] + _tm[3] + _tm[4]
         _upd = _roll + _tm[5]
         _sps = (FLAGS.num_envs * FLAGS.num_steps / _upd) if _upd > 0 else 0.0
+        # overlap = how much of the phase sum is hidden inside the wall clock.
+        # 1.00 means strictly serialized; >1 means phases are running
+        # concurrently and the phase breakdown must not be summed.
+        _ovl = _phase_sum / max(_roll, 1e-9)
         _emit(f"[timing u{update}] act={_tm[0]*1e3*_tm_scale:.2f}ms/env"
               f"  act+phi={_tm[1]*1e3*_tm_scale:.2f}  env={_tm[2]*1e3*_tm_scale:.2f}"
               f"  shape+refresh={_tm[3]*1e3*_tm_scale:.2f}"
               f"  post={_tm[4]*1e3*_tm_scale:.2f}"
-              f"  || per update: rollout={_roll:.2f}s  learn={_tm[5]:.2f}s"
+              f"  || per update: rollout={_roll:.2f}s (phases {_phase_sum:.2f}s,"
+              f" overlap {_ovl:.2f}x)  learn={_tm[5]:.2f}s"
               f"  update={_upd:.2f}s  sps={_sps:.0f}"
               f"  learn_share={100.0 * _tm[5] / max(_upd, 1e-9):.0f}%")
       if pbar is not None:
@@ -2943,7 +2964,17 @@ def main(_):
     envs.close()
   else:
     time_step = envs.reset(players="current")
+    # --max_seconds used to be honoured only on the async path, so a sync run
+    # given a wall-clock budget silently ignored it and ran to total_timesteps.
+    _sync_deadline = (time.time() + FLAGS.max_seconds
+                      if FLAGS.max_seconds and FLAGS.max_seconds > 0 else None)
     for update in range(num_updates):
+      if _sync_deadline is not None and time.time() >= _sync_deadline:
+        _emit(f"[gate] {FLAGS.max_seconds}s hard deadline reached "
+              f"(update {update}, steps={agent.total_steps_done})")
+        _maybe_snapshot(agent, roster, update, force=True)
+        writer.flush()
+        break
       for step in range(FLAGS.num_steps):
         agent_output = agent.step(time_step)
         # phi(s) for the acting seat from its own obs (this row).
