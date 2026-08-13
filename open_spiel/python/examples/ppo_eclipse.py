@@ -198,6 +198,27 @@ flags.DEFINE_integer(
     "TimeStep/StepOutput objects are built. Recommended 8-16 with >= 512 "
     "envs.")
 
+flags.DEFINE_string(
+    "obs_buffer_device", "auto",
+    "Where the (num_steps, num_envs, obs) rollout observation buffer lives: "
+    "'auto' (device when it fits in 50% of free VRAM, else cpu), 'cpu', or an "
+    "explicit device like 'cuda'. On CPU, learn() pays a host gather plus an "
+    "H2D copy of every minibatch on each of its "
+    "update_epochs*num_minibatches iterations -- measured at 3.5 s/update "
+    "(44% of learn) for Eclipse at 256 envs; the same gather from a "
+    "device-resident buffer is ~100x cheaper. Only force 'cpu' on a card too "
+    "small to hold num_steps*num_envs*obs*itemsize bytes.")
+
+flags.DEFINE_string(
+    "obs_buffer_dtype", "auto",
+    "Storage dtype for the rollout observation buffer: 'auto' (float16 when "
+    "--amp is on, else float32), 'float32', 'float16', or 'bfloat16'. The "
+    "buffer is read only by learn()'s minibatch gather, and every consumer of "
+    "that minibatch runs under bf16 autocast, so 16-bit storage discards "
+    "precision the learn phase already discards -- while halving the buffer, "
+    "hence doubling the env count that fits on the device. Minibatches are "
+    "always handed to the network as float32 regardless of this setting.")
+
 flags.DEFINE_bool("shaping", True,
                   "Potential-based shaping from the obs 'score' slot.")
 flags.DEFINE_enum("phi", "soft",
@@ -369,7 +390,8 @@ flags.DEFINE_bool(
     "explicit and cheaper. No-op (bit-identical) when off.")
 flags.DEFINE_bool(
     "compile_encoder", True,
-    "torch.compile SpatialEclipseEncoder._encode. Falls back to eager with a "
+    "torch.compile SpatialEclipseEncoder._encode_context (the body both the act "
+    "and learn paths reach). Falls back to eager with a "
     "warning if compilation fails. No-op when off or --encoder=flat.")
 
 flags.DEFINE_bool(
@@ -520,24 +542,31 @@ class SpatialEclipseEncoder(nn.Module):
     # contiguous) view, which cudnn otherwise silently re-copies to contiguous
     # NCHW on every call. Putting the conv tower's weights in channels_last
     # memory format and making the input contiguous in that same format up
-    # front (see _encode_impl) turns that hidden copy into one explicit,
+    # front (see _encode_context_impl) turns that hidden copy into one explicit,
     # cheaper one. Purely a memory-layout change -- values are unaffected.
     self.channels_last = channels_last
     if channels_last:
       self.conv = self.conv.to(memory_format=torch.channels_last)
       self.conv_res = self.conv_res.to(memory_format=torch.channels_last)
 
-    # --compile_encoder: see _encode's dispatch for the graceful-fallback
-    # mechanics.
-    self._compiled_encode = None
+    # --compile_encoder wraps _encode_context_impl, i.e. the body that both hot
+    # paths reach. It used to wrap _encode_impl, but every real caller (the PPO
+    # act path and the sparse learn path, both via shared_and_cells ->
+    # forward_with_context) calls _encode_context directly and so never touched
+    # the compiled function; the only thing that did was the shared-trunk
+    # recompute in aux_from_obs/rank_logits_from_obs, which is exactly the
+    # redundant pass ppo.py no longer makes. Compiling the wrong entry point is
+    # invisible -- nothing errors, the flag just stops doing anything -- so it
+    # is worth stating which function is the real one.
+    #
+    # dynamic=True: the encoder is called at the rollout batch (num_envs) and
+    # at the learn minibatch (num_envs*num_steps/num_minibatches), plus whatever
+    # eval uses. One dynamic-shape graph serves them all rather than compiling
+    # per distinct batch size.
+    self._compiled_context = None
     if compile_encoder:
-      # dynamic=True: the learn path always calls with the same fixed batch
-      # (num_envs*num_steps/num_minibatches), but the sparse act path's batch
-      # size is the per-step legal-action count, which changes every call.
-      # Compiling per-shape would mean a recompile per distinct batch size on
-      # the act path (a recompile storm); one dynamic-shape compile serves
-      # both call sites.
-      self._compiled_encode = torch.compile(self._encode_impl, dynamic=True)
+      self._compiled_context = torch.compile(self._encode_context_impl,
+                                             dynamic=True)
 
   def _mlp(self, in_features, width, depth, act):
     layers = []
@@ -549,13 +578,13 @@ class SpatialEclipseEncoder(nn.Module):
     return nn.Sequential(*layers)
 
   def forward(self, x):
-    return self._encode(x)[0]
+    return self._encode_context(x)[0]
 
   def forward_with_context(self, x):
     """Returns features and keyed V2 embeddings for typed action pointers."""
     return self._encode_context(x)
 
-  def _encode(self, x):
+  def _encode_context(self, x):
     """Dispatches to the (optionally torch.compile'd) encoder body.
 
     --compile_encoder failures surface at the first real call, not at
@@ -563,22 +592,18 @@ class SpatialEclipseEncoder(nn.Module):
     one bad call falls back to eager for the rest of the run instead of
     crashing training.
     """
-    if self._compiled_encode is None:
-      return self._encode_impl(x)
+    if self._compiled_context is None:
+      return self._encode_context_impl(x)
     try:
-      return self._compiled_encode(x)
+      return self._compiled_context(x)
     except Exception as e:  # pylint: disable=broad-except
       warnings.warn(
           f"torch.compile(SpatialEclipseEncoder) failed at runtime ({e!r}); "
           "falling back to eager for the rest of this run.")
-      self._compiled_encode = None
-      return self._encode_impl(x)
+      self._compiled_context = None
+      return self._encode_context_impl(x)
 
-  def _encode_impl(self, x):
-    features, context = self._encode_context(x)
-    return features, context.cells
-
-  def _encode_context(self, x):
+  def _encode_context_impl(self, x):
     b = x.shape[0]
     x = x.reshape(b, -1)
 
@@ -721,8 +746,6 @@ class FactoredActorHead(nn.Module):
 class TypedPointerActorHead(FactoredActorHead):
   """Factored flat API with state-conditioned pointers to V2 entity keys."""
 
-  DENSE_CHUNK_SIZE = 256
-
   def __init__(self, decode, num_rows, num_actions, width, factors,
                cell_channels):
     super().__init__(decode, num_rows, num_actions, width)
@@ -745,28 +768,77 @@ class TypedPointerActorHead(FactoredActorHead):
                   self.seat_family):
       nn.init.zeros_(table.weight)
 
-  @staticmethod
-  def _gather(values, ids):
-    return values.gather(
-        1, ids.clamp(min=0, max=values.shape[1] - 1).unsqueeze(1)).squeeze(1)
+  def _entity_tables(self, features, context):
+    """Small per-(batch row, family) entity-logit tables.
+
+    Shared by both ``_pairs`` (the sparse hot path -- arbitrary (row, col)
+    pairs, M of them) and ``forward`` (the dense path -- every action for
+    every row). Both used to index ``context.cells``/``units``/``slots``/
+    ``seats`` with a *per-pair* or *per-action* row vector (``context.cells
+    [rows]``), which makes a genuine copy of the whole per-cell/per-unit/
+    per-slot/per-seat feature map for every pair or action -- O(M or
+    num_actions * entity_dim) memory. At Eclipse's legal-action counts (can
+    be in the hundreds of thousands across a minibatch) or its 11,117 dense
+    actions, that is tens of GiB for one such term, and is exactly what
+    caused OOMs on backward.
+
+    The family embedding is the only thing that varies per-action in the
+    query, and there are only ~15 families. So batch the queries and the
+    entity dot-products over families (O(B * num_families) work), producing
+    per-(row, family) logit tables of size O(B * num_families * entity_dim)
+    -- independent of M or num_actions -- and gather into those afterwards.
+    """
+    num_families = self.cell_family.num_embeddings
+    fam_range = torch.arange(num_families, device=features.device)
+
+    cell_q = (self.cell_query(features).unsqueeze(1) +
+              self.cell_family(fam_range).unsqueeze(0))
+    cell_logits_all = torch.einsum("bfc,bcn->bfn", cell_q, context.cells)
+
+    unit_q = (self.unit_query(features).unsqueeze(1) +
+              self.unit_family(fam_range).unsqueeze(0))
+    unit_logits_all = torch.einsum("bfw,buw->bfu", unit_q, context.units)
+
+    slot_q = (self.slot_query(features).unsqueeze(1) +
+              self.slot_family(fam_range).unsqueeze(0))
+    slot_logits_all = torch.einsum("bfw,bsw->bfs", slot_q, context.slots)
+
+    seat_q = (self.seat_query(features).unsqueeze(1) +
+             self.seat_family(fam_range).unsqueeze(0))
+    seat_logits_all = torch.einsum("bfw,bsw->bfs", seat_q, context.seats)
+    t_range = torch.arange(obs_layout.MAX_SEATS, device=features.device)
+    matches = context.seat_abs.unsqueeze(1) == t_range.view(1, -1, 1)  # (B,T,S)
+    neg = torch.tensor(-1e9, device=features.device, dtype=seat_logits_all.dtype)
+    seat_selected_all = torch.where(
+        matches.unsqueeze(1), seat_logits_all.unsqueeze(2), neg
+    ).max(dim=-1).values                                              # (B,F,T)
+
+    return cell_logits_all, unit_logits_all, slot_logits_all, seat_selected_all
 
   def _pairs(self, features, context, rows, cols):
+    """(M,) logits for the (rows[i], cols[i]) pairs.
+
+    ``rows`` indexes batch rows and may repeat (once per legal action in that
+    row); ``cols`` are action ids. Every term below is a plain 2- or 3-index
+    gather out of the small per-family tables from ``_entity_tables`` --
+    O(M) work and memory, no per-pair expansion of ``context``.
+    """
+    cell_logits_all, unit_logits_all, slot_logits_all, seat_selected_all = (
+        self._entity_tables(features, context))
     base = ((features[rows] * self.rows_for(cols)).sum(-1) + self.bias[cols])
     family = self.family_id[cols]
     result = base
-    cell_q = self.cell_query(features[rows]) + self.cell_family(family)
-    cell_logits = (cell_q.unsqueeze(-1) * context.cells[rows]).sum(1)
+
     cell = self.cell_id[cols]
     has_cell = cell >= 0
-    result = result + torch.where(has_cell, self._gather(cell_logits, cell),
-                                  torch.zeros_like(result))
+    cell_term = cell_logits_all[rows, family, cell.clamp(min=0)]
+    result = result + torch.where(has_cell, cell_term, torch.zeros_like(cell_term))
 
     unit = self.unit_id[cols]
     has_unit = unit >= 0
-    unit_q = self.unit_query(features[rows]) + self.unit_family(family)
-    unit_logits = (unit_q.unsqueeze(1) * context.units[rows]).sum(-1)
-    result = result + torch.where(has_unit, self._gather(unit_logits, unit),
-                                  torch.zeros_like(result))
+    unit_term = unit_logits_all[rows, family, unit.clamp(min=0)]
+    result = result + torch.where(has_unit, unit_term, torch.zeros_like(unit_term))
+
     # A normal MOVE_UNIT action points both at its registry row and the
     # destination resolved from that row/direction in the current universe.
     direction = self.direction_id[cols]
@@ -774,51 +846,120 @@ class TypedPointerActorHead(FactoredActorHead):
     if has_route.any():
       route = context.routes[rows, unit.clamp(min=0), direction.clamp(min=0)]
       destination = (route * obs_layout.GALAXY_CELLS).round().long() - 1
+      dest_clamped = destination.clamp(min=0, max=obs_layout.GALAXY_CELLS - 1)
+      route_term = cell_logits_all[rows, family, dest_clamped]
       has_route = has_route & (route > 0)
-      result = result + torch.where(has_route,
-                                    self._gather(cell_logits, destination),
-                                    torch.zeros_like(result))
+      result = result + torch.where(has_route, route_term, torch.zeros_like(result))
 
     slot = self.slot_id[cols]
+    num_slot_rows = slot_logits_all.shape[-1]
     # Colony slots are globally keyed as cell*8+slot; combat population uses
     # its V2 current-target-cell key with the same local slot number.
     colony_slot = torch.where(
-        cell >= 0, cell * obs_layout.PLANET_SLOTS_PER_CELL + slot,
-        context.pop_cell[rows] * obs_layout.PLANET_SLOTS_PER_CELL + slot)
+        cell >= 0, cell.clamp(min=0) * obs_layout.PLANET_SLOTS_PER_CELL + slot.clamp(min=0),
+        context.pop_cell[rows].clamp(min=0) * obs_layout.PLANET_SLOTS_PER_CELL + slot.clamp(min=0)
+    ).clamp(min=0, max=num_slot_rows - 1)
     has_slot = slot.ge(0) & ((cell >= 0) | (context.pop_cell[rows] >= 0))
-    slot_q = self.slot_query(features[rows]) + self.slot_family(family)
-    slot_logits = (slot_q.unsqueeze(1) * context.slots[rows]).sum(-1)
-    result = result + torch.where(has_slot, self._gather(slot_logits, colony_slot),
-                                  torch.zeros_like(result))
+    slot_term = slot_logits_all[rows, family, colony_slot]
+    result = result + torch.where(has_slot, slot_term, torch.zeros_like(result))
 
     target_seat = self.seat_id[cols]
     has_seat = target_seat >= 0
-    seat_q = self.seat_query(features[rows]) + self.seat_family(family)
-    seat_logits = (seat_q.unsqueeze(1) * context.seats[rows]).sum(-1)
-    matches = context.seat_abs[rows].eq(target_seat.unsqueeze(-1))
-    selected = torch.where(matches, seat_logits,
-                           torch.full_like(seat_logits, -1e9)).max(dim=1).values
-    result = result + torch.where(has_seat, selected, torch.zeros_like(result))
+    seat_term = seat_selected_all[rows, family,
+                                  target_seat.clamp(min=0, max=obs_layout.MAX_SEATS - 1)]
+    result = result + torch.where(has_seat, seat_term, torch.zeros_like(result))
     return result
 
   def logits_for(self, features, context, rows, cols):
     return self._pairs(features, context, rows, cols)
 
   def forward(self, features, context=None):
+    """(B, num_actions) dense logits -- ``_pairs`` with rows=every row,
+    cols=every action, but built directly off the same small per-family
+    tables instead of materializing that expansion."""
     if context is None:
       return super().forward(features)
-    # `_pairs` gathers one entity tensor per action. Chunking prevents dense
-    # eval from materialising B * 11,117 * 225 cell features at once.
-    batch = features.shape[0]
-    chunks = []
-    for start in range(0, self.num_actions, self.DENSE_CHUNK_SIZE):
-      cols = torch.arange(start, min(start + self.DENSE_CHUNK_SIZE,
-                                     self.num_actions), device=features.device)
-      width = cols.numel()
-      chunk_rows = torch.arange(batch, device=features.device).repeat_interleave(width)
-      chunk_cols = cols.repeat(batch)
-      chunks.append(self._pairs(features, context, chunk_rows, chunk_cols).reshape(batch, width))
-    return torch.cat(chunks, dim=1)
+    device = features.device
+    cell_logits_all, unit_logits_all, slot_logits_all, seat_selected_all = (
+        self._entity_tables(features, context))
+
+    base = features @ self.full_weight().t() + self.bias   # (B, num_actions)
+    family = self.family_id                                 # (num_actions,)
+
+    cell = self.cell_id
+    has_cell = cell >= 0
+    cell_term = cell_logits_all[:, family, cell.clamp(min=0)]  # (B, num_actions)
+    result = base + torch.where(has_cell, cell_term, torch.zeros_like(cell_term))
+
+    unit = self.unit_id
+    has_unit = unit >= 0
+    unit_term = unit_logits_all[:, family, unit.clamp(min=0)]
+    result = result + torch.where(has_unit, unit_term, torch.zeros_like(unit_term))
+
+    # Move-unit route term: the destination cell is resolved at run time from
+    # the acting unit's row/direction, so it varies per (batch, action).
+    # Restrict to the small subset of actions that carry a direction (one
+    # family, move_unit) instead of the full action set.
+    direction = self.direction_id
+    has_route = has_unit & (direction >= 0)
+    route_cols = has_route.nonzero(as_tuple=True)[0]
+    if route_cols.numel():
+      route_unit = unit[route_cols].clamp(min=0)
+      route_dir = direction[route_cols].clamp(min=0)
+      route_val = context.routes[:, route_unit, route_dir]         # (B, K)
+      destination = (route_val * obs_layout.GALAXY_CELLS).round().long() - 1
+      valid_route = route_val > 0
+      dest_clamped = destination.clamp(min=0, max=obs_layout.GALAXY_CELLS - 1)
+      route_fam = family[route_cols]
+      route_term = torch.zeros_like(dest_clamped, dtype=result.dtype)
+      for fam_val in route_fam.unique().tolist():
+        mask = route_fam == fam_val
+        route_term[:, mask] = cell_logits_all[:, fam_val, :].gather(
+            1, dest_clamped[:, mask])
+      route_term = torch.where(valid_route, route_term, torch.zeros_like(route_term))
+      extra = torch.zeros_like(result)
+      extra.index_add_(1, route_cols, route_term)
+      result = result + extra
+
+    # Slot term. Colony slots (cell >= 0) are keyed purely by the action
+    # (cell*8 + slot), so they gather from the per-family table exactly like
+    # cell/unit above. Combat-population slots (cell < 0) are keyed off
+    # ``context.pop_cell``, which is data-dependent -- same small-subset
+    # treatment as the route term.
+    slot = self.slot_id
+    num_slot_rows = slot_logits_all.shape[-1]
+    has_colony_slot = slot.ge(0) & has_cell
+    colony_slot = (cell.clamp(min=0) * obs_layout.PLANET_SLOTS_PER_CELL +
+                  slot.clamp(min=0)).clamp(min=0, max=num_slot_rows - 1)
+    colony_term = slot_logits_all[:, family, colony_slot]
+    result = result + torch.where(has_colony_slot, colony_term,
+                                  torch.zeros_like(colony_term))
+
+    dyn_cols = (slot.ge(0) & ~has_cell).nonzero(as_tuple=True)[0]
+    if dyn_cols.numel():
+      dyn_slot = slot[dyn_cols].clamp(min=0)
+      dyn_fam = family[dyn_cols]
+      has_pop = context.pop_cell >= 0                              # (B,)
+      dyn_slot_idx = (context.pop_cell.clamp(min=0).unsqueeze(1) *
+                      obs_layout.PLANET_SLOTS_PER_CELL + dyn_slot.unsqueeze(0))
+      dyn_slot_idx = dyn_slot_idx.clamp(min=0, max=num_slot_rows - 1)
+      dyn_term = torch.zeros_like(dyn_slot_idx, dtype=result.dtype)
+      for fam_val in dyn_fam.unique().tolist():
+        mask = dyn_fam == fam_val
+        dyn_term[:, mask] = slot_logits_all[:, fam_val, :].gather(
+            1, dyn_slot_idx[:, mask])
+      dyn_term = torch.where(has_pop.unsqueeze(1), dyn_term, torch.zeros_like(dyn_term))
+      extra = torch.zeros_like(result)
+      extra.index_add_(1, dyn_cols, dyn_term)
+      result = result + extra
+
+    target_seat = self.seat_id
+    has_seat = target_seat >= 0
+    seat_term = seat_selected_all[:, family,
+                                  target_seat.clamp(min=0, max=obs_layout.MAX_SEATS - 1)]
+    result = result + torch.where(has_seat, seat_term, torch.zeros_like(seat_term))
+
+    return result
 
 
 class EclipsePPOAgent(nn.Module):
@@ -921,6 +1062,15 @@ class EclipsePPOAgent(nn.Module):
   def rank_logits_from_obs(self, x):
     """(B, 4) rank logits -- the distributional critic's raw output."""
     return self.critic(x)
+
+  def rank_logits_from_features(self, features):
+    """(B, 4) rank logits from already-computed shared-trunk features.
+
+    Only equivalent to ``rank_logits_from_obs`` when the critic shares the
+    actor trunk (``value_from_actor_features``); callers must check that, as
+    the sparse learn path does.
+    """
+    return self.critic[-1](features)
 
   def value_from_obs(self, x):
     """Scalar value straight from observations.
@@ -2427,11 +2577,15 @@ def main(_):
       rank_ce_coef=(FLAGS.rank_ce_coef if FLAGS.value_mode == "win"
                     else 0.0),
       amp=FLAGS.amp,
+      obs_buffer_device=FLAGS.obs_buffer_device,
+      obs_buffer_dtype=FLAGS.obs_buffer_dtype,
   )
 
   # Device + resume telemetry before any training starts.
   _emit(f"device={device}  game={FLAGS.game}  num_envs={FLAGS.num_envs}"
-        f"  num_workers={FLAGS.num_workers}")
+        f"  num_workers={FLAGS.num_workers}"
+        f"  obs_buffer={agent.obs_buffer_device}/{agent.obs_buffer_dtype}"
+        f" ({agent.obs.numel() * agent.obs.element_size() / 1e9:.1f} GB)")
   if FLAGS.resume:
     agent_fn_r = make_agent_fn(
         FLAGS.nn_width, FLAGS.nn_depth, tuple(aux_tasks or ()),
@@ -2579,7 +2733,7 @@ def main(_):
   if use_async:
     _ = envs.reset(players="current")
     step_arrays = envs.reset_np()
-    _tm = (np.zeros(5, dtype=np.float64) if FLAGS.timing else None)
+    _tm = (np.zeros(6, dtype=np.float64) if FLAGS.timing else None)
     _tm_scale = 1.0 / max(1, FLAGS.num_steps)
     _run_t0 = time.time()
     _last_verdict_ts = [_run_t0]
@@ -2657,17 +2811,30 @@ def main(_):
           _tm[2] += t2 - t1b
           _tm[3] += t2b - t2
           _tm[4] += t3 - t2b
+      # learn() was outside every timer, so the breakdown could not show the
+      # phase that actually dominates the update (the PPO minibatch loop runs
+      # update_epochs*num_minibatches forward+backward passes over the whole
+      # batch, i.e. several times the rollout's total network work). Without
+      # this slot a "total=" that accounted for 15% of wall-clock read as if
+      # the loop were fully instrumented.
+      _t_learn0 = time.perf_counter() if _tm is not None else None
       agent.learn_np(step_arrays.obs, step_arrays.seats)
+      if _tm is not None:
+        _tm[5] += time.perf_counter() - _t_learn0
       _step_controllers(agent, writer, update, num_updates)
       if FLAGS.rank_vp_beta_anneal_to >= 0.0:
         agent.anneal_rank_vp_beta(agent.updates_done, num_updates,
                                   FLAGS.rank_vp_beta_anneal_to)
       if _tm is not None and update % FLAGS.timing_every == 0:
+        _roll = _tm[1] + _tm[2] + _tm[3] + _tm[4]
+        _upd = _roll + _tm[5]
+        _sps = (FLAGS.num_envs * FLAGS.num_steps / _upd) if _upd > 0 else 0.0
         _emit(f"[timing u{update}] act={_tm[0]*1e3*_tm_scale:.2f}ms/env"
               f"  act+phi={_tm[1]*1e3*_tm_scale:.2f}  env={_tm[2]*1e3*_tm_scale:.2f}"
               f"  shape+refresh={_tm[3]*1e3*_tm_scale:.2f}"
               f"  post={_tm[4]*1e3*_tm_scale:.2f}"
-              f"  total={_tm.sum()*1e3*_tm_scale:.2f}")
+              f"  || rollout={_roll:.2f}s  learn={_tm[5]:.2f}s"
+              f"  update={_upd:.2f}s  sps={_sps:.0f}")
       if pbar is not None:
         pbar.update(FLAGS.num_envs * FLAGS.num_steps)
         _pbar_postfix()

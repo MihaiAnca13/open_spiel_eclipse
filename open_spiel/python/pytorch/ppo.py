@@ -289,6 +289,82 @@ def shared_and_cells(net, x):
   return net.shared(x), None
 
 
+class _ObsRows:
+  """Row-addressable view over the rollout obs buffer plus the closeout extras.
+
+  ``_learn_core`` needs to treat (rollout rows, terminal-closeout extra rows) as
+  one batch that it filters and then draws minibatches from. Doing that with
+  ``torch.cat`` allocates a second copy of the *entire* rollout buffer in order
+  to append a few hundred rows -- 39.4 GB at 2,048 envs to bolt on ~30 MB of
+  extras -- and that doubled peak is what forces the buffer off the GPU at high
+  env counts, costing ~34% throughput.
+
+  So the two tensors stay separate and this carries an int64 row-id vector
+  instead: filtering is a cheap permutation of ids, and only the minibatch is
+  ever materialized. Rows are addressed in the *concatenated* space, so ids in
+  [0, len(main)) index ``main`` and ids >= len(main) index ``extra`` -- which is
+  exactly the indexing the packed-legal remap in ``_pack_legal_batch`` already
+  assumes, so nothing downstream has to change.
+
+  Row ids are kept on the host on purpose: the per-minibatch index math then
+  costs no GPU sync, and only a ~65 KB index vector crosses to the device per
+  minibatch (the same transfer the old ``torch.from_numpy(mb_inds)`` did).
+  """
+
+  def __init__(self, main, extra=None, row_ids=None, out_dtype=torch.float32):
+    self.main = main
+    self.extra = (extra if extra is not None and extra.shape[0] else None)
+    self.n_main = int(main.shape[0])
+    self.out_dtype = out_dtype
+    if row_ids is None:
+      n_extra = 0 if self.extra is None else int(self.extra.shape[0])
+      row_ids = torch.arange(self.n_main + n_extra, dtype=torch.int64)
+    self.row_ids = row_ids
+
+  def __len__(self):
+    return int(self.row_ids.shape[0])
+
+  @property
+  def device(self):
+    return self.main.device
+
+  def select(self, sel):
+    """A filtered view. ``sel`` is a slice or a bool/index tensor over logical
+    rows; the underlying data is never copied."""
+    if isinstance(sel, slice):
+      ids = self.row_ids[sel]
+    else:
+      t = sel if isinstance(sel, torch.Tensor) else torch.as_tensor(sel)
+      ids = self.row_ids[t.to(self.row_ids.device)]
+    return _ObsRows(self.main, self.extra, ids, self.out_dtype)
+
+  def minibatch(self, mb_inds, device):
+    """Materialize the rows at logical positions ``mb_inds`` on ``device``.
+
+    The gather happens in the buffer's storage dtype and the upcast to
+    ``out_dtype`` happens last, on the destination device -- so a 16-bit buffer
+    also halves the bytes crossing the bus on the host-buffer fallback path,
+    rather than only saving memory.
+    """
+    ids = self.row_ids[torch.as_tensor(np.asarray(mb_inds), dtype=torch.int64)]
+    src = self.main
+    if self.extra is None:
+      rows = src[ids.to(src.device)]
+    else:
+      is_extra = ids >= self.n_main
+      if not bool(is_extra.any()):
+        rows = src[ids.to(src.device)]
+      else:
+        rows = torch.empty((ids.shape[0],) + tuple(src.shape[1:]),
+                           dtype=src.dtype, device=src.device)
+        from_main = ~is_extra
+        if bool(from_main.any()):
+          rows[from_main.to(src.device)] = src[ids[from_main].to(src.device)]
+        rows[is_extra.to(src.device)] = self.extra[
+            (ids[is_extra] - self.n_main).to(self.extra.device)]
+    return rows.to(device=device).to(self.out_dtype)
+
+
 class PPO(nn.Module):
   """PPO Agent implementation in PyTorch.
 
@@ -335,6 +411,8 @@ class PPO(nn.Module):
       rank_vp_beta=0.0,
       rank_ce_coef=0.0,
       amp=False,
+      obs_buffer_device="auto",
+      obs_buffer_dtype="auto",
   ):
     super().__init__()
 
@@ -390,6 +468,9 @@ class PPO(nn.Module):
     # expected utility they produce, which is a very thin use of a
     # distributional head. 0 disables it.
     self.rank_ce_coef = float(rank_ce_coef)
+    self.obs_buffer_device_pref = obs_buffer_device
+    self.obs_buffer_dtype = self._resolve_obs_buffer_dtype(
+        obs_buffer_dtype, device)
 
     # Logging
     self.writer = writer
@@ -409,13 +490,35 @@ class PPO(nn.Module):
     self.legal_actions_mask = torch.zeros(
         (mask_steps, self.num_envs, self.num_actions),
         dtype=torch.bool).to(device)
-    # Obs rollout storage lives on CPU (not device). The GPU only ever sees one
-    # minibatch's obs at a time during learning (see _learn_core), so the full
-    # (steps, envs, obs) history stops consuming VRAM that scales 1:1 with
-    # num_envs. This is what lifts the 128-env cap on a 12 GiB card and what
-    # lets a bigger batch (hide-and-seek's batch-size floor) be reached here.
+    # Obs rollout storage device. Keeping it on CPU bounds VRAM to one
+    # minibatch, which is what lifted the 128-env cap on a 12 GiB card -- but it
+    # makes _learn_core pay a host-side gather plus an unpinned H2D copy of the
+    # whole minibatch on every one of its update_epochs*num_minibatches
+    # iterations, with the GPU stalled throughout. For Eclipse's 37,596-float
+    # observation at 256 envs that is 1.23 GB moved 16 times = 19.7 GB per
+    # update, measured at 219 ms per minibatch (115 ms gather + 112 ms copy) or
+    # 3.5 s per update -- 44% of learn(). The same gather from a device-resident
+    # buffer measures 2 ms, so on a card with room to hold the batch this is a
+    # ~100x cheaper place to keep it.
+    #
+    # "auto" therefore keeps the buffer on the training device when it fits in
+    # a conservative slice of *currently free* VRAM, and silently falls back to
+    # CPU when it does not (preserving the small-card behaviour). "cpu"/"cuda"
+    # force the choice.
+    self.obs_buffer_device = self._resolve_obs_buffer_device(
+        obs_buffer_device, device)
     self.obs = torch.zeros((self.steps_per_batch, self.num_envs) +
-                           self.input_shape)
+                           self.input_shape,
+                           dtype=self.obs_buffer_dtype,
+                           device=self.obs_buffer_device)
+    # True when the rollout obs buffer and the network live on the same device,
+    # so a stored row needs no host round-trip and a minibatch needs no copy.
+    # Compared through real tensors rather than the requested device strings:
+    # torch.device("cuda") != torch.device("cuda:0") even though both resolve to
+    # the same physical device, and a stale False here silently reinstates the
+    # slow copy path while a stale True would gather on the wrong device.
+    self.obs_on_device = (
+        self.obs.device == torch.empty(0, device=self.device).device)
     self.actions = torch.zeros((self.steps_per_batch, self.num_envs)).to(device)
     self.logprobs = torch.zeros(
         (self.steps_per_batch, self.num_envs)).to(device)
@@ -510,6 +613,71 @@ class PPO(nn.Module):
     # report value/policy/entropy/aux loss + KL/clip/explained-variance without
     # pulling them from a tensorboard writer.
     self.last_metrics = None
+
+  def _resolve_obs_buffer_dtype(self, pref, device):
+    """Storage dtype for the rollout obs buffer: 'auto' | a torch dtype name.
+
+    'auto' picks float16 when --amp is on and training runs on a GPU. The
+    rollout buffer is read in exactly one place -- the minibatch gather in
+    _learn_core -- and every consumer of that minibatch runs inside the bf16
+    autocast region, so the fp32 mantissa bits being stored are discarded by the
+    very next op. Halving the buffer therefore costs precision the learn phase
+    was already throwing away, and it doubles the env count that fits on the
+    device (measured: 4,096 envs resident at 39.4 GB).
+
+    float16 rather than bfloat16 on purpose: the observation tensor is one-hots
+    and ratios in [0, 1], so what matters is mantissa (fp16 has 10 bits, bf16
+    has 8), not bf16's wider exponent range.
+
+    Two cases where 'auto' deliberately stays float32:
+      * no --amp: the learn path is genuinely fp32, so 16-bit storage would
+        reduce precision that is actually in use.
+      * CPU training (the small-machine / smoke-test path): there is no VRAM to
+        save, and the fp16 -> fp32 conversion on every gather is pure cost.
+    Both can still be overridden explicitly.
+    """
+    if pref is not None and str(pref).lower() != "auto":
+      dt = getattr(torch, str(pref), None)
+      if not isinstance(dt, torch.dtype):
+        raise ValueError(f"obs_buffer_dtype must be 'auto' or a torch dtype "
+                         f"name (float32/float16/bfloat16), got {pref!r}")
+      return dt
+    on_gpu = torch.device(device).type == "cuda"
+    return torch.float16 if (self.amp and on_gpu) else torch.float32
+
+  def _resolve_obs_buffer_device(self, pref, device):
+    """Device for the rollout obs buffer: 'auto' | 'cpu' | a device string.
+
+    'auto' places the buffer on ``device`` only when it comfortably fits in
+    currently-free memory there, so a big card gets the fast path and a small
+    one keeps the CPU-streaming behaviour instead of OOMing at startup. The
+    headroom factor leaves room for the network, optimizer state, activations
+    of one minibatch and the other (small) rollout tensors; the buffer is by
+    far the largest single allocation, so a coarse budget is enough.
+    """
+    if pref is not None and str(pref).lower() != "auto":
+      return str(pref)
+    dev = torch.device(device)
+    if dev.type != "cuda" or not torch.cuda.is_available():
+      return "cpu"
+    nbytes = (self.steps_per_batch * self.num_envs *
+              int(np.prod(self.input_shape)) *
+              self.obs_buffer_dtype.itemsize)
+    free, _ = torch.cuda.mem_get_info(dev)
+    # The buffer is counted once, not twice: _ObsRows removed the torch.cat that
+    # used to materialize a second copy of the whole batch during learn. The
+    # remaining headroom covers one minibatch of encoder activations (measured
+    # 20.8 GB peak at 8,192 rows for Eclipse's spatial encoder), the network and
+    # its optimizer state, and the small rollout tensors.
+    if nbytes <= 0.5 * free:
+      return dev
+    print(f"PPO: rollout obs buffer needs {nbytes / 1e9:.1f} GB "
+          f"({self.obs_buffer_dtype}), over the {0.5 * free / 1e9:.1f} GB budget "
+          f"(50% of {free / 1e9:.1f} GB free) on {dev}. Keeping it on CPU and "
+          f"streaming minibatches, which costs roughly 220 ms per minibatch. "
+          f"Lower num_envs/num_steps, use obs_buffer_dtype=float16, or force "
+          f"obs_buffer_device=cuda if you know the peak fits.")
+    return "cpu"
 
   def setup_league(self, networks, lineup, train_pid):
     """Enables population self-play.
@@ -772,10 +940,12 @@ class PPO(nn.Module):
           dtype=torch.bool)
       self.trainable_cpu[row] = trainable_row
       self.trainable[row] = trainable_row.to(self.device)
-      # Store the CPU-side obs (obs_cpu is the shared-memory numpy array) into
-      # the CPU rollout buffer -- no GPU round-trip. self.obs is CPU on purpose;
-      # see the allocation comment: only minibatches touch the GPU during learn.
-      self.obs[row] = torch.from_numpy(obs_cpu)
+      # Store the acting observations into the rollout buffer. When the buffer
+      # is device-resident, reuse the `obs` tensor already uploaded above for
+      # the forward pass -- a device-to-device copy -- instead of a second
+      # host-side copy of the same 38 MB (at 256 envs) out of shared memory.
+      # When the buffer is on CPU, copy from the numpy view as before.
+      self.obs[row] = obs if self.obs_on_device else torch.from_numpy(obs_cpu)
       self.actions[row] = action
       self.logprobs[row] = logprob
       self.values[row] = value.flatten()
@@ -1485,7 +1655,8 @@ class PPO(nn.Module):
     # flatten the batch
     b_legal_actions_mask = self.legal_actions_mask.reshape(
         (-1, self.num_actions))
-    b_obs = self.obs.reshape((-1,) + self.input_shape)
+    b_obs_main = self.obs.reshape((-1,) + self.input_shape)
+    ex_obs = None
     b_logprobs = self.logprobs.reshape(-1)
     b_actions = self.actions.reshape(-1)
     b_advantages = (returns - self.values).reshape(-1)
@@ -1508,10 +1679,12 @@ class PPO(nn.Module):
     # with no bootstrapping.
     n_extra = len(self._extra_samples)
     if n_extra:
-      # ex_obs stays on CPU (default) so b_obs keeps one dtype/device through
-      # the concat -- self.obs is a CPU rollout buffer; minibatches move to GPU
-      # inside the minibatch loop only.
-      ex_obs = torch.Tensor(np.array([e[2] for e in self._extra_samples]))
+      # Extras are collected as numpy rows; match the rollout buffer's device and
+      # dtype so _ObsRows can serve both halves without a per-row conversion.
+      ex_obs = torch.as_tensor(
+          np.array([e[2] for e in self._extra_samples]),
+          dtype=torch.float32).to(device=b_obs_main.device,
+                                  dtype=b_obs_main.dtype)
       ex_actions = torch.tensor([e[4]
                                  for e in self._extra_samples]).to(self.device)
       ex_logprobs = torch.tensor([e[5]
@@ -1520,7 +1693,8 @@ class PPO(nn.Module):
                                 for e in self._extra_samples]).to(self.device)
       ex_targets = torch.tensor([e[7]
                                  for e in self._extra_samples]).to(self.device)
-      b_obs = torch.cat([b_obs, ex_obs])
+      # NB: no torch.cat for the observations -- see _ObsRows. The other extras
+      # are per-row scalars, so concatenating them is cheap and stays as-is.
       if not use_sparse:
         # Dense-path extras mask, reconstructed from packed legal cols.
         ex_mask = torch.zeros((n_extra, self.num_actions), dtype=torch.bool,
@@ -1550,6 +1724,12 @@ class PPO(nn.Module):
         b_rank_mask = torch.cat([b_rank_mask, torch.zeros(
             n_extra, device=self.device)])
 
+    # Rollout rows and closeout extras as one row-addressable batch, without
+    # materializing their concatenation. Minibatches come out as float32 no
+    # matter how the buffer is stored, so a 16-bit buffer changes only the
+    # rounding of the stored observations and nothing downstream of the gather.
+    b_obs = _ObsRows(b_obs_main, ex_obs, out_dtype=torch.float32)
+
     # League: drop transitions generated by non-trainable (opponent) policies
     # before any loss math. Only ``train_pid`` rows keep gradients; the packed
     # legal structures are remapped to the filtered sample indices (extras are
@@ -1567,7 +1747,7 @@ class PPO(nn.Module):
       # non-trainable (opponent) row is dropped (remap -1). Extras are already
       # trainable-only and are appended after all main rows.
       nb_main = int(keep_train.cpu().numpy().sum())
-      b_obs = b_obs[keep]
+      b_obs = b_obs.select(keep)
       if not use_sparse:
         # In the sparse path b_legal_actions_mask is unused (packed legal
         # structures drive the loss) and has no extra rows, so it must not be
@@ -1607,7 +1787,7 @@ class PPO(nn.Module):
     # number of terminal closeout samples.
     batch_size = (len(b_obs) // self.num_minibatches) * self.num_minibatches
     if batch_size != len(b_obs):
-      b_obs = b_obs[:batch_size]
+      b_obs = b_obs.select(slice(None, batch_size))
       b_legal_actions_mask = b_legal_actions_mask[:batch_size]
       b_actions = b_actions[:batch_size]
       b_logprobs = b_logprobs[:batch_size]
@@ -1644,11 +1824,11 @@ class PPO(nn.Module):
       for start in range(0, batch_size, minibatch_size):
         end = start + minibatch_size
         mb_inds = b_inds[start:end]
-        # Stream one minibatch's obs to the GPU at a time: b_obs is a CPU
-        # rollout buffer (self.obs is CPU, see the allocation comment), so only
-        # MB rows touch device memory per update, keeping VRAM bounded and
-        # decoupling the env count from the 12 GiB card's capacity.
-        mb_obs = b_obs[mb_inds].to(self.device)
+        # Gather this minibatch's observations. A device-resident buffer makes
+        # this a pure on-device gather (~2 ms at 8192x37596); a host buffer falls
+        # back to a host gather plus an H2D copy, ~100x more per minibatch but
+        # bounded in VRAM. _ObsRows picks the right one from where `main` lives.
+        mb_obs = b_obs.minibatch(mb_inds, self.device)
 
         with torch.autocast(device_type=amp_device_type, dtype=torch.bfloat16,
                             enabled=self.amp):
@@ -1748,7 +1928,15 @@ class PPO(nn.Module):
                     "path (needs `shared` + `get_aux`); aux heads are NOT being "
                     "trained.")
           if self.num_aux and features is not None:
-            if hasattr(self.network, "aux_from_obs"):
+            # aux_from_obs runs the *critic* trunk, which is only a distinct
+            # network when separate_critic is set. With a shared trunk it
+            # recomputes exactly the `features` already in hand -- a second full
+            # encoder forward *and backward* per minibatch, i.e. ~2x the whole
+            # learn-phase network cost for a bit-identical result. The act path
+            # got this treatment in the value head (value_from_actor_features);
+            # the learn path's aux heads did not.
+            if (not getattr(self.network, "value_from_actor_features", False)
+                and hasattr(self.network, "aux_from_obs")):
               pred = self.network.aux_from_obs(mb_obs)
             else:
               pred = self.network.get_aux(features)
@@ -1771,7 +1959,14 @@ class PPO(nn.Module):
           if self.rank_ce_coef and hasattr(self.network, "rank_logits_from_obs"):
             msk = b_rank_mask[mb_inds]
             if float(msk.sum()) > 0:
-              logits_r = self.network.rank_logits_from_obs(mb_obs)
+              # Same shared-trunk recompute as the aux heads above: when the
+              # critic shares the actor trunk, the rank logits are just the
+              # critic's tail applied to `features`.
+              if (getattr(self.network, "value_from_actor_features", False)
+                  and hasattr(self.network, "rank_logits_from_features")):
+                logits_r = self.network.rank_logits_from_features(features)
+              else:
+                logits_r = self.network.rank_logits_from_obs(mb_obs)
               per_row = nn.functional.cross_entropy(
                   logits_r, b_ranks[mb_inds], reduction="none")
               rank_ce = (per_row * msk).sum() / msk.sum()
