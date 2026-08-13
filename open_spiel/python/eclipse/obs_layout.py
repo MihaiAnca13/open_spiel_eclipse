@@ -37,6 +37,8 @@ Layout shape, seat-relative from the viewing player:
                                    37596
 """
 
+import numpy as np
+
 # ── cardinalities ─────────────────────────────────────────────────────────
 MAX_SEATS = 6
 SEAT_SLOTS = MAX_SEATS
@@ -276,9 +278,16 @@ def galaxy_view(obs):
                          CELL_CHANNELS)
   ndim = len(shaped.shape)
   perm = tuple(range(ndim - 3)) + (ndim - 1, ndim - 3, ndim - 2)
-  if hasattr(shaped, "permute"):          # torch
-    return shaped.permute(*perm)
-  return shaped.transpose(perm)           # numpy
+  # `hasattr(shaped, "permute")` used to gate this, but torch.compile's
+  # tracing does not reliably preserve that duck-typing check -- it fell
+  # through to the numpy branch on a real torch.Tensor at runtime, and
+  # numpy's transpose(perm) (single tuple arg) throws on torch's
+  # transpose(dim0, dim1) signature. isinstance against np.ndarray is
+  # unambiguous regardless of any tracing wrapper torch.compile puts around
+  # the tensor -- it is never also a numpy array.
+  if isinstance(shaped, np.ndarray):
+    return shaped.transpose(perm)         # numpy
+  return shaped.permute(*perm)             # torch
 
 
 def validate(game_or_size):

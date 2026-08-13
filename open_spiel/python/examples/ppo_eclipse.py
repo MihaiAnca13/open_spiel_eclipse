@@ -210,6 +210,27 @@ flags.DEFINE_integer(
     "TimeStep/StepOutput objects are built. Recommended 8-16 with >= 512 "
     "envs.")
 
+flags.DEFINE_string(
+    "obs_buffer_device", "auto",
+    "Where the (num_steps, num_envs, obs) rollout observation buffer lives: "
+    "'auto' (device when it fits in 50% of free VRAM, else cpu), 'cpu', or an "
+    "explicit device like 'cuda'. On CPU, learn() pays a host gather plus an "
+    "H2D copy of every minibatch on each of its "
+    "update_epochs*num_minibatches iterations -- measured at 3.5 s/update "
+    "(44% of learn) for Eclipse at 256 envs; the same gather from a "
+    "device-resident buffer is ~100x cheaper. Only force 'cpu' on a card too "
+    "small to hold num_steps*num_envs*obs*itemsize bytes.")
+
+flags.DEFINE_string(
+    "obs_buffer_dtype", "auto",
+    "Storage dtype for the rollout observation buffer: 'auto' (float16 when "
+    "--amp is on, else float32), 'float32', 'float16', or 'bfloat16'. The "
+    "buffer is read only by learn()'s minibatch gather, and every consumer of "
+    "that minibatch runs under bf16 autocast, so 16-bit storage discards "
+    "precision the learn phase already discards -- while halving the buffer, "
+    "hence doubling the env count that fits on the device. Minibatches are "
+    "always handed to the network as float32 regardless of this setting.")
+
 flags.DEFINE_bool("shaping", True,
                   "Potential-based shaping from the obs 'score' slot.")
 flags.DEFINE_enum("phi", "soft",
@@ -381,7 +402,8 @@ flags.DEFINE_bool(
     "explicit and cheaper. No-op (bit-identical) when off.")
 flags.DEFINE_bool(
     "compile_encoder", True,
-    "torch.compile SpatialEclipseEncoder._encode. Falls back to eager with a "
+    "torch.compile SpatialEclipseEncoder._encode_context (the body both the act "
+    "and learn paths reach). Falls back to eager with a "
     "warning if compilation fails. No-op when off or --encoder=flat.")
 
 flags.DEFINE_bool(
@@ -575,28 +597,33 @@ class SpatialEclipseEncoder(nn.Module):
     # contiguous) view, which cudnn otherwise silently re-copies to contiguous
     # NCHW on every call. Putting the conv tower's weights in channels_last
     # memory format and making the input contiguous in that same format up
-    # front (see _encode_impl) turns that hidden copy into one explicit,
+    # front (see _encode_context_impl) turns that hidden copy into one explicit,
     # cheaper one. Purely a memory-layout change -- values are unaffected.
     self.channels_last = channels_last
     if channels_last:
       self.conv = self.conv.to(memory_format=torch.channels_last)
       self.conv_res = self.conv_res.to(memory_format=torch.channels_last)
 
-    # --compile_encoder: see _encode's dispatch for the graceful-fallback
-    # mechanics.
-    self._compiled_encode = None
+    # --compile_encoder wraps _encode_context_impl, i.e. the body that both hot
+    # paths reach. It used to wrap a thin `_encode_impl` above it, but every real
+    # caller (the PPO act path and the sparse learn path, both via
+    # shared_and_cells -> forward_with_context) reaches the body through the
+    # dispatch instead, so it never touched the compiled function; the only thing
+    # that did was the shared-trunk recompute in aux_from_obs /
+    # rank_logits_from_obs, which is exactly the redundant pass ppo.py no longer
+    # makes. Compiling the wrong entry point is invisible -- nothing errors, the
+    # flag just stops doing anything (measured 3.99 s vs 4.04 s of learn while
+    # misdirected, 2.74 s once corrected) -- so it is worth stating which
+    # function is the real one.
+    #
+    # dynamic=True: the encoder is called at the rollout batch (num_envs) and
+    # at the learn minibatch (num_envs*num_steps/num_minibatches), plus whatever
+    # eval uses. One dynamic-shape graph serves them all rather than compiling
+    # per distinct batch size.
+    self._compiled_context = None
     if compile_encoder:
-      # dynamic=True: the learn path always calls with the same fixed batch
-      # (num_envs*num_steps/num_minibatches), but the sparse act path's batch
-      # size is the per-step legal-action count, which changes every call.
-      # Compiling per-shape would mean a recompile per distinct batch size on
-      # the act path (a recompile storm); one dynamic-shape compile serves
-      # both call sites.
-      # Compile _encode_context, NOT a wrapper around it: every hot call site
-      # (ppo.shared_and_cells, dense_logits) goes through forward_with_context,
-      # so compiling anything above that left the compiled graph unreachable
-      # and silently dropped the measured 1.57x --compile_encoder win.
-      self._compiled_encode = torch.compile(self._encode_context, dynamic=True)
+      self._compiled_context = torch.compile(self._encode_context_impl,
+                                             dynamic=True)
 
   def _mlp(self, in_features, width, depth, act):
     layers = []
@@ -608,13 +635,13 @@ class SpatialEclipseEncoder(nn.Module):
     return nn.Sequential(*layers)
 
   def forward(self, x):
-    return self._encode(x)[0]
+    return self._encode_context(x)[0]
 
   def forward_with_context(self, x):
     """Returns features and keyed V2 embeddings for typed action pointers."""
-    return self._encode(x)
+    return self._encode_context(x)
 
-  def _encode(self, x):
+  def _encode_context(self, x):
     """Dispatches to the (optionally torch.compile'd) encoder body.
 
     --compile_encoder failures surface at the first real call, not at
@@ -622,18 +649,18 @@ class SpatialEclipseEncoder(nn.Module):
     one bad call falls back to eager for the rest of the run instead of
     crashing training.
     """
-    if self._compiled_encode is None:
-      return self._encode_context(x)
+    if self._compiled_context is None:
+      return self._encode_context_impl(x)
     try:
-      return self._compiled_encode(x)
+      return self._compiled_context(x)
     except Exception as e:  # pylint: disable=broad-except
       warnings.warn(
           f"torch.compile(SpatialEclipseEncoder) failed at runtime ({e!r}); "
           "falling back to eager for the rest of this run.")
-      self._compiled_encode = None
-      return self._encode_context(x)
+      self._compiled_context = None
+      return self._encode_context_impl(x)
 
-  def _encode_context(self, x):
+  def _encode_context_impl(self, x):
     b = x.shape[0]
     x = x.reshape(b, -1)
 
@@ -1074,6 +1101,15 @@ class EclipsePPOAgent(nn.Module):
   def rank_logits_from_obs(self, x):
     """(B, 4) rank logits -- the distributional critic's raw output."""
     return self.critic(x)
+
+  def rank_logits_from_features(self, features):
+    """(B, 4) rank logits from already-computed shared-trunk features.
+
+    Only equivalent to ``rank_logits_from_obs`` when the critic shares the
+    actor trunk (``value_from_actor_features``); callers must check that, as
+    the sparse learn path does.
+    """
+    return self.critic[-1](features)
 
   def value_from_obs(self, x):
     """Scalar value straight from observations.
@@ -2586,11 +2622,15 @@ def main(_):
       rank_ce_coef=(FLAGS.rank_ce_coef if FLAGS.value_mode == "win"
                     else 0.0),
       amp=FLAGS.amp,
+      obs_buffer_device=FLAGS.obs_buffer_device,
+      obs_buffer_dtype=FLAGS.obs_buffer_dtype,
   )
 
   # Device + resume telemetry before any training starts.
   _emit(f"device={device}  game={FLAGS.game}  num_envs={FLAGS.num_envs}"
-        f"  num_workers={FLAGS.num_workers}")
+        f"  num_workers={FLAGS.num_workers}"
+        f"  obs_buffer={agent.obs_buffer_device}/{agent.obs_buffer_dtype}"
+        f" ({agent.obs.numel() * agent.obs.element_size() / 1e9:.1f} GB)")
   if FLAGS.resume:
     agent_fn_r = make_agent_fn(
         FLAGS.nn_width, FLAGS.nn_depth, tuple(aux_tasks or ()),
@@ -2829,10 +2869,16 @@ def main(_):
           _tm[2] += t2 - t1b
           _tm[3] += t2b - t2
           _tm[4] += t3 - t2b
+      # learn() was outside every timer, so the breakdown could not show the
+      # phase that actually dominates the update (the PPO minibatch loop runs
+      # update_epochs*num_minibatches forward+backward passes over the whole
+      # batch, i.e. several times the rollout's total network work). Without
+      # this slot a "total=" that accounted for 15% of wall-clock read as if
+      # the loop were fully instrumented.
       _t_learn = time.perf_counter() if _tm is not None else None
       agent.learn_np(step_arrays.obs, step_arrays.seats)
       if _tm is not None:
-        _tm[5] = time.perf_counter() - _t_learn
+        _tm[5] += time.perf_counter() - _t_learn
       _step_controllers(agent, writer, update, num_updates)
       if FLAGS.rank_vp_beta_anneal_to >= 0.0:
         agent.anneal_rank_vp_beta(agent.updates_done, num_updates,
@@ -2844,14 +2890,15 @@ def main(_):
         # seconds/update next to the rollout's own seconds/update -- otherwise
         # the phase that actually dominates stays invisible. It was not measured
         # at all before, which is why "act dominates" survived as folklore.
-        _roll = (_tm[1] + _tm[2] + _tm[3] + _tm[4])
+        _roll = _tm[1] + _tm[2] + _tm[3] + _tm[4]
         _upd = _roll + _tm[5]
+        _sps = (FLAGS.num_envs * FLAGS.num_steps / _upd) if _upd > 0 else 0.0
         _emit(f"[timing u{update}] act={_tm[0]*1e3*_tm_scale:.2f}ms/env"
               f"  act+phi={_tm[1]*1e3*_tm_scale:.2f}  env={_tm[2]*1e3*_tm_scale:.2f}"
               f"  shape+refresh={_tm[3]*1e3*_tm_scale:.2f}"
               f"  post={_tm[4]*1e3*_tm_scale:.2f}"
-              f"  rollout={_roll*1e3*_tm_scale:.2f}ms/env"
-              f"  || per update: rollout={_roll:.2f}s learn={_tm[5]:.2f}s"
+              f"  || per update: rollout={_roll:.2f}s  learn={_tm[5]:.2f}s"
+              f"  update={_upd:.2f}s  sps={_sps:.0f}"
               f"  learn_share={100.0 * _tm[5] / max(_upd, 1e-9):.0f}%")
       if pbar is not None:
         pbar.update(FLAGS.num_envs * FLAGS.num_steps)

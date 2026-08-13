@@ -31,15 +31,20 @@ endif()
 # it is referenced by source path here (option: never copied) and linked against
 # FCM's prebuilt fcm_migration_core static library. The adapter is the only FCM
 # source compiled into the OpenSpiel tree; all engine sources stay in FCM.
-set (FCM_CORE_DIR "/home/mihai/personal/FCM" CACHE PATH
-     "Path to the FCM repository root (source of the OpenSpiel adapter and fcm_migration_core lib)")
-set (FCM_CORE_BUILD "${FCM_CORE_DIR}/build" CACHE PATH
-     "Path to the FCM build dir containing libfcm_migration_core.a")
-include_directories(${FCM_CORE_DIR}/target/include)
-set(PYTHON_BINDINGS ${PYTHON_BINDINGS}
-    ${FCM_CORE_DIR}/target/src/fcm_openspiel_state.cc
-    ${FCM_CORE_DIR}/target/include/fcm/fcm_openspiel_state.h
-)
+# Off by default: it requires a local FCM checkout (FCM_CORE_DIR) that is not
+# part of this repo and not present on every machine that builds OpenSpiel.
+option(OPEN_SPIEL_BUILD_WITH_FCM "Build with the FCM (Fast Food Magnate) adapter" OFF)
+if (OPEN_SPIEL_BUILD_WITH_FCM)
+  set (FCM_CORE_DIR "/home/mihai/personal/FCM" CACHE PATH
+       "Path to the FCM repository root (source of the OpenSpiel adapter and fcm_migration_core lib)")
+  set (FCM_CORE_BUILD "${FCM_CORE_DIR}/build" CACHE PATH
+       "Path to the FCM build dir containing libfcm_migration_core.a")
+  include_directories(${FCM_CORE_DIR}/target/include)
+  set(PYTHON_BINDINGS ${PYTHON_BINDINGS}
+      ${FCM_CORE_DIR}/target/src/fcm_openspiel_state.cc
+      ${FCM_CORE_DIR}/target/include/fcm/fcm_openspiel_state.h
+  )
+endif()
 
 # List of all Python bindings to add to pyspiel.
 include_directories (../pybind11_abseil ../../pybind11/include)
@@ -169,9 +174,11 @@ target_link_libraries(pyspiel PRIVATE
   absl::str_format
   absl::strings
   absl::time
-  ${FCM_CORE_BUILD}/libfcm_migration_core.a
   OpenSSL::Crypto
 )
+if (OPEN_SPIEL_BUILD_WITH_FCM)
+  target_link_libraries(pyspiel PRIVATE ${FCM_CORE_BUILD}/libfcm_migration_core.a)
+endif()
 
 # Without this, the binary is called `libpyspiel.so`
 set_target_properties(pyspiel PROPERTIES PREFIX "")
