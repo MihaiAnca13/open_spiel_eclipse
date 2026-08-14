@@ -52,8 +52,19 @@ def main():
 
   with open(os.path.join(args.src, "roster.json")) as f:
     entries = json.load(f)
-  chosen = pick(entries, args.keep)
   main_e = [e for e in entries if e["role"] == "main"]
+  # `main` is always kept, and the final snapshot shares its birth_update -- the
+  # two are byte-identical weights. roster_ladder detects that (its
+  # identical-policy gate requires direction 2 to mirror direction 1 exactly), but
+  # rating them against each other still spends a full pair's games on a
+  # comparison whose answer is known to be zero. Drop the duplicate first so the
+  # `keep` budget buys `keep` DISTINCT policies.
+  main_births = {e["birth_update"] for e in main_e}
+  candidates = [e for e in entries
+                if not (e["role"] == "snapshot"
+                        and e["birth_update"] in main_births)]
+  dropped = len(entries) - len(candidates)
+  chosen = pick(candidates, args.keep)
 
   os.makedirs(args.dst, exist_ok=True)
   arch = os.path.join(args.src, "arch.json")
@@ -65,7 +76,8 @@ def main():
 
   print(f"{args.src} -> {args.dst}")
   print(f"  {len(entries)} entries -> {len(out)} "
-        f"({len(chosen)} snapshots + {len(main_e)} main)")
+        f"({len(chosen)} snapshots + {len(main_e)} main"
+        f"{f'; dropped {dropped} duplicating main' if dropped else ''})")
   for e in out:
     print(f"    {e['policy_id']:<16} birth={e['birth_update']}")
 
