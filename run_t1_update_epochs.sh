@@ -76,7 +76,8 @@ for UE in $ARMS; do
     --num_envs="$ENVS" --num_steps="$STEPS" --num_workers="$WORKERS" \
     --num_minibatches="$MB" --update_epochs="$UE" \
     --learning_rate="$LR" --lr_schedule=fixed \
-    --amp --compile_encoder \
+    --amp --compile_encoder --overlap_record \
+    --obs_buffer_device=cuda \
     --snapshot_every=100 \
     --timing --timing_every=50 \
     --total_timesteps=1000000000 --max_seconds="$SECS" \
