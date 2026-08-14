@@ -49,6 +49,7 @@ from absl import flags
 import numpy as np
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 import pyspiel
 from open_spiel.python import rl_environment
@@ -848,11 +849,22 @@ class FactoredActorHead(nn.Module):
     self.register_buffer("decode", torch.from_numpy(decode.astype(np.int64)))
 
   def rows_for(self, idx):
-    """(len(idx), width) weight rows for the given action ids."""
-    return self.embedding[self.decode[idx]].sum(dim=1)
+    """(len(idx), width) weight rows for the given action ids.
+
+    embedding_bag, not ``self.embedding[self.decode[idx]].sum(dim=1)``. The
+    indexed form materialises an (len(idx), slots, width) intermediate -- 157 MB
+    at a production minibatch -- and backpropagates through generic advanced
+    indexing, whose backward is a sort-based scatter of len(idx)*slots gradient
+    rows into ``num_rows``. In a T4 profile that scatter
+    (``aten::_index_put_impl_`` on a (1420, 64) target from (153520, 4, 64)
+    values) was the single hottest operation in the whole training loop.
+    "Sum `slots` embedding rows per item" is precisely what embedding_bag is,
+    fused and with a backward specialised for it.
+    """
+    return F.embedding_bag(self.decode[idx], self.embedding, mode="sum")
 
   def full_weight(self):
-    return self.embedding[self.decode].sum(dim=1)
+    return F.embedding_bag(self.decode, self.embedding, mode="sum")
 
   def forward(self, features):
     return features @ self.full_weight().t() + self.bias
@@ -934,14 +946,18 @@ class TypedPointerActorHead(FactoredActorHead):
 
     cell = self.cell_id[cols]
     cell_q = self.cell_query(f) + self.cell_family(family)
-    result = result + torch.where(
-        cell >= 0, (cell_q * self._pick(cells_t, rows, cell)).sum(-1), zero)
 
+    # The three cell-table picks (this one, the MOVE destination below, and the
+    # planet slot's own cell) are issued as ONE advanced-indexing call with their
+    # index vectors concatenated. Backward through `table[rows, idx]` allocates
+    # and zeroes a full zeros_like(table), and cells_t is (B, 225, 64) -- 236 MB
+    # bf16 at a production minibatch -- so three separate picks paid that three
+    # times for one logical read. Measured 3.51x on the op, bitwise identical.
+    # `destination` and `keyed_slot` are computed below, so this is deferred to a
+    # single call once all three index vectors exist.
     unit = self.unit_id[cols]
     unit_q = self.unit_query(f) + self.unit_family(family)
-    result = result + torch.where(
-        unit >= 0, (unit_q * self._pick(context.units, rows, unit)).sum(-1),
-        zero)
+    unit_h = self._pick(context.units, rows, unit)
 
     # A normal MOVE_UNIT action points both at its registry row and the
     # destination resolved from that row/direction in the current universe.
@@ -949,9 +965,6 @@ class TypedPointerActorHead(FactoredActorHead):
     route = context.routes[rows, unit.clamp(min=0), direction.clamp(min=0)]
     destination = (route * obs_layout.GALAXY_CELLS).round().long() - 1
     has_route = (unit >= 0) & (direction >= 0) & (route > 0)
-    result = result + torch.where(
-        has_route, (cell_q * self._pick(cells_t, rows, destination)).sum(-1),
-        zero)
 
     # Colony slots are globally keyed as cell*8+slot; combat population uses its
     # V2 current-target-cell key with the same local slot number. The engine
@@ -965,17 +978,31 @@ class TypedPointerActorHead(FactoredActorHead):
         pop_cell * obs_layout.PLANET_SLOTS_PER_CELL + slot)
     has_slot = ((slot >= 0) & (slot < obs_layout.PLANET_SLOTS_PER_CELL)
                 & ((cell >= 0) | (pop_cell >= 0)))
+    slot_own_cell = torch.div(keyed_slot, obs_layout.PLANET_SLOTS_PER_CELL,
+                              rounding_mode="floor")
+
+    # All three cell-table reads in ONE advanced-indexing call. Identical values
+    # to three separate `_pick`s (verified bitwise), but the backward allocates
+    # and zeroes one zeros_like(cells_t) instead of three, and cells_t is
+    # (B, 225, 64) -- 236 MB bf16 at a production minibatch. Same clamp bounds as
+    # `_pick`, which is sound because all three index the same axis of the same
+    # table.
+    n_pairs = cols.shape[0]
+    n_cells = cells_t.shape[1]
+    picked = cells_t[
+        rows.repeat(3),
+        torch.cat([cell, destination, slot_own_cell]).clamp(min=0,
+                                                            max=n_cells - 1)]
+    cell_h = picked[:n_pairs]
+    dest_h = picked[n_pairs:2 * n_pairs]
+    slot_cell = picked[2 * n_pairs:]
+
     slot_row = self._pick(context.slots, rows, keyed_slot)
     ptype = (slot_row[:, 1] * (obs_layout.PLANET_TYPE_COUNT - 1)
              ).round().long().clamp(0, obs_layout.PLANET_TYPE_COUNT - 1)
-    slot_cell = self._pick(
-        cells_t, rows,
-        torch.div(keyed_slot, obs_layout.PLANET_SLOTS_PER_CELL,
-                  rounding_mode="floor"))
     slot_h = self.slot_target(
         torch.cat([slot_row, self.planet_type_embed(ptype), slot_cell], dim=-1))
     slot_q = self.slot_query(f) + self.slot_family(family)
-    result = result + torch.where(has_slot, (slot_q * slot_h).sum(-1), zero)
 
     # Seats: finding the block that holds an ABSOLUTE seat id is a search over
     # the 6 slots, so this one genuinely reduces -- but only over VALID slots.
@@ -986,6 +1013,15 @@ class TypedPointerActorHead(FactoredActorHead):
                & context.seat_valid[rows])
     seat_q = self.seat_query(f) + self.seat_family(family)
     seat_h = self._pick(context.seats, rows, matches.float().argmax(dim=1))
+
+    # Accumulated in the ORIGINAL order -- cell, unit, destination, slot, seat.
+    # Float addition is not associative, so reordering these would change the
+    # last bits of every logit and cost the bitwise-equality check that makes
+    # this refactor auditable.
+    result = result + torch.where(cell >= 0, (cell_q * cell_h).sum(-1), zero)
+    result = result + torch.where(unit >= 0, (unit_q * unit_h).sum(-1), zero)
+    result = result + torch.where(has_route, (cell_q * dest_h).sum(-1), zero)
+    result = result + torch.where(has_slot, (slot_q * slot_h).sum(-1), zero)
     result = result + torch.where(
         (target_seat >= 0) & matches.any(dim=1),
         (seat_q * seat_h).sum(-1), zero)
