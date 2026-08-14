@@ -1214,6 +1214,74 @@ therefore no longer hinges on T1**: it is a fifth of wall clock at
 `update_epochs=4` and would be ~30% at `update_epochs=1`. Re-read T2's
 "contingent on T1" framing against these numbers before deprioritizing it.
 
+### The `act` phase is 14% network and 82% bookkeeping — and the note that
+### dismissed it was measured at the wrong env count
+
+**This is the largest throughput item now known, and it was hiding behind a
+"deliberately not doing" entry.** `tools/act_decompose.py` breaks `step_np` (which
+is exactly what the `act` timing slot brackets) into its pieces on real
+observations and real legal masks, and checks the sum against a real end-to-end
+call so the decomposition can be believed:
+
+| piece of `step_np` | 1,024 envs | share | 256 envs | scaling |
+|---|---|---|---|---|
+| `_last_decision` bookkeeping (`ppo.py:956-975`) | **19.06 ms** | 47.5% | 4.51 ms | 4.2x |
+| — of which per-env `obs_cpu[i].copy()` | 10.19 ms | 25.4% | 1.70 ms | **6.0x** |
+| H2D obs upload (154 MB float32) | **14.03 ms** | 35.0% | 3.05 ms | 4.6x |
+| `_act_sparse` — the actual network | 5.78 ms | 14.4% | 3.11 ms | **1.86x** |
+| rollout row writes | 0.33 ms | 0.8% | 0.09 ms | 3.7x |
+| — of which the `_acts_trainable` loop | 0.16 ms | 0.4% | 0.04 ms | |
+| **sum / measured end to end** | 39.21 / **40.10 ms** | | 10.77 / 12.38 ms | |
+
+**The network is 14% of `act`.** The other 33 ms — `4.24 s of every 18.87 s
+update, 22.5% of the whole update` — is memcpy and Python bookkeeping performing
+no arithmetic.
+
+Why this was missed: `next_work.md` *does* list "Eliminating the per-step
+`_last_decision` copies" — but under **Deliberately not doing**, justified by
+"pooling is a measured wash" (12.40 ms against a pooled 11.88 ms). That
+measurement was taken at **256 envs** and it tested whether *one particular fix*
+helped. It says nothing about the magnitude of the cost, and every term in it
+scales with `num_envs`: the Python loop linearly, the copies **superlinearly**
+(6.0x for 4x envs — the same mmap-threshold signature the 12 GB work already found
+in `_collect`, where allocating a fresh 38.5 MB buffer per step cost more than the
+copy). A cost dismissed at 256 envs is 4x the slice at the 1,024 the long run
+wants.
+
+Note `_last_decision` is 19.06 ms of which only 10.19 ms is the obs copies. The
+remaining ~8.9 ms is **three separate `.cpu().numpy()` D→H transfers** plus the
+per-env Python loop and its column slicing — and that half needs no semantic
+change, so it splits into:
+
+- **~8.9 ms/step (1.14 s/update, 6%) — low risk.** Batch the three D→H transfers
+  into one; hoist the per-env column slicing out of the Python loop.
+- **10.19 ms/step (1.30 s/update, 6.9%) — needs the rewrite.** The copies exist
+  because `obs_cpu` is a view into shared memory that the next env step
+  overwrites, and `_collect` deliberately keeps only two live generations, while
+  terminal attribution may need a seat's decision from many steps back. The fix is
+  the `(row, env)` reference design pointing into the **rollout buffer**, which is
+  device-resident and persists for the whole batch — that is why it "rewrites
+  terminal attribution", and terminal attribution is where the bug that cost 408M
+  steps lived. Gate it exactly as T2 demands: bitwise golden reference first.
+
+#### This fix and T2 are SUBSTITUTES, not additive — size them together
+
+T2 hides `min(act+phi, env)`. Making `act` cheaper leaves T2 less to hide, so the
+two cannot be added. At 1,024 envs, `update_epochs=4` (act+phi 43.5 ms, env 28.7
+ms, learn 9.37 s):
+
+| | rollout | update | speedup |
+|---|---|---|---|
+| today | 9.50s | 18.87s | — |
+| `_last_decision` fixed only | 7.07s | 16.44s | 1.15x |
+| T2 only | 5.83s | 15.20s | 1.24x |
+| both | 3.93s | 13.30s | **1.42x** |
+
+So T2 remains the bigger single item, the `act` cleanup is cheaper and lower-risk
+in its first half, and doing both is worth 1.42x rather than the 1.15 × 1.24 =
+1.43x one might naively multiply (they nearly coincide here only by accident —
+at other act:env ratios the gap is large). **Never size these two independently.**
+
 ### `num_workers`: 12 is clearly too few; 16–24 is a plateau inside the noise
 
 Measured at 1,024 envs, the long run's shape (`run_t0_workers.sh`). `learn` is
