@@ -232,14 +232,40 @@ class AsyncVectorEnv(object):
 
   def _run_step(self, actions):
     """Writes actions, steps workers, returns after one step round-trip."""
+    self.start_step(actions)
+    self.await_step()
+
+  def start_step(self, actions):
+    """Writes actions and releases the workers WITHOUT waiting for them.
+
+    Pairs with ``await_step``. The round trip is split so the caller can run its
+    own CPU work while the workers step -- the PPO loop's per-env
+    ``_last_decision`` bookkeeping is ~17 ms/step at 1,024 envs against ~27 ms of
+    env stepping, and serialising the two wastes all of it.
+
+    SAFETY: the workers write only the shared-memory buffers (``obs_buf``,
+    ``cur_buf``, ``legal_buf``, ...). ``_collect`` copies those into one of two
+    alternating GENERATION buffers, and a ``_StepArrays`` the caller is holding
+    points at a generation, not at shm. So a held ``_StepArrays`` stays valid for
+    the whole time the workers are running -- which is the same depth-2 invariant
+    ``_collect`` already documents and ``async_vector_env_test`` already pins.
+    """
     with self._obs_lock():
       self.action_buf[:] = np.asarray(actions, dtype=np.int32)
     for i in range(len(self._worker_procs)):
       if self._worker_procs[i] is not None:
         self._go[i].release()
+
+  def await_step(self):
+    """Waits for the workers released by ``start_step``."""
     for i in range(len(self._worker_procs)):
       if self._worker_procs[i] is not None:
         self._done[i].acquire()
+
+  def finish_step_np(self):
+    """``await_step`` + ``_collect``: the second half of a split ``step_np``."""
+    self.await_step()
+    return self._collect()
 
   def _legal_indices(self):
     """Returns (legal_rows, legal_cols) int64 numpy from the packed buffers."""
@@ -268,6 +294,16 @@ class AsyncVectorEnv(object):
       rows = np.zeros(0, dtype=np.int64)
       cols = np.zeros(0, dtype=np.int64)
     return rows, cols
+
+  def start_step_np(self, actions, reset_if_done=False):
+    """First half of ``step_np``: release the workers and return immediately.
+
+    The caller must call ``finish_step_np`` before touching the result buffers
+    again. Between the two it may do any work that does not read shared memory --
+    see ``start_step`` for why a held ``_StepArrays`` survives.
+    """
+    del reset_if_done  # workers always auto-reset; kept for signature parity
+    self.start_step(actions)
 
   def step_np(self, actions, reset_if_done=False):
     """Vectorized step: no per-env TimeStep/StepOutput objects.

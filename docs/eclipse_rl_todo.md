@@ -1238,7 +1238,63 @@ once bypassed the compiled body entirely, making a measured 1.57x silently inert
 Both `_encode_context` and `_pairs` fall back to eager on any exception with only a
 `warnings.warn`, so an inert compile is quiet by design.
 
-### Result so far: 18.87 → 13.96 s/update at 1,024 envs (1.35x, sps +35%)
+### act/env overlap without env groups: +7.9%, and the ceiling is CPU contention
+
+T2's payoff was reachable without the env-group split. `AsyncVectorEnv.start_step` /
+`await_step` split the round trip, and `PPO.flush_selfplay_record` defers the per-env
+`_last_decision` bookkeeping, so the loop releases the workers and does the
+bookkeeping while they run (`--overlap_record`, default on). Safe by the invariant
+`_collect` already documents: workers write only shm, `_collect` copies into one of
+two alternating generation buffers, and a held `_StepArrays` points at a generation.
+
+Paired A/B, 1,024 envs, `--league` with `--snapshot_every=0` so K=1 (every row
+trainable, the worst case for bookkeeping):
+
+| | nooverlap | overlap |
+|---|---|---|
+| `act` (step_np alone) | 30.21 ms | **9.50 ms** |
+| `act+phi` (incl. the deferred flush) | 30.56 ms | 38.75 ms |
+| `env` (residual wait) | 27.31 ms | **11.84 ms** |
+| `rollout` | 7.70s | 6.72s |
+| `update` | 13.42s | **12.44s** |
+| steady sps | 9,765 | **10,540** |
+
+The mechanism is confirmed — `act` fell 30.2 → 9.5 ms as the bookkeeping left
+`step_np`, and the env *wait* fell 27.3 → 11.8 ms because it now happens during it.
+
+**But only ~15.5 ms of the 27.3 ms env step got hidden, and the reason is CPU
+contention, which caps this whole class of optimisation on this box.** The
+bookkeeping is ~29 ms of memcpy-heavy main-thread work competing with 16 env workers
+for 12 physical cores that the two resident vLLM workers also use. Overlapping CPU
+work with CPU work has limited headroom here; an estimate that treats the main thread
+and the workers as independent (this one predicted ~30%) will be roughly 4x
+optimistic.
+
+**Consequence: the env-group split is not worth building.** It would need main-thread
+CPU for act-side work while workers run — the same wall. `T2 sizing` now reads 12% of
+wall clock, down from 26%, so the headroom that remains is small. Same argument
+retires the `(row, env)` reference design for `_last_decision`'s copies.
+
+### Result so far: 18.87 → 12.44 s/update at 1,024 envs (1.52x, sps +52%)
+
+| change | update | steady sps |
+|---|---|---|
+| T0 baseline | 18.87s | 6,945 |
+| + `embedding_bag` + combined cell pick (`learn` 1.59x) | 15.30s | 8,569 |
+| + pinned collect destination + vectorised `step_np` | 13.96s | 9,390 |
+| + compiled pointer head | ~13.42s | 9,765 |
+| + `--overlap_record` | **12.44s** | **10,540** |
+
+A 30-minute production run at this config completed cleanly: 147 updates,
+19,267,584 steps in 1800 s = **10,704 real sps** end to end, including startup, the
+one-off compile trace and snapshotting. No NaN, no errors, `overlap` 1.00x throughout.
+
+That run also validated the league cap end to end. As snapshots accumulated to the
+4-opponent cap, `act` rose 25.6 → 34.7 ms (+36%) and `update` 11.34 → 12.24 s
+(+7.9%) — against T3's predicted 6.5% for K=5, i.e. the right magnitude. The rise is
+bounded, unlike the pre-fix behaviour (22.8 → 41.7 ms over 45 updates and still
+climbing), though 147 updates is too short to demonstrate a hard plateau; `league_test`
+asserts the cap directly and that is the real guarantee.
 
 Three changes, each measured end to end on the T0 harness with a compiled encoder,
 1,024 envs / mb=16. `learn`'s 1.59x came from the pointer head; the rollout's from

@@ -211,6 +211,15 @@ flags.DEFINE_integer(
     "TimeStep/StepOutput objects are built. Recommended 8-16 with >= 512 "
     "envs.")
 
+flags.DEFINE_bool(
+    "overlap_record", True,
+    "Release the env workers before doing the per-env self-play bookkeeping, so "
+    "the two overlap. At 1,024 envs the `_last_decision` stores are ~17 ms/step "
+    "against ~27 ms of env stepping; serialised, that is ~2 s of every update. "
+    "Requires the async env (start_step_np/finish_step_np) and a self-play game; "
+    "silently off otherwise. Kept as a flag so the paired A/B is one command and "
+    "so it can be turned off if the overlap is ever implicated in a bug.")
+
 flags.DEFINE_string(
     "obs_buffer_device", "auto",
     "Where the (num_steps, num_envs, obs) rollout observation buffer lives: "
@@ -2878,6 +2887,13 @@ def main(_):
     # slots cover the same real seconds, so a phase-sum "update" over-counts and
     # the derived sps goes DOWN as the run gets faster. Everything reported as
     # per-update seconds is therefore driven off slot 6.
+    # Overlap needs the async env's split step (start_step_np/finish_step_np) and
+    # the self-play record path that defers per-env bookkeeping. Both are checked
+    # rather than assumed so a sync env or a single-player game silently keeps the
+    # serial path instead of raising.
+    _overlap = (FLAGS.overlap_record and hasattr(envs, "start_step_np")
+                and getattr(agent, "selfplay", False))
+    _emit(f"env/record overlap: {'ON' if _overlap else 'off'}")
     _tm = (np.zeros(7, dtype=np.float64) if FLAGS.timing else None)
     _tm_scale = 1.0 / max(1, FLAGS.num_steps)
     _run_t0 = time.time()
@@ -2900,16 +2916,34 @@ def main(_):
       _wall_roll0 = time.perf_counter() if _tm is not None else None
       for step in range(FLAGS.num_steps):
         t0 = time.perf_counter() if _tm is not None else None
-        acts = agent.step_np(step_arrays)
+        acts = agent.step_np(step_arrays, defer_record=_overlap)
         t1 = time.perf_counter() if _tm is not None else None
+        # Release the env workers BEFORE doing the CPU-side bookkeeping, so the
+        # two run concurrently. At 1,024 envs the per-env `_last_decision` stores
+        # are ~17 ms/step against ~27 ms of env stepping, and running them in
+        # series wastes all of it. Safe because nothing between here and
+        # finish_step_np reads shared memory -- `last_obs_batch` and `seats` point
+        # into a _collect generation buffer, which the workers never touch.
+        if _overlap:
+          envs.start_step_np(acts, reset_if_done=True)
         obs_batch = agent.last_obs_batch
         diag.observe(obs_batch, agent.last_seats)
         if FLAGS.shaping and phi_learned:
           phi_prev = _phi_wins(agent, obs_batch, device)
         else:
           phi_prev = potential_self_vec(obs_batch, win_squash)
+        if _overlap:
+          # MUST precede post_step_np: terminal attribution resolves the seat's
+          # last decision, which is exactly what this records.
+          agent.flush_selfplay_record()
         t1b = time.perf_counter() if _tm is not None else None
-        step_arrays = envs.step_np(acts, reset_if_done=True)
+        # With overlap on, `env` measures only the RESIDUAL wait left after the
+        # bookkeeping, not the whole env step. The phase sum stays honest (the
+        # concurrency is main-thread-vs-worker-processes, not phase-vs-phase), so
+        # `overlap Nx` correctly keeps reading 1.00x -- the win shows up as env
+        # falling and rollout falling with it.
+        step_arrays = (envs.finish_step_np() if _overlap
+                       else envs.step_np(acts, reset_if_done=True))
         t2 = time.perf_counter() if _tm is not None else None
         shaped = np.zeros(FLAGS.num_envs, dtype=np.float32)
         if FLAGS.shaping and phi_mode not in ("none", "telescope"):

@@ -64,6 +64,7 @@ import pyspiel
 from open_spiel.python import rl_environment
 from open_spiel.python.pytorch.ppo import PPO
 from open_spiel.python.pytorch import ppo_win_test
+from open_spiel.python.async_vector_env import AsyncVectorEnv
 from open_spiel.python.vector_env import SyncVectorEnv
 
 SEED = 20260814
@@ -274,7 +275,106 @@ class EnvGroupEquivalenceTest(absltest.TestCase):
             f"{num_envs} envs / {num_workers} workers: midpoint {mid} is not a "
             f"shard boundary; the split must snap to {nearest}")
 
-  # ---- 4. the equivalence itself, pending the split -------------------------
+  # ---- 4. deferring the self-play record must change nothing ----------------
+
+  def _make_async(self, num_envs, num_workers):
+    """Seeded agent + AsyncVectorEnv, for the array-native (step_np) path."""
+    _seed_everything()
+    game = pyspiel.load_game("colored_trails")
+    game_str = "colored_trails"
+    envs_list = [
+        rl_environment.Environment(
+            game=pyspiel.load_game(game_str),
+            chance_event_sampler=rl_environment.ChanceEventSampler(
+                seed=SEED + i),
+            # OBSERVATION, not INFORMATION_STATE: observations_as_numpy is only
+            # supported for the former, and the async env needs numpy views to
+            # publish into shared memory.
+            observation_type=rl_environment.ObservationType.OBSERVATION,
+            observations_as_numpy=True)
+        for i in range(num_envs)
+    ]
+    envs = AsyncVectorEnv(
+        envs_list, num_workers=num_workers,
+        sampler_seeds=[SEED + i for i in range(num_envs)],
+        game_strs=[game_str] * num_envs,
+        max_legal=game.num_distinct_actions())
+    inner = envs_list[0]
+    info_state_shape = tuple(
+        np.array(inner.observation_spec()["info_state"]).flatten())
+    agent = PPO(
+        input_shape=info_state_shape,
+        num_actions=game.num_distinct_actions(),
+        num_players=game.num_players(), player_id=0,
+        num_envs=num_envs, steps_per_batch=STEPS_PER_BATCH,
+        num_minibatches=2, update_epochs=1, learning_rate=2.5e-4,
+        device="cpu", agent_fn=ppo_win_test._EclipseLikeAgent,
+        value_mode="win", aux_tasks=["final_vp"],
+        aux_target_fn=(lambda r: np.asarray(r, dtype=np.float32).reshape(-1, 1)),
+        aux_coef=0.1,
+    )
+    return agent, envs
+
+  def _rollout_np(self, num_envs, num_workers, steps, overlap):
+    """One array-native rollout, serial or with the deferred-record overlap."""
+    agent, envs = self._make_async(num_envs, num_workers)
+    envs.reset(players="current")
+    sa = envs.reset_np()
+    terms = 0
+    for _ in range(steps):
+      acts = agent.step_np(sa, defer_record=overlap)
+      if overlap:
+        # Exactly the training loop's ordering: start workers, do the deferred
+        # bookkeeping while they run, then await.
+        envs.start_step_np(acts, reset_if_done=True)
+        agent.flush_selfplay_record()
+        sa = envs.finish_step_np()
+      else:
+        sa = envs.step_np(acts, reset_if_done=True)
+      agent.post_step_np(sa.rewards, sa.dones,
+                         shaped_reward=np.zeros(num_envs, dtype=np.float32))
+      terms += int(np.asarray(sa.dones).sum())
+    snap = self._snapshot(agent)
+    if hasattr(envs, "close"):
+      envs.close()
+    return snap, terms
+
+  def test_deferred_selfplay_record_is_bitwise_identical(self):
+    """`defer_record=True` + `flush_selfplay_record()` == the serial path.
+
+    This is what lets the training loop release the env workers *before* the
+    per-env `_last_decision` bookkeeping, so the two overlap. Only the timing
+    moves; every recorded value must be identical.
+
+    `_extra_samples` is the field that catches a mistake here: flushing after
+    `post_step_np` instead of before would resolve a seat's terminal against its
+    PREVIOUS decision rather than the one just taken -- a plausible-looking wrong
+    aux target, not a crash. That is the 408M-step failure mode.
+    """
+    serial, t_serial = self._rollout_np(NUM_ENVS, 2, STEPS_PER_BATCH, False)
+    overlap, t_overlap = self._rollout_np(NUM_ENVS, 2, STEPS_PER_BATCH, True)
+    self.assertEqual(t_serial, t_overlap, "different episode counts")
+    self.assertGreater(t_serial, 0,
+                       "no episode ended, so terminal attribution never ran")
+    self.assertSnapshotsEqual(serial, overlap, "serial vs deferred record")
+
+  def test_flush_is_a_harmless_noop_when_nothing_was_deferred(self):
+    """A caller that never defers must be unaffected by calling flush anyway."""
+    agent, envs = self._make_async(NUM_ENVS, 2)
+    envs.reset(players="current")
+    sa = envs.reset_np()
+    agent.flush_selfplay_record()      # nothing pending
+    acts = agent.step_np(sa)           # serial path, records inline
+    agent.flush_selfplay_record()      # still nothing pending
+    before = self._snapshot(agent)
+    agent.flush_selfplay_record()
+    self.assertSnapshotsEqual(self._snapshot(agent), before,
+                              "flush with nothing pending must be a no-op")
+    del acts
+    if hasattr(envs, "close"):
+      envs.close()
+
+  # ---- 5. the equivalence itself, pending the split -------------------------
 
   def assertGroupSplitEquivalent(self):
     """Two env groups must record exactly what one group records.

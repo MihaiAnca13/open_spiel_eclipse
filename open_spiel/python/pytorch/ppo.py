@@ -537,6 +537,8 @@ class PPO(nn.Module):
                                   self.player_id, dtype=torch.long)
     self._extra_samples = []
     self._last_decision = [{} for _ in range(self.num_envs)]
+    # Set by step_np(defer_record=True), consumed by flush_selfplay_record.
+    self._pending_record = None
     # First row of the episode currently in progress, per env. Rows before it
     # belong to an episode that already ended inside this same batch, so they
     # must not be swept up by terminal attribution or aux back-fill.
@@ -880,7 +882,50 @@ class PPO(nn.Module):
         ]
         return agent_output
 
-  def step_np(self, step_arrays, is_evaluation=False):
+  def flush_selfplay_record(self):
+    """Runs the deferred ``_last_decision`` bookkeeping, if any is pending.
+
+    Split out of ``step_np`` so the caller can start the env workers first and pay
+    this ~17 ms/step (at 1,024 envs) against the ~27 ms the workers take, instead
+    of after them. Idempotent and a no-op when nothing is pending, so a caller that
+    does not defer needs no changes.
+
+    Nothing here reads shared memory: ``obs_cpu`` and ``seats`` point into a
+    ``_collect`` generation buffer, and ``mask_rows``/``mask_cols`` are freshly
+    allocated by ``_legal_indices`` every step. That is what makes it safe to run
+    concurrently with the workers.
+    """
+    pending = self._pending_record
+    if pending is None:
+      return
+    self._pending_record = None
+    (obs_cpu, seats, mask_rows, mask_cols, action, logprob, value) = pending
+    action_np = action.detach().to(torch.int32).cpu().numpy()
+    lpv = torch.stack((logprob.detach().reshape(-1),
+                       value.detach().reshape(-1))).cpu().numpy()
+    lens = np.bincount(np.asarray(mask_rows, dtype=np.int64),
+                       minlength=self.num_envs)
+    offsets = np.zeros(self.num_envs, dtype=np.int64)
+    np.cumsum(lens[:-1], out=offsets[1:])
+    seats_i = np.asarray(seats, dtype=np.int64)
+    if self.league:
+      trainable = (self.lineup[np.arange(self.num_envs), seats_i]
+                   == self.train_pid)
+    else:
+      trainable = np.ones(self.num_envs, dtype=bool)
+    acts_l = action_np.tolist()
+    lp_l = lpv[0].tolist()
+    v_l = lpv[1].tolist()
+    lens_l = lens.tolist()
+    off_l = offsets.tolist()
+    seats_l = seats_i.tolist()
+    for i in np.flatnonzero(trainable).tolist():
+      o = off_l[i]
+      self._last_decision[i][seats_l[i]] = (
+          obs_cpu[i].copy(), mask_cols[o:o + lens_l[i]],
+          acts_l[i], lp_l[i], v_l[i])
+
+  def step_np(self, step_arrays, is_evaluation=False, defer_record=False):
     """Array-native ``step``: consumes ``async_vector_env._StepArrays``.
 
     Mirrors ``step`` occupancy-for-occupancy (stores obs/action/logprob/value/
@@ -952,6 +997,14 @@ class PPO(nn.Module):
 
       self.legal_rows_packed[row] = mask_rows.astype(np.int64)
       self.legal_cols_packed[row] = mask_cols.astype(np.int64)
+
+      if self.selfplay and defer_record:
+        # Hand the bookkeeping to flush_selfplay_record so the caller can start the
+        # env workers first and overlap it. Only references are stashed -- no work
+        # and no copies happen here.
+        self._pending_record = (obs_cpu, seats, mask_rows, mask_cols,
+                                action, logprob, value)
+        return action.detach().to(torch.int32).cpu().numpy()
 
       if self.selfplay:
         # This block was 47.5% of the `act` phase at 1,024 envs (19.06 of 40.10
