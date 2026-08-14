@@ -249,13 +249,21 @@ class AsyncVectorEnv(object):
     num_envs = self.num_envs
     if total > 0:
       rows = np.repeat(np.arange(num_envs, dtype=np.int64), lens)
-      cols = np.zeros(total, dtype=np.int64)
-      pos = 0
-      for i in range(num_envs):
-        n = int(lens[i])
-        if n:
-          cols[pos:pos + n] = self.legal_buf[i, :n].astype(np.int64)
-          pos += n
+      # Gathered with one fancy-index instead of a per-env Python loop that also
+      # did a redundant per-env .astype(). legal_buf is (num_envs, max_legal) and
+      # only the first lens[i] entries of each row are valid, so build the flat
+      # positions of exactly those entries and take them in one shot: row i
+      # contributes i*max_legal + 0..lens[i]-1, and `rows` already repeats i
+      # lens[i] times, so the row offsets come straight from it.
+      within = np.arange(total, dtype=np.int64) - np.repeat(
+          np.concatenate(([0], np.cumsum(lens[:-1]))), lens)
+      flat = self.legal_buf.reshape(-1)
+      # copy=False, because fancy indexing already produced a fresh array; a
+      # plain .astype() would copy 20k int64s a second time for nothing. `cols`
+      # is still freshly allocated every call, which PPO.step_np relies on when it
+      # retains slice views of it.
+      cols = flat[rows * self.legal_buf.shape[1] + within].astype(
+          np.int64, copy=False)
     else:
       rows = np.zeros(0, dtype=np.int64)
       cols = np.zeros(0, dtype=np.int64)
@@ -287,6 +295,42 @@ class AsyncVectorEnv(object):
     """
     return self._collect()
 
+  def _alloc_obs_dest(self):
+    """A `_collect` obs destination in CUDA-pinned host memory when possible.
+
+    The PPO loop's very next act does ``torch.from_numpy(obs).to(device)``, and a
+    pageable 154 MB host->device copy at 1,024 envs measured 14.2 ms/step against
+    3.0 ms from pinned memory -- 11 ms/step, ~1.4 s of a 15.3 s update. Returning a
+    numpy VIEW of a pinned torch tensor gets that for free: ``from_numpy`` on such
+    a view reports ``is_pinned() == True``, so no change is needed in ppo.py.
+
+    This is the retry of a documented NEGATIVE result, under the two conditions
+    that result asks for (see eclipse_rl_todo.md, "Negative results"):
+
+      * No extra copy. The old attempt staged obs into a pinned buffer *in
+        addition* to the copy `_collect` already does, paying a second 154 MB
+        memcpy to save one transfer -- a net loss (act 19.4 -> 23.0 ms). Here only
+        the DESTINATION of the existing ``np.copyto`` changes; measured 10.86 ms
+        into plain versus 10.98 ms into pinned, i.e. free.
+      * Strictly post-fork. Pinning before the worker fork poisons every worker's
+        inherited CUDA context (7,900 -> 3,000 SPS, with the *env* phase tripling).
+        `_collect_bufs` is allocated lazily on the first `_collect`, which happens
+        after `__init__` has forked the pool, so this allocation cannot be
+        inherited.
+
+    Falls back to plain host memory when torch or CUDA is absent, so the vector env
+    keeps working without them.
+    """
+    try:
+      import torch  # local: the vector env must not hard-depend on torch
+      if torch.cuda.is_available():
+        t = torch.empty(self.obs_buf.shape,
+                        dtype=torch.from_numpy(self.obs_buf[:1]).dtype)
+        return t.pin_memory().numpy()
+    except Exception:  # pylint: disable=broad-except
+      pass
+    return np.empty_like(self.obs_buf)
+
   def _collect(self):
     """Assembles _StepArrays from the current shared-memory buffers.
 
@@ -306,7 +350,7 @@ class AsyncVectorEnv(object):
     rows, cols = self._legal_indices()
     if self._collect_bufs is None:
       self._collect_bufs = [
-          (np.empty_like(self.obs_buf), np.empty_like(self.cur_buf),
+          (self._alloc_obs_dest(), np.empty_like(self.cur_buf),
            np.empty_like(self.rew_buf), np.empty((self.num_envs,), dtype=bool))
           for _ in range(2)
       ]

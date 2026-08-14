@@ -1130,12 +1130,17 @@ phase-sum-derived.**
 
 ### Negative results — do not retry these blind
 
-- **Pinning the H2D staging buffer.** Isolated microbenchmark is compelling (38.5
+- **Pinning the H2D staging buffer.** ~~Isolated microbenchmark is compelling (38.5
   MB: 7.9 → 3.5 ms). Paired A/B in the real loop measured act **19.4 → 23.0
-  ms/step, a net loss**. Separately: allocating pinned buffers *pre-fork* poisons
-  every worker's inherited CUDA context — 7,900 → 3,000 SPS, with the *env* phase
-  tripling, which is the tell that it is a fork problem and not a transfer one.
-  If retried: strictly post-fork, and prove it in a paired run.
+  ms/step, a net loss**.~~ **OVERTURNED 2026-08-14 — see "Pinning, done under the
+  two conditions this entry asks for" below.** The original attempt staged obs into
+  a pinned buffer *in addition to* the copy `_collect` already performs, so it paid
+  a second 154 MB memcpy to save one transfer. Making the *existing* copy's
+  destination pinned costs nothing extra (10.86 → 10.98 ms) and the transfer drops
+  14.2 → 2.8 ms. The rest of this entry still holds: allocating pinned buffers
+  *pre-fork* poisons every worker's inherited CUDA context — 7,900 → 3,000 SPS,
+  with the *env* phase tripling, which is the tell that it is a fork problem and not
+  a transfer one. Strictly post-fork, and prove it in a paired run.
 - **Pooling `_last_decision`'s per-env observation copies.** Reusing preallocated
   destinations measured 12.40 ms against `.copy()`'s 11.88 ms — glibc already
   recycles chunks of that size. The only real fix remains the `(row, env)`
@@ -1214,6 +1219,27 @@ therefore no longer hinges on T1**: it is a fifth of wall clock at
 `update_epochs=4` and would be ~30% at `update_epochs=1`. Re-read T2's
 "contingent on T1" framing against these numbers before deprioritizing it.
 
+### Result so far: 18.87 → 13.96 s/update at 1,024 envs (1.35x, sps +35%)
+
+Three changes, each measured end to end on the T0 harness with a compiled encoder,
+1,024 envs / mb=16. `learn`'s 1.59x came from the pointer head; the rollout's from
+the act phase.
+
+| | baseline | +learn fix | +act cleanup +pinned collect |
+|---|---|---|---|
+| `act` ms/step | 42.51 | 42.51 | **31.07** |
+| `env` ms/step | 28.31 | 28.31 | 28.15 |
+| `rollout` | 9.50s | 9.40s | 7.93s |
+| `learn` | 9.37s | 5.90s | 6.03s |
+| **`update`** | **18.87s** | 15.30s | **13.96s** |
+| steady sps | 6,945 | 8,569 | **9,390** |
+
+`act:env` is now **1.10:1** (was 1.50:1), i.e. nearly balanced — which is the most
+favourable possible shape for T2, whose payoff is `min(act, env)`. T2 is now worth
+**46% of the rollout and 26% of wall clock**. Every rollout-side fix makes T2 worth
+*more*, and every learn-side fix does too; they must be re-sized after each change,
+not sized once.
+
 ### The `act` phase is 14% network and 82% bookkeeping — and the note that
 ### dismissed it was measured at the wrong env count
 
@@ -1263,6 +1289,67 @@ change, so it splits into:
   device-resident and persists for the whole batch — that is why it "rewrites
   terminal attribution", and terminal attribution is where the bug that cost 408M
   steps lived. Gate it exactly as T2 demands: bitwise golden reference first.
+
+#### Pinning, done under the two conditions the negative result asks for
+
+The H2D is **bandwidth-bound**: 154 MB fp32 at 11.1 GB/s = 13.9 ms, and 77 MB fp16
+at 11.6 GB/s = 6.7 ms. Pinned host memory reaches 2.8 ms.
+
+The fix is to change the *destination* of the copy `_collect` already does, not to
+add a staging copy. `AsyncVectorEnv._alloc_obs_dest` returns a numpy **view of a
+pinned torch tensor**, and `torch.from_numpy` on such a view reports
+`is_pinned() == True` — so `ppo.step_np`'s existing
+`torch.from_numpy(obs_cpu).to(device)` takes the pinned path with **no change in
+ppo.py at all**. Both conditions the old entry demands are met by construction:
+
+- **No extra copy.** `np.copyto` into plain 10.86 ms vs into pinned 10.98 ms.
+- **Strictly post-fork.** `_collect_bufs` is allocated lazily on the first
+  `_collect`, which runs after `__init__` has forked the pool.
+
+Measured in the real loop, paired: **act 42.51 → 31.07 ms**, and critically **env
+28.31 → 28.15 ms — flat**. A tripled env phase was the signature of the original
+fork-context failure; its absence is what says this is the transfer win and not the
+old trap. Falls back to plain host memory when torch or CUDA is absent.
+
+#### Rejected: fp16 on the wire. It changes 0.068% of decoded categorical ids
+
+Halving the wire dtype would halve three copies at once (`_collect`'s memcpy, the
+H2D, and `_last_decision`'s obs copies). It is nonetheless **rejected**, and the
+reason generalises:
+
+The observation is entirely in [0, 1] and an honest fp32→fp16 cast is accurate to
+**2.4e-4 max, 5.3e-7 mean, 0% of entries above 1e-3**. But the tensor encodes
+**categorical ids as normalised scalars** that consumers recover with
+`.round().long()`, and a decode dividing by `S` needs error below `0.5/S`:
+
+| decode scale | needs | fp16 gives 4.9e-4 |
+|---|---|---|
+| `PLANET_TYPE_COUNT-1` = 7 | 7.1e-2 | fine |
+| `HEX_DIRECTIONS` = 6 | 8.3e-2 | fine |
+| `GALAXY_CELLS` = 225 | 2.2e-3 | fine |
+| sector = 396 | 1.3e-3 | fine |
+| **`PLANET_SLOT_ROWS` = 1800** | **2.8e-4** | **too coarse** |
+
+Measured on a real mid-game state, **153 of 225,576 decodes differ (0.068%)** —
+97 at scale 225, 10 at scale 1800. Those feed `unit_cell`, `destination`,
+`keyed_slot` and `ptype` in the pointer head, so the head would occasionally point
+at a *different cell*. Not acceptable on the act path, which selects moves.
+
+**Consequence for the EXISTING fp16 rollout buffer, which is on by default under
+`--amp`:** it performs this same cast, so `learn` already sees those id
+perturbations. `ppo_obs_dtype_test`'s "fp16 storage error 6.3e-13" cannot be
+measuring this path — 6.3e-13 is far below fp16's own resolution. **"fp16 obs is
+settled and free" is not established for the id-decode path.** Whether a 0.068%
+id flip rate matters to learning is open; it is not measured by anything in the
+repo.
+
+#### Trap: `observation_tensor_into` accepts a float16 buffer and writes NOTHING
+
+No exception, no warning. The buffer comes back **all zeros** (`nonzeros: 0 vs 981`
+for the same state into fp32), which reads as a legal all-padding observation.
+Anyone reaching for a narrower wire dtype will hit this first and may mistake it
+for a precision problem — it is not, it is a silent no-op. Only float32 and
+float64 buffers actually receive data.
 
 #### This fix and T2 are SUBSTITUTES, not additive — size them together
 

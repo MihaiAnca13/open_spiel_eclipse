@@ -954,27 +954,54 @@ class PPO(nn.Module):
       self.legal_cols_packed[row] = mask_cols.astype(np.int64)
 
       if self.selfplay:
-        action_np = action.detach().cpu().numpy()
-        logprob_np = logprob.detach().cpu().numpy().ravel()
-        value_np = value.detach().cpu().numpy().ravel()
+        # This block was 47.5% of the `act` phase at 1,024 envs (19.06 of 40.10
+        # ms/step, ~2.4 s of an 18.87 s update) and every term in it scales with
+        # num_envs. What follows removes the per-env Python overhead; the obs
+        # copies below are the remaining half and need the (row, env) reference
+        # design to go away.
+        #
+        # TWO device->host transfers instead of three. action is integral while
+        # logprob/value are float, so they cannot share one tensor, but the two
+        # floats can be stacked -- and each separate .cpu() is its own transfer
+        # and its own sync. action goes as int32, halving those bytes too.
+        action_np = action.detach().to(torch.int32).cpu().numpy()
+        lpv = torch.stack((logprob.detach().reshape(-1),
+                           value.detach().reshape(-1))).cpu().numpy()
         # Per-env column offsets so each env's legal cols can be sliced out of
         # the packed buffers (no dense 11k mask build) for the closeout sample.
         lens = np.bincount(np.asarray(mask_rows, dtype=np.int64),
                            minlength=self.num_envs)
         offsets = np.zeros(self.num_envs, dtype=np.int64)
         np.cumsum(lens[:-1], out=offsets[1:])
-        for i, s in enumerate(seats):
-          if not self._acts_trainable(i, int(s)):
-            continue
-          n = int(lens[i])
-          cols = (mask_cols[offsets[i]:offsets[i] + n].astype(np.int64)
-                  if n else np.zeros(0, dtype=np.int64))
-          self._last_decision[i][int(s)] = (
-              obs_cpu[i].copy(), cols, int(action_np[i]),
-              float(logprob_np[i]), float(value_np[i]))
-        return np.asarray(action_np, dtype=np.int32)
+        # Trainability in one vectorised compare rather than num_envs calls to
+        # _acts_trainable, each of which indexed an object array.
+        seats_i = np.asarray(seats, dtype=np.int64)
+        if self.league:
+          trainable = (self.lineup[np.arange(self.num_envs), seats_i]
+                       == self.train_pid)
+        else:
+          trainable = np.ones(self.num_envs, dtype=bool)
+        # One .tolist() each, rather than num_envs numpy scalar extractions plus
+        # int()/float() conversions inside the loop.
+        acts_l = action_np.tolist()
+        lp_l = lpv[0].tolist()
+        v_l = lpv[1].tolist()
+        lens_l = lens.tolist()
+        off_l = offsets.tolist()
+        seats_l = seats_i.tolist()
+        # mask_cols is ALREADY int64 and freshly allocated by
+        # async_vector_env._legal_indices on every step, and its only consumer
+        # copies it (`e[3].astype(np.int64)` in _packed_legal_with_extras), so a
+        # slice view is safe to retain. The old per-env `.astype(np.int64)` was a
+        # redundant copy -- num_envs small allocations per step for nothing.
+        for i in np.flatnonzero(trainable).tolist():
+          o = off_l[i]
+          self._last_decision[i][seats_l[i]] = (
+              obs_cpu[i].copy(), mask_cols[o:o + lens_l[i]],
+              acts_l[i], lp_l[i], v_l[i])
+        return action_np
 
-      return action.detach().cpu().numpy().astype(np.int32)
+      return action.detach().to(torch.int32).cpu().numpy()
 
   def _resolve_last_decision(self, env_idx, seat):
     """(obs, packed_cols, action, logprob, value) for a seat's last decision.
