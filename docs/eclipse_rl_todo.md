@@ -1157,6 +1157,208 @@ curve at update 20.
 
 ---
 
+## BIG re-baseline, 2026-08-14 (RTX PRO 6000 Blackwell, GPU 3, tree `6f7d9219`)
+
+The T0 pre-flight from `next_work.md`, run on BIG. **These supersede every
+pre-2026-08-13 SPS number for this machine**, which were phase-sum-derived.
+Harness: `run_t0_baseline.sh` + `tools/parse_t0.py`.
+
+`overlap` reads **1.00x on all five rungs**, so the wall-clock bracket is sound
+and the phase breakdown may still be summed. That was T0's gate.
+
+Every rung: 128 steps, `--amp`, fp16 device obs buffer, `update_epochs=4`, and
+**8,192 rows per minibatch** (mb=4 at 256 envs, mb=16 at 1,024) so the env-count
+rung is not also a minibatch-size change. `num_workers=16`. Means over updates
+4–20; `STEADY` is the last three, which is the number to compare rungs on.
+
+| rung | update | learn | rollout | learn_share | steady sps | act:env |
+|---|---|---|---|---|---|---|
+| base (cpu buffer, no compile) | 7.40s | 4.46s | 2.94s | 60% | 4,427 | 2.14:1 |
+| + device obs buffer | 5.75s | 2.91s | 2.84s | 51% | 5,702 | 1.85:1 |
+| + `--compile_encoder` | 5.11s | 2.25s | 2.85s | 45% | 6,419 | 1.82:1 |
+| 1,024 envs, mb=16 | 18.87s | 9.37s | 9.50s | 50% | **6,945** | 1.50:1 |
+| + `--league` (bookkeeping only) | 5.01s | 2.20s | 2.81s | 45% | 6,541 | 1.82:1 |
+
+- **The device obs buffer is worth 1.29x and `--compile_encoder` a further 1.13x,
+  and both land entirely in `learn`.** `act` (13.8 → 13.7 ms) and `env` (7.5 →
+  7.5 ms) are flat across all three rungs. Neither flag touches the rollout.
+- **`learn` is only 45–50% of the update here, against 65% on the 12 GB box.**
+  This single difference is what re-prices T2 below.
+- **1,024 envs beats 256 by 8%** at equal rows/minibatch, so the gain is
+  rollout-side amortization, not a learn effect.
+- `torch.compile` warms up for ~10 updates past update 0 (learn 2.74 → 2.34 →
+  2.26 s at u4/u8/u12) and its one-off trace costs ~29 s of update 0. Averaging
+  the warmup in makes a compile win read as a regression; `parse_t0.py` reports a
+  steady-state window for exactly this reason.
+- **Read the `league` rung narrowly.** It ran `--snapshot_every=0`, so the roster
+  never grew past `main` and the batch held K=1 distinct policies. It prices
+  `_refresh_lineups` bookkeeping — which is free — and **not** the per-policy act
+  cost, which is the expensive, superlinear half of league play. Do not quote it
+  as "the cost of `--league`".
+
+### T2 (act/env overlap) is worth ~3x more on BIG than the 12 GB numbers implied
+
+`next_work.md` sized T2 at ~22% of the rollout but only ~7% of wall clock, and
+concluded it "is a minor item and arguably not worth its risk" unless
+`update_epochs=1` wins. On BIG, at `update_epochs=4`, measured:
+
+| config | min(act+phi, env) | of rollout | **of wall clock** |
+|---|---|---|---|
+| 256 envs | 7.50 of 22.29 ms | 34% | 19% |
+| 1,024 envs | 28.97 of 74.23 ms | 39% | **20%** |
+
+The reason is not that overlap got better — it is that `learn` no longer
+dominates (45–50% vs 65%) while the env phase got relatively *more* expensive, so
+the same overlap covers a larger share of a smaller denominator. **T2's value
+therefore no longer hinges on T1**: it is a fifth of wall clock at
+`update_epochs=4` and would be ~30% at `update_epochs=1`. Re-read T2's
+"contingent on T1" framing against these numbers before deprioritizing it.
+
+### `num_workers`: 12 is clearly too few; 16–24 is a plateau inside the noise
+
+Measured at 1,024 envs, the long run's shape (`run_t0_workers.sh`). `learn` is
+correctly invariant across worker counts — every real difference is the env phase:
+
+| workers | env ms/step | rollout | learn | steady sps |
+|---|---|---|---|---|
+| 12 | 31.01 | 9.77s | 10.10s | 6,602 |
+| 16 | 28.18 | 9.46s | 10.05s | 6,726 |
+| 20 | 28.18 | 9.50s | 10.18s | 6,669 |
+| 24 | 27.58 | 9.33s | 10.04s | 6,771 |
+
+**12 → 16 is a real 9% cut in the env phase. 16 → 24 is a further 2%, which two
+hot samples per rung cannot resolve** — the sps column is not even monotonic
+(w20 dips below w16 and w24 comes out highest), which is the signature of noise
+rather than a curve. Do not read w24 as "the optimum"; read 16–24 as flat.
+
+**Chose 16**, not because it measured best but because it is within ~1% of the
+best and BIG's 12 physical / 24 logical cores are *shared with two resident vLLM
+workers* — a 2% throughput difference is not worth starving a co-resident
+production workload of cores. Both arms of any A/B share the value anyway, so the
+choice cannot bias a comparison.
+
+`next_work.md`'s recommended `--num_workers=20` came off the 12 GB box's 32 cores;
+it is not wrong here so much as indistinguishable from 16 and 24.
+
+### `observation_tensor_into` costs ~15 µs here, not ~5 µs — and it does not matter
+
+`tools/t0_obs_writer_check.py`, mid-game states along a random playout: `into`
+15.16 µs, `observation_tensor` 258.15 µs, ratio 17.0x (the doc's ratio is ~24x).
+Both absolute figures are ~2–3x the 12 GB box's.
+
+Before treating that as a regression, note the doc's ~5 µs has **no state
+attached to it** and the writer's cost tracks how populated the board is, so the
+check now reports the opening and mid-game separately. And the arithmetic caps how
+much it can matter: one call per env per step, 256 envs over 16 workers = 16 calls
+× 15 µs = **0.24 ms of a 7.4 ms env phase, about 3%**. The act:env ratio that
+sizes T2 stands either way. Record the number; do not block on it.
+
+### T3: the league act curve on BIG is far WORSE than on the 12 GB box
+
+`next_work.md` expected the opposite: "BIG's card is far wider, so the knee is
+probably further right and a larger live set is likely free". **That reasoning is
+backwards and the prediction is wrong.** Measured with `tools/t3_opponent_curve.py`,
+which drives the real `_act_sparse` on a real agent with real observations and
+real legal masks (mid-game, ~20–24 legal actions/row):
+
+| K distinct policies | 1 | 2 | 4 | 8 | 16 | 32 |
+|---|---|---|---|---|---|---|
+| 256 rows, BIG | 1.00x | **1.84x** | **3.65x** | 6.98x | 13.61x | 27.07x |
+| 256 rows, 12 GB box | 1.00x | 1.00x | 1.12x | 2.05x | 4.26x | 8.32x |
+| **1,024 rows, BIG** | 1.00x | 1.31x | 2.06x | 3.51x | 6.74x | — |
+
+At 256 rows BIG's cost is ~0.87×K — **almost perfectly linear**, meaning each
+group costs nearly the same regardless of how few rows it holds. That is the
+signature of a **fixed-cost / launch-bound** regime, not a throughput-bound one.
+Hence the inversion: a wider card makes the single big launch *cheaper*, so the
+per-launch fixed cost becomes a *larger* fraction of it, and splitting into K
+launches is relatively *worse*. Width helps the thing you are dividing, not the
+divisions.
+
+**Batch size is therefore not a detail in this measurement.** Going 256 → 1,024
+rows nearly halves every ratio, because the groups get big enough to start
+amortizing. Any future re-measure must use the batch size the run will actually
+use; a 256-row curve does not describe a 1,024-env run.
+
+`--compile_encoder` does **not** help the act path (K=1: 3.29 vs 3.36 ms at 256
+rows; the whole compiled curve is within noise of eager). Consistent with T0,
+where compile's entire win was in `learn`.
+
+#### Why "largest K under 1.15x" cannot be applied here, and what replaced it
+
+On BIG nothing above K=1 is under 1.15x, and the rule then returns a flag value
+that must never be set: `--max_live_opponents=0` means **unbounded**
+(`league.py:255`), the worst possible setting. The ratio is also the wrong
+denominator — `_act_sparse` is a slice of `act`, which is a slice of the rollout,
+which is a slice of the update, so a 2.06x act-path ratio is nowhere near a 2.06x
+slowdown.
+
+Converted to what it costs the update, at 1,024 envs (baseline 18.87 s/update,
+128 steps, compiled encoder):
+
+| K | `--max_live_opponents` | extra s/update | update | sps cost |
+|---|---|---|---|---|
+| 2 | 1 | 0.32s | 19.19s | −1.6% |
+| 3 | 2 | 0.61s | 19.48s | −3.1% |
+| 4 | 3 | 0.93s | 19.80s | −4.7% |
+| 5 | **4 (current default)** | 1.31s | 20.18s | **−6.5%** |
+| 6 | 5 | 1.61s | 20.48s | −7.9% |
+| 8 | 7 | 2.55s | 21.42s | −11.9% |
+| 12 | 11 | 3.86s | 22.73s | −17.0% |
+
+**Keep `--max_live_opponents=4`.** It costs 6.5% of update time at 1,024 envs,
+a reasonable price for league diversity. What changes is the *rationale*: it is
+not free, and it is not "probably conservative on a big card". The cost is close
+to **linear at ~1.6% of throughput per extra live opponent**, so raising it buys
+diversity at a real, measurable price and lowering it saves very little. Do not
+change it without deciding that trade deliberately — and note this table prices
+only the throughput side; the league-quality side is unmeasured.
+
+### Operational: `runs/roster` is unloadable by the ladder
+
+`runs/roster`'s 2026-08-13 checkpoints cannot be loaded by the current tree —
+`actor.0.tail_mlp` is 1486 wide in the checkpoint against 2146 now,
+`entity_fc` 256 against 128. This is a **size mismatch**, which
+`load_state_dict` raises on *even with `strict=False`*, so
+`roster_ladder._load_net_tolerant` cannot absorb it: that loader forgives
+*missing* keys (aux heads), not resized ones. Every checkpoint and rating in
+`runs/roster` is therefore dead weight, the same way the V2 observation change
+orphaned the pre-V2 history (see `run_v2.sh`'s header).
+
+Consequence for any ladder work: **generate a fresh roster from the current tree**
+rather than reusing one from a previous encoder layout.
+`run_ladder_sizing.sh` trains a throwaway one in ~1 minute.
+
+### Ladder tournaments cost 1.39 s/game, and the default config is a 35-hour job
+
+First measurement of ladder throughput on any box (`run_ladder_sizing.sh`):
+**1.387 s per Eclipse game**, including net loading and the rating fit.
+
+`roster_ladder` is a full round-robin — `p*(p-1)/2` pairs × 2 directions ×
+`--ladder_games_per_dir` games — so cost grows **quadratically in snapshot count**.
+Extrapolated for a two-arm tournament plus the three bot anchors:
+
+| snapshots/arm | p | pairs | g/dir=32 | g/dir=64 | g/dir=128 |
+|---|---|---|---|---|---|
+| 2 | 9 | 36 | 0.9h | 1.8h | 3.5h |
+| 3 | 11 | 55 | 1.4h | 2.7h | 5.4h |
+| 4 | 13 | 78 | 1.9h | **3.8h** | 7.7h |
+| 8 | 21 | 210 | 5.2h | 10.4h | 20.7h |
+| 11 | 27 | 351 | 8.7h | 17.3h | **34.6h** |
+
+**Two 5h arms at `--snapshot_every=100` produce ~9 and ~15 snapshots. Rating all of
+them at the default `--ladder_games_per_dir=128` is a ~35-hour job** — longer than
+the experiment it judges. Subsample the rosters (`tools/prune_roster.py` keeps
+main plus evenly-spaced snapshots with the endpoints pinned) *before* rating.
+
+Cut snapshots first, games/dir last: dropping games widens every rating CI, which
+directly weakens any test phrased as "one arm's lower bound clears the other's
+upper bound", whereas dropping near-adjacent snapshots costs almost no
+information — they are nearly indistinguishable, which is why
+`--ladder_min_sep` exists at all.
+
+---
+
 ## Deprioritized (against the deleted reports' rankings)
 
 - R-NaD / DeepNash, RND / curiosity, PBT, exploiters as the *main* driver — target a collapse the
