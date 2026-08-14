@@ -151,6 +151,55 @@ class ObsBufferDtypeTest(absltest.TestCase):
     rel = ((rt - self.obs).abs() / self.obs.abs().clamp(min=1e-12))[nonzero]
     self.assertLess(rel.max().item(), 1e-2)
 
+  def test_fp16_storage_preserves_every_categorical_id_decode(self):
+    """The ids recovered by ``.round().long()`` must survive fp16 storage exactly.
+
+    The two tests above are norm-based and cannot see this. The observation
+    encodes categoricals as *normalised scalars* which the encoder recovers with
+    ``(x * S).round().long()``; a single flipped id swaps an entire embedding row,
+    yet over 96 rows that is diluted to nothing in a relative-norm comparison. So
+    the property is asserted directly, per decode site, at its real field offset.
+
+    The margin is what matters: a decode dividing by ``S`` needs error below
+    ``0.5/S``, and fp16 delivers ~4.9e-4 near 1.0. sector_id at S=395 needs 1.3e-3
+    -- a 2.6x margin, the tightest in the tensor. **A future field normalised by
+    more than ~1000 would break this**, which is exactly what this test is for.
+
+    Note what does NOT belong here: ``keyed_slot = cell * 8 + slot`` divides by
+    PLANET_SLOT_ROWS = 1800, which would fail the margin test -- but it is built
+    from the integer ``cell_id``/``slot_id`` action-factor buffers, never from a
+    normalised float, so fp16 storage cannot touch it. Scanning every candidate
+    scale against every observation element manufactures failures at scales
+    nothing uses.
+    """
+    obs32 = self.obs.numpy()
+    obs16 = self.obs.to(torch.float16).to(torch.float32).numpy()
+
+    def decode_sites(flat):
+      cells = flat[:, obs_layout.V2_CELLS_START:
+                   obs_layout.V2_CELLS_START +
+                   obs_layout.GALAXY_CELLS * obs_layout.V2_CELL_SIZE].reshape(
+                       flat.shape[0], obs_layout.GALAXY_CELLS,
+                       obs_layout.V2_CELL_SIZE)
+      return {
+          "sector_id (S=395)": np.rint(
+              cells[:, :, obs_layout.VC_SECTOR_ID].astype(np.float64) * 395.0),
+          "rotation (S=%d)" % (obs_layout.HEX_DIRECTIONS - 1): np.rint(
+              cells[:, :, obs_layout.VC_ROTATION].astype(np.float64)
+              * (obs_layout.HEX_DIRECTIONS - 1)),
+      }
+
+    a, b = decode_sites(obs32), decode_sites(obs16)
+    for name in a:
+      flips = int((a[name] != b[name]).sum())
+      self.assertEqual(
+          flips, 0,
+          f"{flips}/{a[name].size} {name} decodes changed under fp16 storage. "
+          f"A flipped id selects a different embedding row, which the norm-based "
+          f"tests in this file cannot detect. Either the field's normalising "
+          f"divisor grew past fp16's resolution, or a new decode site needs "
+          f"adding here.")
+
 
 if __name__ == "__main__":
   absltest.main()

@@ -423,8 +423,31 @@ PYBIND11_MODULE(pyspiel, m) {
            (std::vector<float>(State::*)(int) const) & State::ObservationTensor)
       .def("observation_tensor",
            (std::vector<float>(State::*)() const) & State::ObservationTensor)
+      // Takes an untyped py::array and checks the dtype EXPLICITLY. The obvious
+      // spelling, py::array_t<float>, defaults to forcecast: it silently converts
+      // a non-float32 array into a float32 TEMPORARY, writes the observation into
+      // that temporary, and discards it -- so passing a float16 buffer raised
+      // nothing and left the caller's array all zeros, which reads downstream as
+      // a legal all-padding observation. Dropping forcecast
+      // (py::array_t<float, py::array::c_style>) fixes float64 and the integer
+      // dtypes but NOT float16, which pybind still accepts and silently drops, so
+      // the dtype comparison has to be written out.
       .def("observation_tensor_into",
-           [](State& self, int player, py::array_t<float> buffer) {
+           [](State& self, int player, py::array buffer) {
+             if (!buffer.dtype().is(py::dtype::of<float>())) {
+               throw py::type_error(
+                   "observation_tensor_into: buffer must be float32; got a "
+                   "different dtype, which would be silently converted to a "
+                   "temporary and leave your array untouched");
+             }
+             if ((buffer.flags() & py::array::c_style) == 0) {
+               throw py::type_error("observation_tensor_into: buffer must be "
+                                    "C-contiguous");
+             }
+             if (!buffer.writeable()) {
+               throw py::value_error(
+                   "observation_tensor_into: buffer is not writeable");
+             }
              py::buffer_info info = buffer.request();
              const int size = self.GetGame()->ObservationTensorSize();
              if (static_cast<int>(info.size) < size) {

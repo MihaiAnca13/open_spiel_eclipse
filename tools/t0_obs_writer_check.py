@@ -44,8 +44,16 @@ def sample_states(game, depth, seed):
 
 
 def bench(states, size):
-  """(into_us, tensor_us) medians over REPS calls per state."""
-  buf = np.empty(size, dtype=np.float64)
+  """(into_us, tensor_us) medians over REPS calls per state.
+
+  The buffer MUST be float32. A float64 buffer used to be accepted silently:
+  pybind's forcecast converted it to a float32 temporary, wrote the observation
+  into the temporary and discarded it, so the call did nothing AND paid a 37,596
+  element dtype conversion. Timing that path reported 15.2 us and produced a
+  bogus "the writer regressed on this machine" conclusion. The binding now
+  rejects non-float32 buffers outright.
+  """
+  buf = np.empty(size, dtype=np.float32)
   into, plain = [], []
   for s in states:
     t0 = time.perf_counter()
@@ -99,9 +107,9 @@ def main():
   per_worker = (256 / 16) * mid_into / 1e3
   print(f"    16 envs/worker x {mid_into:.1f} us = {per_worker:.2f} ms/step "
         f"= {100 * per_worker / 7.4:.0f}% of the env phase")
-  print("\n  So even at 3x next_work.md's expectation the writer is a small part"
-        " of env, and\n  the act:env ratio that sizes T2 stands. Record the "
-        "number; do not block T1 on it.")
+  verdict = "CARRIES" if mid_into < 10.0 else "DOES NOT CARRY"
+  print(f"\n  verdict: the 12 GB writer win {verdict} to BIG "
+        f"(next_work.md expects ~5 us).")
 
 
 if __name__ == "__main__":

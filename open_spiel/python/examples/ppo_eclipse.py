@@ -894,7 +894,7 @@ class TypedPointerActorHead(FactoredActorHead):
   DENSE_CHUNK_SIZE = 1024
 
   def __init__(self, decode, num_rows, num_actions, width, factors,
-               cell_channels, activation="gelu"):
+               cell_channels, activation="gelu", compile_pairs=False):
     super().__init__(decode, num_rows, num_actions, width)
     self.register_buffer("cell_id", torch.from_numpy(factors.cell_id))
     self.register_buffer("unit_id", torch.from_numpy(factors.unit_id))
@@ -927,6 +927,14 @@ class TypedPointerActorHead(FactoredActorHead):
         act(),
         layer_init(nn.Linear(width, width)),
     )
+    # --compile_encoder covered only the encoder, leaving this head eager. After
+    # the embedding_bag/combined-pick work, `elementwise / copy` became learn's
+    # largest bucket at 32.8% -- the torch.where / cat / sum(-1) chain below,
+    # which is exactly what an inductor fusion is for. dynamic=True for the same
+    # reason the encoder uses it: the pair count M changes every call.
+    self._compiled_pairs = None
+    if compile_pairs:
+      self._compiled_pairs = torch.compile(self._pairs_impl, dynamic=True)
 
   def _pick(self, table, rows, idx):
     """The single row (rows[i], idx[i]) of a (B, N, D) table -> (M, D).
@@ -938,6 +946,24 @@ class TypedPointerActorHead(FactoredActorHead):
     return table[rows, idx.clamp(min=0, max=table.shape[1] - 1)]
 
   def _pairs(self, features, context, rows, cols):
+    """Dispatches to the (optionally torch.compile'd) pair scorer.
+
+    Same lazy-fallback shape as SpatialEclipseEncoder._encode_context: compile
+    failures surface at the first real call, not at construction, so one bad call
+    drops to eager for the rest of the run instead of killing training.
+    """
+    if self._compiled_pairs is None:
+      return self._pairs_impl(features, context, rows, cols)
+    try:
+      return self._compiled_pairs(features, context, rows, cols)
+    except Exception as e:  # pylint: disable=broad-except
+      warnings.warn(
+          f"torch.compile(TypedPointerActorHead._pairs) failed at runtime "
+          f"({e!r}); falling back to eager for the rest of this run.")
+      self._compiled_pairs = None
+      return self._pairs_impl(features, context, rows, cols)
+
+  def _pairs_impl(self, features, context, rows, cols):
     f = features[rows]
     result = (f * self.rows_for(cols)).sum(-1) + self.bias[cols]
     zero = torch.zeros_like(result)
@@ -1126,7 +1152,7 @@ class EclipsePPOAgent(nn.Module):
       actor_head = TypedPointerActorHead(
           factored_actions.decode, factored_actions.num_rows, num_actions,
           width, factored_actions, SpatialEclipseEncoder.CELL_FEATURE_CHANNELS,
-          activation=activation)
+          activation=activation, compile_pairs=compile_encoder)
     else:
       actor_head = FactoredActorHead(
           factored_actions.decode, factored_actions.num_rows, num_actions,

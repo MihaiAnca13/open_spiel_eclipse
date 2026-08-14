@@ -1219,6 +1219,25 @@ therefore no longer hinges on T1**: it is a fifth of wall clock at
 `update_epochs=4` and would be ~30% at `update_epochs=1`. Re-read T2's
 "contingent on T1" framing against these numbers before deprioritizing it.
 
+### `--compile_encoder` did not cover the pointer head
+
+The flag wrapped `SpatialEclipseEncoder._encode_context_impl` only, leaving
+`TypedPointerActorHead._pairs` eager. After the `embedding_bag` / combined-pick work
+above, `elementwise / copy` became `learn`'s largest bucket at **32.8%** — the
+`torch.where` / `cat` / `sum(-1)` chain in `_pairs`, which is exactly what an
+inductor fusion is for.
+
+Split into `_pairs` (dispatcher) and `_pairs_impl` (body), compiled under the same
+flag with the same lazy fallback-to-eager-on-first-exception pattern the encoder
+uses, and `dynamic=True` for the same reason — the pair count M changes on every
+call, so a static graph would recompile endlessly.
+
+**Re-check the compile target whenever the head's entry points are refactored.**
+This is the second time this trap has fired in this file: `forward_with_context`
+once bypassed the compiled body entirely, making a measured 1.57x silently inert.
+Both `_encode_context` and `_pairs` fall back to eager on any exception with only a
+`warnings.warn`, so an inert compile is quiet by design.
+
 ### Result so far: 18.87 → 13.96 s/update at 1,024 envs (1.35x, sps +35%)
 
 Three changes, each measured end to end on the T0 harness with a compiled encoder,
@@ -1311,45 +1330,71 @@ Measured in the real loop, paired: **act 42.51 → 31.07 ms**, and critically **
 fork-context failure; its absence is what says this is the transfer win and not the
 old trap. Falls back to plain host memory when torch or CUDA is absent.
 
-#### Rejected: fp16 on the wire. It changes 0.068% of decoded categorical ids
+#### Deprioritized (not unsafe): fp16 on the wire
 
-Halving the wire dtype would halve three copies at once (`_collect`'s memcpy, the
-H2D, and `_last_decision`'s obs copies). It is nonetheless **rejected**, and the
-reason generalises:
+Halving the wire dtype would halve three copies (`_collect`'s memcpy, the H2D, and
+`_last_decision`'s obs copies). It is **deprioritized because it is now mostly
+redundant**, not because it is unsafe:
 
-The observation is entirely in [0, 1] and an honest fp32→fp16 cast is accurate to
-**2.4e-4 max, 5.3e-7 mean, 0% of entries above 1e-3**. But the tensor encodes
-**categorical ids as normalised scalars** that consumers recover with
-`.round().long()`, and a decode dividing by `S` needs error below `0.5/S`:
+- the H2D half is already captured by the pinned destination above (14.2 → 2.8 ms);
+- the `_last_decision` half is going away entirely with the `(row, env)` reference
+  design, which removes those copies rather than shrinking them.
 
-| decode scale | needs | fp16 gives 4.9e-4 |
-|---|---|---|
-| `PLANET_TYPE_COUNT-1` = 7 | 7.1e-2 | fine |
-| `HEX_DIRECTIONS` = 6 | 8.3e-2 | fine |
-| `GALAXY_CELLS` = 225 | 2.2e-3 | fine |
-| sector = 396 | 1.3e-3 | fine |
-| **`PLANET_SLOT_ROWS` = 1800** | **2.8e-4** | **too coarse** |
+What remains is `_collect`'s memcpy in the env phase — a real but modest slice,
+against a change that touches every observation consumer.
 
-Measured on a real mid-game state, **153 of 225,576 decodes differ (0.068%)** —
-97 at scale 225, 10 at scale 1800. Those feed `unit_cell`, `destination`,
-`keyed_slot` and `ptype` in the pointer head, so the head would occasionally point
-at a *different cell*. Not acceptable on the act path, which selects moves.
+**On safety, for the record, because a first pass got this wrong.** The concern was
+that the tensor encodes categorical ids as normalised scalars recovered with
+`.round().long()`, and a decode dividing by `S` needs error below `0.5/S` while
+fp16 gives 4.9e-4. Enumerating the decodes that **actually read the observation**:
 
-**Consequence for the EXISTING fp16 rollout buffer, which is on by default under
-`--amp`:** it performs this same cast, so `learn` already sees those id
-perturbations. `ppo_obs_dtype_test`'s "fp16 storage error 6.3e-13" cannot be
-measuring this path — 6.3e-13 is far below fp16's own resolution. **"fp16 obs is
-settled and free" is not established for the id-decode path.** Whether a 0.068%
-id flip rate matters to learning is open; it is not measured by anything in the
-repo.
+| decode | scale | needs | verdict |
+|---|---|---|---|
+| `rotation` | `HEX_DIRECTIONS-1` = 5 | 1.0e-1 | fine |
+| `ptype` | `PLANET_TYPE_COUNT-1` = 7 | 7.1e-2 | fine |
+| `unit_cell` | `GALAXY_CELLS-1` = 224 | 2.2e-3 | fine |
+| `destination` | `GALAXY_CELLS` = 225 | 2.2e-3 | fine |
+| `sector_id` | 395 | 1.3e-3 | fine, 2.6x margin |
 
-#### Trap: `observation_tensor_into` accepts a float16 buffer and writes NOTHING
+Measured over 60 mid-game states: **0 of 21,150 decodes flip** under an fp32→fp16
+round trip. The cast itself is accurate to 2.4e-4 max / 5.3e-7 mean, and the
+observation is entirely within [0, 1].
 
-No exception, no warning. The buffer comes back **all zeros** (`nonzeros: 0 vs 981`
-for the same state into fp32), which reads as a legal all-padding observation.
-Anyone reaching for a narrower wire dtype will hit this first and may mistake it
-for a precision problem — it is not, it is a silent no-op. Only float32 and
-float64 buffers actually receive data.
+**`PLANET_SLOT_ROWS` = 1800 is NOT an observation decode** and does not belong in
+this table — `keyed_slot = cell * 8 + slot` is built from the integer
+`cell_id`/`slot_id` action-factor *buffers*, never from a normalised float. A scan
+that applies every candidate scale to every observation element manufactures
+failures at scales nothing uses; do not size this risk that way.
+
+So `ppo_obs_dtype_test`'s "fp16 storage error 6.3e-13" stands, and fp16 obs storage
+remains settled. Do not pin `--obs_buffer_dtype=float32`.
+
+#### FIXED: `observation_tensor_into` silently ignored any non-float32 buffer
+
+`pyspiel.cc` declared it `py::array_t<float>`, and **`py::array_t<T>` defaults to
+`py::array::forcecast`**: a non-float32 array was silently converted to a float32
+*temporary*, the observation was written into the temporary, and the temporary was
+discarded. So `observation_tensor_into(seat, float16_buf)` raised nothing and left
+the caller's array **all zeros** (`nonzeros: 0 vs 981` for the same state into
+fp32), which reads downstream as a legal all-padding observation. It also cost a
+full dtype conversion of 37,596 elements per call.
+
+This bit this session's own obs-writer benchmark (see above) and would bite anyone
+reaching for a narrower wire dtype — the failure looks like a precision problem and
+is actually a silent no-op.
+
+Fixed by taking an untyped `py::array` and checking the dtype explicitly. Note that
+merely dropping `forcecast` (`py::array_t<float, py::array::c_style>`) is **not
+sufficient** — that rejects float64 and the integer dtypes but pybind still accepts
+float16 and still drops it. The comparison has to be written out. Now rejects
+float16 / float64 / int32 / non-contiguous with `TypeError`, and non-writeable with
+`ValueError`; float32 is accepted and verified equal to `observation_tensor()`.
+`rl_environment._ensure_obs_buffer` already allocates float32, so the training path
+was never affected.
+
+Requires a `make pyspiel` rebuild (~1 min incremental) and the resulting
+`build/python/pyspiel.so` copied over the repo-root `pyspiel.so`, which is what
+`import pyspiel` actually resolves to.
 
 #### This fix and T2 are SUBSTITUTES, not additive — size them together
 
@@ -1395,18 +1440,28 @@ choice cannot bias a comparison.
 `next_work.md`'s recommended `--num_workers=20` came off the 12 GB box's 32 cores;
 it is not wrong here so much as indistinguishable from 16 and 24.
 
-### `observation_tensor_into` costs ~15 µs here, not ~5 µs — and it does not matter
+### `observation_tensor_into` is 5.44 µs — the 12 GB writer win carries
 
-`tools/t0_obs_writer_check.py`, mid-game states along a random playout: `into`
-15.16 µs, `observation_tensor` 258.15 µs, ratio 17.0x (the doc's ratio is ~24x).
-Both absolute figures are ~2–3x the 12 GB box's.
+`tools/t0_obs_writer_check.py`: **5.69 µs at the opening, 5.44 µs mid-game**,
+against `next_work.md`'s ~5 µs. It carries. `observation_tensor` costs 268 µs, i.e.
+**49x** `observation_tensor_into` — *twice* the ~24x the doc records, so the
+"any `rl_environment` built without `observations_as_numpy=True` pays it" warning
+matters more than written, not less.
 
-Before treating that as a regression, note the doc's ~5 µs has **no state
-attached to it** and the writer's cost tracks how populated the board is, so the
-check now reports the opening and mid-game separately. And the arithmetic caps how
-much it can matter: one call per env per step, 256 envs over 16 workers = 16 calls
-× 15 µs = **0.24 ms of a 7.4 ms env phase, about 3%**. The act:env ratio that
-sizes T2 stands either way. Record the number; do not block on it.
+**A first pass reported 15.16 µs and concluded the win did not carry. That was a
+harness bug, not a machine difference**, and it is worth knowing how it happened:
+the benchmark passed a **float64** buffer. `observation_tensor_into` was declared
+`py::array_t<float>`, which defaults to pybind's `forcecast` — so the call
+converted the buffer to a float32 temporary, wrote the observation into the
+temporary, discarded it, and returned. The timing therefore included a
+37,596-element dtype conversion *and* the call did nothing at all. See the
+`observation_tensor_into` trap below; the binding now rejects non-float32 buffers.
+
+Generalisation worth keeping: **three separate "the doc's number is wrong on BIG"
+findings in this session were all instrumentation bugs** (this one, a
+`float32`-vs-`float64` buffer; the fp16 id-decode scare, a scan over scales nothing
+uses; and the synthetic index benchmarks that under-measured by 40-60x). When a
+measurement contradicts a recorded figure, suspect the new harness first.
 
 ### T3: the league act curve on BIG is far WORSE than on the 12 GB box
 
