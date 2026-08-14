@@ -1067,6 +1067,96 @@ building on an unvalidated premise.
 
 ---
 
+## Throughput findings, 2026-08-13 (12 GB box, merged as `5f5743be`)
+
+All numbers from *paired* A/Bs (arms alternated in one session) — the box picked
+up a load-average-45 background workload mid-session, so unpaired absolutes from
+that window are worthless. See `docs/eclipse_observation_v2.md` for the
+observation-writer half.
+
+### The league had a silent throughput cliff
+
+The most important finding, because nothing in the loss series, the ratings or
+the diagnostics would ever have shown it. A `--league` smoke run had `act`
+climbing **22.8 → 41.7 ms/step over 45 updates and still rising**, with `env` and
+`learn` flat.
+
+`PPO._act_sparse` (`ppo.py:1594-1602`) groups the batch by policy id and runs
+**one encoder forward per distinct policy**. Row count is unchanged; the launches
+just get smaller and more numerous, and the cost is steeply superlinear:
+
+| K distinct policies | 1 | 2 | 4 | 8 | 16 | 32 |
+|---|---|---|---|---|---|---|
+| 256 rows, cost vs K=1 | 1.00x | 1.00x | **1.12x** | 2.05x | 4.26x | 8.32x |
+
+`Matchmaker.sample_lineup` drew from the **entire roster**, so K grew for as long
+as the run lasted. At `--snapshot_every=100` an 8h run reaches ~35 snapshots.
+
+Fixed by bounding the live opponent set: `--max_live_opponents` (default 4, the
+1.12x point; 0 restores the old behaviour) and `--live_opponent_refresh`
+(default 2000 lineup samples). Every snapshot still enters play, clustered in
+time rather than interleaved. `act` now plateaus (~21 ms flat from update 25 to
+55). `league_test` asserts *both* halves — the cap, and that >20 of 30 snapshots
+still enter play — because bounding without refreshing is a quality regression
+instead of a speed one.
+
+**Generalisation worth keeping:** any per-policy or per-group loop in the act
+path is a throughput term that scales with league size. Check `np.unique(pids)`
+before adding one.
+
+### The env phase was not the engine
+
+At 256 envs / 16 workers the env phase split `_run_step` 4.82 ms /
+`_legal_indices` 0.32 ms / **buffer copies 7.32 ms**. So 59% of it was
+`_collect`'s memcpy, and 65% of *that* was mmap/munmap of a fresh 38.5 MB array
+every step (above glibc's mmap threshold), not the copy itself. Double-buffering
+into two preallocated generations: env 13.5 → 7.9 ms, **+14% SPS**.
+
+Two, not one: the PPO loop reads the *previous* step's observations after the
+current step is collected (`last_obs_batch` → `_terminal_obs_for` inside
+`post_step_np`), and never reaches further back. `async_vector_env_test` pins the
+invariant in both directions.
+
+### The timing instrument was measuring the wrong thing
+
+`sps` and `learn_share` came from a **sum of phase durations**, which equals
+elapsed time only while phases are strictly serialized. Any act/env overlap would
+have made two slots cover the same real seconds, so the printed `sps` would have
+gone *down* as the run got faster — i.e. the planned overlap work was
+unmeasurable, on both machines. Per-update seconds now come from a wall-clock
+bracket, with the phase sum reported beside it as an `overlap Nx` ratio that
+reads 1.00x while serialized. **Treat pre-2026-08-13 SPS numbers in any doc as
+phase-sum-derived.**
+
+### Negative results — do not retry these blind
+
+- **Pinning the H2D staging buffer.** Isolated microbenchmark is compelling (38.5
+  MB: 7.9 → 3.5 ms). Paired A/B in the real loop measured act **19.4 → 23.0
+  ms/step, a net loss**. Separately: allocating pinned buffers *pre-fork* poisons
+  every worker's inherited CUDA context — 7,900 → 3,000 SPS, with the *env* phase
+  tripling, which is the tell that it is a fork problem and not a transfer one.
+  If retried: strictly post-fork, and prove it in a paired run.
+- **Pooling `_last_decision`'s per-env observation copies.** Reusing preallocated
+  destinations measured 12.40 ms against `.copy()`'s 11.88 ms — glibc already
+  recycles chunks of that size. The only real fix remains the `(row, env)`
+  reference design, which rewrites terminal attribution.
+- **fp16 rollout buffer is settled and free.** `ppo_obs_dtype_test` measures the
+  claim at the point of consumption rather than chasing divergent training runs:
+  fp16 storage error **6.3e-13** against the bf16 autocast error **4.5e-3** that
+  `--amp` already accepts, and combining them does not compound. Do not pin
+  `--obs_buffer_dtype=float32`.
+
+### Determinism, for anyone A/B-ing training runs
+
+Comparing two training runs cannot resolve small numerical changes. At a fixed
+seed, three master runs agreed **exactly** on `policy_loss`/`entropy` for updates
+0–2 and then diverged chaotically from GPU reduction order alone; `aux_loss` is
+never deterministic (spread 0.0022 at update 1). Judge a numerical change at the
+point of consumption, or with a ladder over many seeds — never by diffing a loss
+curve at update 20.
+
+---
+
 ## Deprioritized (against the deleted reports' rankings)
 
 - R-NaD / DeepNash, RND / curiosity, PBT, exploiters as the *main* driver — target a collapse the

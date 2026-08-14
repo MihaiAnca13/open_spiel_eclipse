@@ -59,6 +59,67 @@ occur and leaving every unit's arrival indistinguishable. It is now relative to
 `next_arrival_order`, which is scale-free and is what combat's arrival tiebreak
 actually needs.
 
+## The tensor is 97.5% zeros, and the writer used to walk capacity anyway
+
+Measured over random 4p games (sampled every 25 moves, warped and unwarped):
+
+| | occupied | capacity | share |
+|---|---|---|---|
+| nonzero floats | 877–1,250 | 37,596 | **2.5%** |
+| galaxy cells present | 7–11 | 225 | 3–5% |
+| valid planet-slot rows | 24–38 | 1,800 | ~2% |
+| valid unit rows | 6–10 | 128 | ~7% |
+
+Occupancy has a hard ceiling, not just an empirical one: `sectors.h` holds the
+entire tile supply — 11 INNER + 14 MIDDLE + 23 OUTER + 4 STARTING (4p) + 1
+CENTER = **53 placeable tiles**. The 15×15 grid can never exceed ~24% occupancy
+*by construction*, so any fixed-capacity cell list only needs 64 rows.
+
+Until 2026-08-13 the writer walked all 225 cells and all 1,800 slot rows,
+writing zeros into a span that had *already* been zeroed — twice, since
+`eclipse.cc` and `observation.cpp` both filled it. `observation_tensor_into` cost
+13.0 µs, of which only ~3.5 µs was the unavoidable fill and the rest was the
+capacity scan producing ~950 useful values.
+
+Three skips (empty cells write no unit channels; unplaced cells write no slot
+rows; slot rows above the orbital row are not walked) plus dropping the duplicate
+fill took it to **5.0 µs, bitwise identical** across 4 game configs × 6 seeds ×
+every seat. If you add a block here, write it occupancy-first: the padding
+convention is already "all-zero row, validity bit at offset 0", so a skip is
+free and a capacity walk is not.
+
+## Shrinking the tensor: what it would and would not buy
+
+A recurring plan is to entity-list the two dense capacity blocks (galaxy
+19,800 floats, planet slots 7,200). Two corrections before anyone builds it.
+
+**You cannot convolve a list.** The proposal in the old `next_work.md` was that
+entity-listing the galaxy shrinks the conv tower's input "from 225 cells to ~96".
+It does not: `obs_layout.galaxy_view` requires the dense 15×15, and
+`TypedPointerActorHead._pick` addresses `h_cells` by cell id. The implementable
+form is AlphaStar's *scatter connection* — emit ≤64 rows of `(cell_id, 88
+channels)`, scatter them into a zeroed `(B, 88, 15, 15)` in Python, then run the
+existing conv tower unchanged. Conv cost is therefore **unchanged**, and the
+pointer head needs no change at all.
+
+**The slot block buys no learn memory either.** `ctx.slots` is a *view* into the
+observation (zero allocation) and `slot_target` is O(pointers), not O(1,800).
+Scattering a compacted slot list back to `(B, 1800, 4)` would *create* a 59 MB
+device allocation at minibatch 4,096 where today there is none — so if slots are
+compacted, give the head a per-cell row-base map instead of scattering.
+
+What the shrink genuinely buys, after the writer fix took the env-step half:
+rollout **buffer bytes**, **H2D bytes** per act step, and the fp32 minibatch
+materialization in the learn input term (`ppo.py:365`/`:1740`, which upcasts
+regardless of `--obs_buffer_dtype`). Roughly 37,596 → ~17,000 floats. On a 12 GB
+card that is the difference between 256–512 envs and about double that.
+
+Cost is unchanged and still the blocker: it invalidates every checkpoint, and
+there is no observation-version parameter — `ObservationTensorShape`
+(`eclipse.cc`) reads no game parameter, and `obs_layout` is module-level
+constants, so a runtime switch means restructuring `validate()` and every
+`obs_layout.X_START` reference.
+
 ## Planet slots: 8 wide, 16 offered
 
 The engine offers `COMBAT_POP_TARGET_0..15` (it scans a `uint16`
