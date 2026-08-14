@@ -22,15 +22,22 @@
 #   a third arm on the old tensor, which no longer exists in the tree.
 #
 # MEASURED RESOURCE REQUIREMENTS (256 envs / 128 steps / 16 workers)
-#   HOST RAM: peak 17.5 GB, measured via cgroup memory.peak with league +
-#     snapshots + verdict evals all active. It OOMs at a 16 GB cap. Roughly:
-#     4.9 GB persistent rollout obs buffer (num_envs * num_steps * 37,596 * 4)
-#     + ~5.3 GB for the 16 env workers + ~2 GB torch/CUDA host + transients.
-#     It scales LINEARLY in num_envs * num_steps, so 512 envs wants ~23 GB and
-#     1024 envs ~33 GB. Check the box's RAM before raising --num_envs; this is
-#     the limit that bites first, not VRAM.
+#   HOST RAM: the old "peak 17.5 GB, OOMs at a 16 GB cap" note is STALE. That
+#     figure included a 4.9 GB fp32 rollout obs buffer on the host; the buffer is
+#     now device-resident fp16 by default (2.46 GB of VRAM at these settings), so
+#     it is off the host entirely. A league run with snapshots active completes
+#     comfortably under a 14 GB cap. Re-measure before raising --num_envs.
 #   VRAM: 9.4 GB allocated / 11.1 GB reserved at --num_minibatches=4, ~7-8 GB
 #     at 8 (measured on a 12 GB card, league adds ~1 GB for opponent nets).
+#
+# 2026-08-13 -- READ BEFORE CHANGING --snapshot_every OR --max_live_opponents
+#   The act path runs one encoder forward per DISTINCT policy in the batch, and
+#   that is steeply superlinear: 256 rows cost 1.12x at 4 distinct policies,
+#   2.05x at 8, 8.32x at 32. Before --max_live_opponents existed, lineups drew
+#   from the whole roster, so act decayed for as long as the run lasted (22.8 ->
+#   41.7 ms/step over 45 updates, still climbing) with nothing in the loss series
+#   or the ratings to show for it. The default cap of 4 makes act plateau. Do not
+#   set --max_live_opponents=0 on a long run without re-reading next_work.md.
 #
 # MEASURED CONFIG NOTES
 #   --num_minibatches=8, not 4: at 4 the minibatch is 8,192 states x ~21 legal
@@ -78,6 +85,7 @@ exec .venv/bin/python -m open_spiel.python.examples.ppo_eclipse \
   --lr_schedule=fixed \
   --amp --compile_encoder \
   --snapshot_every=100 \
+  --timing --timing_every=50 \
   --total_timesteps=1000000000 --max_seconds="$SECS" \
   --roster_dir="$DIR" --track="v2_${ARM}" \
   >> "$DIR/train.log" 2>&1

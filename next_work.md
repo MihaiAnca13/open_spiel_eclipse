@@ -1,5 +1,124 @@
 # Next work: throughput and observation size
 
+> **UPDATE 2026-08-13 (branch `perf/obs-and-overlap`).** Five items below are now
+> done and three of the measurements that drove the ordering are superseded. Read
+> "What changed on 2026-08-13" first; the rest of this file is the pre-change
+> analysis and its item numbering still applies to what is left.
+
+## What changed on 2026-08-13
+
+All measured on **12GB**. Every number here is from a *paired* A/B (arms run
+alternately in one session) because the box picked up a load-average-45
+background workload mid-session and unpaired absolute numbers from that window
+are worthless.
+
+| change | effect | verified by |
+|---|---|---|
+| Observation writer skips empty capacity (`observation.cpp`) | `observation_tensor_into` **13.0 -> 5.0 us** (2.6x) | 2,442-tensor bitwise A/B vs master's writer: **identical** |
+| Duplicate whole-tensor `std::fill` removed (`eclipse.cc:1719`) | folded into the above | same A/B |
+| `_collect()` double-buffers instead of allocating 38.5 MB/step | env phase **13.5 -> 7.9 ms** (1.71x), **+14% SPS** | paired A/B, 20 steady updates/arm |
+| Timing line reports **wall clock**, not a sum of phases | overlap work becomes measurable at all | new `overlap Nx` field reads 1.00x while serialized |
+| `--max_seconds` honoured on the sync path | was silently ignored at `num_workers=0` | — |
+| `obs_layout.validate(game)` called in training | C++/Python layout skew now fails loudly | — |
+
+Net on this box, 256 envs / 128 steps / 16 workers / mb 16:
+**~6,400 -> ~7,300 SPS** paired, and ~7,900 SPS uncontended.
+
+### The observation writer was scanning capacity, not content
+
+The tensor is **97.5% zeros** (measured: 877-1,250 nonzero of 37,596). The writer
+walked all 225 galaxy cells, all 1,800 planet-slot rows and wrote ~12 unit
+channels per cell regardless of occupancy, into a span it had *already* zeroed --
+twice, because `eclipse.cc` and `observation.cpp` both filled it. Real occupancy
+is 7-11 cells, 24-38 slot rows, 6-10 unit rows.
+
+Three skips (empty cells write no unit channels; unplaced cells write no slot
+rows; slot rows above the orbital row are not walked) plus deleting the duplicate
+fill gave 2.6x with **bitwise identical output** across 4 game configs x 6 seeds
+x every seat.
+
+**This matters for item 3.** A large part of what 3b/3c were going to buy in
+env-step cost has now been bought for free, with no tensor change and no retrain.
+What remains for item 3 is buffer bytes, H2D bytes, and the learn-input term.
+
+### V4 is done, and the answer is "fp16 is free"
+
+New test `open_spiel/python/pytorch/ppo_obs_dtype_test.py`. Comparing two
+training runs cannot answer this -- the loss series is bit-identical for two
+updates then diverges chaotically from GPU reduction order alone (verified: three
+master runs at one seed agree exactly on `policy_loss`/`entropy` at u0-u2 and
+disagree by 0.0022 on `aux_loss`). So the test measures the claim directly, at
+the point of consumption:
+
+```
+fp16 STORAGE error only : 6.302e-13
+bf16 COMPUTE error only : 4.505e-03   <- already accepted by --amp
+both together           : 4.505e-03
+```
+
+Seven orders of magnitude apart, and combining them does not compound. **Do not
+pin `--obs_buffer_dtype=float32` for the long run.**
+
+### The league had a throughput cliff that would have eaten the long run
+
+Found by running the thing rather than reasoning about it. A `--league` smoke run
+showed `act` climbing monotonically **22.8 -> 41.7 ms/step over 45 updates and
+still rising**, while `env` and `learn` stayed flat.
+
+Cause: `PPO._act_sparse` (`ppo.py:1594-1602`) groups the batch by policy id and
+runs **one encoder forward per distinct policy**. Total rows are unchanged, but
+the launches get smaller and more numerous. Measured, 256 rows through the
+production encoder:
+
+| K distinct policies | 1 | 2 | 4 | 8 | 16 | 32 |
+|---|---|---|---|---|---|---|
+| cost vs K=1 | 1.00x | 1.00x | **1.12x** | 2.05x | 4.26x | 8.32x |
+
+`Matchmaker.sample_lineup` drew from `roster.opponent_ids()` -- **the entire
+roster, unbounded**. So K grew all run. At `--snapshot_every=100` an 8h run
+reaches ~35 snapshots; the run would have decayed toward the 4-8x column while
+looking perfectly healthy in every loss and rating metric.
+
+Fixed by bounding the *live* opponent set (`--max_live_opponents`, default 4;
+`--live_opponent_refresh`, default 2000 lineup samples; 0 restores the old
+behaviour). Every snapshot still enters play -- clustered in time instead of
+interleaved -- which is the usual shape of large-scale league play. Same smoke
+run after the fix:
+
+| update | 10 | 25 | 35 | 45 | 55 |
+|---|---|---|---|---|---|
+| act, unbounded | 22.8 | 28.9 | 36.7 | 41.7 | (still rising) |
+| act, bounded | 15.6 | 21.3 | 21.2 | **21.1** | **22.1** (flat) |
+
+`act` now **plateaus** once the live set fills, instead of growing without bound.
+At update 45 that is 2x, and the gap widens with run length. `league_test`
+asserts both halves: a batch stays within 2x the cap (the transient around a
+refresh, since an env holds its lineup until its episode ends), *and* >20 of 30
+snapshots still enter play over many refreshes -- because bounding without
+refreshing would be a silent quality regression instead of a speed one.
+
+### Corrections to this file's own numbers
+
+- **"env-step is 68% of a 19 us step" is no longer the right frame.** The env
+  *phase* is not dominated by the engine at all. At 256 envs/16 workers it split
+  `_run_step` 4.82 ms / `_legal_indices` 0.32 ms / **buffer copies 7.32 ms** --
+  i.e. 59% of the env phase was `_collect` memcpy, and 65% of *that* was
+  mmap/munmap of a fresh 38.5 MB array every step, not the copy itself.
+- **Pinning the H2D staging buffer was tried and reverted.** The isolated
+  microbenchmark is compelling (7.9 -> 3.5 ms for 38.5 MB) and it does not
+  survive contact with the real loop: paired A/B measured act 19.4 -> 23.0
+  ms/step, a net loss. Allocating pinned buffers *pre-fork* additionally poisons
+  every worker's inherited CUDA context (7,900 -> 3,000 SPS, with the env phase
+  tripling -- the tell that it is a fork problem, not a transfer problem).
+- **`_last_decision`'s per-env copies cannot be fixed by pooling.** Reusing
+  preallocated destinations measured 12.40 ms against `.copy()`'s 11.88 ms --
+  glibc already recycles those chunks. The doc's original analysis stands: the
+  only real fix is the `(row, env)` reference design, and it rewrites terminal
+  attribution.
+- **Item 1's payoff shrank as a side effect.** With env at 7.9 ms against act's
+  ~15 ms, overlap now buys ~22% of the update here, not the ~46% it would have
+  bought before `_collect` was fixed. Still the largest single item left.
+
 Two measurement sessions, on two machines, and they disagree in places that
 matter. Keep the labels straight:
 

@@ -1716,15 +1716,19 @@ std::string EclipseState::ObservationString(Player player) const {
 // The observation tensor's layout and encoding live in observation.{h,cpp} --
 // one source of truth, mirrored by open_spiel/python/eclipse/obs_layout.py.
 void EclipseState::ObservationTensor(Player player, absl::Span<float> values) const {
-  std::fill(values.begin(), values.end(), 0.0f);
   // A chance node has no well-defined per-player view; rl_environment resolves
   // chance nodes before handing control to a policy, so this is only reachable
   // by code inspecting a state paused mid-resolution.
   if (pending_random_event_ != PendingRandomEvent::none) {
+    std::fill(values.begin(), values.end(), 0.0f);
     return;
   }
   SPIEL_CHECK_GE(player, 0);
   SPIEL_CHECK_LT(player, NumPlayers());
+  // No fill here: WriteObservationTensor zero-fills the whole span itself
+  // (observation.cpp). Filling in both places cost a redundant 147 KB memset on
+  // every observation -- ~3.5 us against a 13 us write, on the hottest path in
+  // training.
   open_spiel::eclipse::obs::WriteObservationTensor(eclipse_state_, player,
                                                   NumPlayers(), values);
 }

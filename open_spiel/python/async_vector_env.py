@@ -175,6 +175,17 @@ class AsyncVectorEnv(object):
                                np.float32)
     self.done_buf = self._alloc("done", (num_envs,), np.uint8)
     self.cur_buf = self._alloc("current", (num_envs,), np.int32)
+    # Destination generations for _collect(), allocated lazily on first use so
+    # the fork below copies as little parent heap as possible.
+    #
+    # Page-locking these (so the PPO act path's H2D becomes an async DMA) was
+    # tried and REVERTED: measured a net loss in a paired A/B (act 19.4 -> 23.0
+    # ms/step), and allocating them pre-fork additionally poisons every worker's
+    # inherited CUDA context. If you retry it, allocate strictly post-fork and
+    # prove the win in a paired run -- the isolated microbenchmark (7.9 -> 3.5
+    # ms) does not survive contact with the real loop.
+    self._collect_gen = 0
+    self._collect_bufs = None
 
     for w in range(self.num_workers):
       start = w * per
@@ -277,12 +288,36 @@ class AsyncVectorEnv(object):
     return self._collect()
 
   def _collect(self):
-    """Assembles _StepArrays from the current shared-memory buffers."""
+    """Assembles _StepArrays from the current shared-memory buffers.
+
+    The per-field copies are what decouple the result from shared memory, so a
+    caller may hold a _StepArrays across the next step. They land in one of two
+    preallocated buffer sets, alternating, rather than in a fresh allocation:
+    ``obs`` is 38.5 MB at 256 envs and mmap'ing + first-touching that many pages
+    every step cost ~65% of the copy (5.97 ms vs 2.11 ms measured at 256 envs).
+
+    Two generations, not one, because the PPO loop legitimately reads the
+    PREVIOUS step's observations after the current step has been collected --
+    ``last_obs_batch`` feeds ``_terminal_obs_for`` during ``post_step_np``. It
+    never reaches back further than that (``_last_decision`` takes its own
+    per-env copies for anything it must keep longer), so depth 2 is exact: the
+    generation being overwritten here is already unreferenced.
+    """
     rows, cols = self._legal_indices()
-    return _StepArrays(
-        obs=self.obs_buf.copy(), seats=self.cur_buf.copy(),
-        legal_rows=rows, legal_cols=cols,
-        rewards=self.rew_buf.copy(), dones=self.done_buf.copy().astype(bool))
+    if self._collect_bufs is None:
+      self._collect_bufs = [
+          (np.empty_like(self.obs_buf), np.empty_like(self.cur_buf),
+           np.empty_like(self.rew_buf), np.empty((self.num_envs,), dtype=bool))
+          for _ in range(2)
+      ]
+    obs, seats, rew, done = self._collect_bufs[self._collect_gen]
+    self._collect_gen ^= 1
+    np.copyto(obs, self.obs_buf)
+    np.copyto(seats, self.cur_buf)
+    np.copyto(rew, self.rew_buf)
+    np.not_equal(self.done_buf, 0, out=done)
+    return _StepArrays(obs=obs, seats=seats, legal_rows=rows, legal_cols=cols,
+                       rewards=rew, dones=done)
 
   def _obs_lock(self):
     return self.__dict__.setdefault("_buf_lock", threading.Lock())
