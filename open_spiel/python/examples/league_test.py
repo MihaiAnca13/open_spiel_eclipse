@@ -82,6 +82,51 @@ class PolicyRosterTest(absltest.TestCase):
       self.assertEqual(len(roster), 9)
       self.assertLess(after_files, before_files)
 
+  def test_repeated_prune_keeps_a_genuine_mid_run_snapshot(self):
+    """Pruning after EVERY snapshot, as _maybe_snapshot does, must keep a spread.
+
+    The test above prunes once at the end, which any spacing rule passes. The real
+    caller prunes on every snapshot, so the rule is applied to its own output
+    dozens of times -- and a position-based rule is not stable under that: the
+    survivors are already collapsed toward the ends, so "evenly spaced by index"
+    re-selects the ends and squeezes the middle a little more each round.
+
+    A real 1,622-update run ended up holding u100, u200, u1200, u1300, u1400,
+    u1500, u1600, u1622: eight snapshots with a 1,000-update hole and nothing
+    mid-run. That silently defeats rating "mid and final" snapshots, which is the
+    only way to notice a run that peaked early and then regressed -- exactly what
+    the update_epochs=1 arm did.
+    """
+    with tempfile.TemporaryDirectory() as d:
+      roster = PolicyRoster(d)
+      roster.record_main(self._make_net(), update=0)
+      last = 100 * 22
+      for u in range(100, last + 1, 100):          # 22 snapshots, as a long run
+        roster.add_snapshot(self._make_net(), update=u)
+        roster.prune(keep_recent=4, keep_spaced=4)
+
+      births = sorted(e.birth_update for e in roster.entries.values()
+                      if e.role != "main")
+      self.assertLessEqual(len(births), 8, f"prune did not bound: {births}")
+      self.assertGreaterEqual(len(births), 5, f"pruned too hard: {births}")
+
+      # The point of keep_spaced: something must survive from the MIDDLE of the
+      # run, not just the head and the tail.
+      lo, hi = births[0], births[-1]
+      mid_lo, mid_hi = lo + 0.25 * (hi - lo), lo + 0.75 * (hi - lo)
+      in_middle = [b for b in births if mid_lo <= b <= mid_hi]
+      self.assertTrue(
+          in_middle,
+          f"no snapshot survived in the middle half of [{lo}, {hi}]: {births}. "
+          f"Spacing must be by birth_update, not by index in the surviving "
+          f"list, or repeated pruning collapses to the two ends.")
+
+      # And the largest gap must not swallow most of the run.
+      gaps = [b - a for a, b in zip(births, births[1:])]
+      self.assertLess(
+          max(gaps), 0.6 * (hi - lo),
+          f"largest gap {max(gaps)} spans most of [{lo}, {hi}]: {births}")
+
 
 class MatchmakerTest(absltest.TestCase):
 

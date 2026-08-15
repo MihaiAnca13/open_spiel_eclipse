@@ -6,9 +6,22 @@ throughput work they exposed is done: **18.87 → 12.44 s/update at 1,024 envs
 `docs/eclipse_rl_todo.md` under "BIG re-baseline, 2026-08-14"; this file is only the
 sequence and what is still open.
 
-**T1 (`update_epochs` 1 vs 4) is the ONLY remaining gate, and it needs no code.**
-`run_t1_update_epochs.sh` + `run_t1_ladder.sh` + `tools/t1_verdict.py` are committed
-and smoke-tested end to end.
+**T1 has RUN. It did not settle the config, and it surfaced a bigger problem: at
+both epoch counts the run stops improving early, and at `update_epochs=1` it then
+regresses.** Full numbers in `docs/eclipse_rl_todo.md` ("T1 results, 2026-08-14/15").
+Headline:
+
+- ue=4 is **flat after update 100** — its whole 1,622-update rating range is
+  narrower than one CI.
+- ue=1 **learns then collapses**: +0.967 (u100) → +1.114 (u1700) → **+0.935**
+  (final), ending below its own update-100 snapshot.
+- The mechanical PASS is a 0.004 margin on a best-of-5 vs best-of-5 comparison
+  whose two maxima sit 1,600 updates apart. Head-to-head of the two *finals*
+  favours ue=4.
+
+**So the gate is no longer "which epoch count" — it is "why does this stop
+learning". Do not start a long run until that is understood**: at either setting
+most of the hours buy nothing, and at ue=1 they actively cost rating.
 
 The point of this sequence is that a long run is expensive and its failure modes
 are quiet. The two that already bit this project — a terminal-attribution bug that
@@ -56,7 +69,33 @@ Every value below was measured on BIG, not inherited:
 - `max_live_opponents=4` costs 6.5% of the update and is **not free** — roughly
   1.6% of throughput per extra live opponent. Never 0 (0 means unbounded).
 
-## T1. `update_epochs` 1 vs 4 — the only remaining gate
+## THE GATE NOW: why does training stop improving?
+
+Both T1 arms plateau or regress well before their 5 hours are up. Until this is
+understood, a long run is buying hours of nothing. Ordered by how cheaply each can
+be tested, and all judged on ladder `rating` only:
+
+1. **Entropy collapse.** ue=1 fell to 0.68 against ue=4's 0.92, and ue=1 is the arm
+   that regressed — a more deterministic policy is a more exploitable one in a
+   4-player game. Test: raise `--ent_coef` (currently 0.05) on a 2h ue=1 arm and
+   rate against this run's snapshots.
+2. **No LR decay.** `--lr_schedule=fixed` throughout, and the doc bans the `kl`
+   controller as unvalidated. The regression starting around u1700 is consistent
+   with too much late movement. Test: cosine or step decay, same budget.
+3. **League overfitting to the bounded live set.** `--max_live_opponents=4` keeps K
+   small for throughput, but a policy trained against 4 rotating opponents may
+   sharpen against them specifically. Test: raise the cap for a 2h arm — it costs
+   ~1.6% throughput per extra opponent, which is affordable for a diagnostic.
+
+Whatever is tested, **snapshot densely** (`--snapshot_every=25`) so the peak is
+locatable. The roster now keeps a genuine mid-run spread; before 2026-08-15 it
+collapsed to the two ends and hid exactly this shape.
+
+Also worth doing regardless: **the peak policy already beats everything else
+measured.** `t1_ue1:snap_u1700` (+1.114) is the strongest net in the tournament. If
+a strong model is wanted now rather than an explanation, that snapshot is it.
+
+## T1. `update_epochs` 1 vs 4 — RUN, inconclusive
 
 The largest open **quality** question and the only item that can make the long run
 worse rather than merely slower. Needs no code.
@@ -85,8 +124,14 @@ arm. Then ONE ladder tournament rating both arms' final and mid snapshots.
     ./run_t1_ladder.sh                         # one tournament, then the verdict
 
 **Pass:** `update_epochs=1`'s rating lower bound clears `update_epochs=4`'s upper
-bound. Anything less and keep 4 — it is what produced `long8h`, the strongest model
-measured. `tools/t1_verdict.py` applies this mechanically so it cannot be fudged.
+bound. Anything less and keep 4. `tools/t1_verdict.py` applies this mechanically.
+
+**THE RULE AS WRITTEN IS UNDERSPECIFIED — it never says WHICH policy per arm.**
+`t1_verdict.py` chose best-of-arm; comparing finals instead gives the OPPOSITE
+answer on the 2026-08-14 data (ue=1 wins on best-of-arm by 0.004; ue=4 wins
+head-to-head on finals). Any future use must state which, and pick it *before*
+seeing the ratings. Best-of-arm also has a selection bias that widens with the
+number of snapshots rated, so it is only honest with the same count on both sides.
 
 If it fails, **re-run once with a raised LR** before discarding it. A null result
 at an LR tuned for 4x the gradient steps is not a result.

@@ -1238,6 +1238,82 @@ once bypassed the compiled body entirely, making a measured 1.57x silently inert
 Both `_encode_context` and `_pairs` fall back to eager on any exception with only a
 `warnings.warn`, so an inert compile is quiet by design.
 
+## T1 results, 2026-08-14/15 — and the finding that matters more than T1
+
+Two arms, equal wall clock (18,000 s each), 1,024 envs, `--league`,
+`--max_live_opponents=4`, seed 1, LR 2.5e-4. Judged by ONE ladder tournament,
+`games_per_dir=64`, 13 policies, 1,536 games per policy.
+
+| | ue=4 | ue=1 |
+|---|---|---|
+| updates | 1,622 | 2,192 |
+| steps | 212,598,784 | 287,309,824 |
+| real sps | 11,811 | 15,962 |
+| **sample ratio** | 1.00 | **1.35x** |
+
+Note the ratio: T1 was designed when `update_epochs=1` was believed to buy **1.55x**.
+After the throughput work `learn` is only ~13% of the ue=1 update, so fewer epochs
+save much less. **The premise of the experiment shifted under it**; re-derive this
+ratio before quoting any older figure.
+
+### Ratings
+
+| ue=4 | rating | ue=1 | rating |
+|---|---|---|---|
+| u100 | **+1.054** | u100 | +0.967 |
+| u1200 | +1.022 | u1700 | **+1.114** |
+| u1400 | +1.053 | u1900 | +1.107 |
+| u1600 | +1.038 | u2100 | +1.060 |
+| main@1622 | +1.030 | main@2192 | **+0.935** |
+
+(Anchors: Greedy +0.194, Heuristic +0.177, Random 0. Every net is far above the
+bots and the arms are within ~0.1 of each other, so all the action is in a narrow
+band roughly two CI widths wide.)
+
+### The verdict, and why it must be quoted with its caveats
+
+`tools/t1_verdict.py` prints **PASS**: ue=1's best (u1700, lower bound +1.084)
+clears ue=4's best (u100, upper bound +1.080). **The margin is 0.004.** Three
+things have to be said alongside it:
+
+1. **It is a best-of-5 vs best-of-5 comparison**, and max-selection over five
+   noisy policies inflates both arms. Only `u1700` strictly clears; `u1900`
+   (+1.107, lower bound +1.077) does not.
+2. **The two maxima sit at completely different ages** — u1700 against u100. That
+   is not a controlled comparison of epoch counts.
+3. **Head-to-head of the two FINAL policies favours ue=4**: margin +0.057, W/L/D
+   41/40/47. The policy you would actually ship from ue=1 is the worst net in the
+   tournament.
+
+`next_work.md`'s rule ("ue=1's rating lower bound clears ue=4's upper bound")
+**never said which policy**, and best-of-arm vs final-of-arm give opposite answers
+here. That is a defect in the rule, not a close call to be resolved by picking the
+flattering reading.
+
+### The real finding: neither arm improves late, and one regresses hard
+
+- **ue=4 does not learn after update 100.** Its whole 1,622-update range spans
+  +1.022 to +1.054 — narrower than one CI. 212M steps bought nothing measurable.
+- **ue=1 learns, then collapses.** u100 → u1700 is +0.967 → +1.114 (CI-clear, a
+  real gain). u1700 → main is +1.114 → +0.935 (CI-clear), ending **below its own
+  update-100 snapshot**. The ladder flagged it independently: `NON-MONOTONE — 2
+  well-separated snapshots rated strictly below an earlier one`.
+
+So ue=1 is the better *learner* and ue=4 is merely stable. **A long run at either
+setting spends most of its hours past the point of gain, and at ue=1 it spends them
+getting worse.** Diagnose this before committing to a long run. Suspects, in order:
+entropy collapse (ue=1 fell to 0.68 against ue=4's 0.92, i.e. a more deterministic
+and more exploitable policy), no LR decay (`--lr_schedule=fixed`), and league
+overfitting to the bounded live-opponent set.
+
+### `vp_all` rose while the ladder rating fell — the rule earns itself again
+
+Across exactly the window where ue=1's rating dropped +1.114 → +0.935, its in-run
+`vp_all` climbed 14.62 → 15.81 and `mean_episode_return` sat at 17 against ue=4's
+8.5. Anyone watching the training log would have concluded ue=1 was pulling ahead.
+**This is why `vp_all` / `mean_episode_return` / vs-Greedy are on the
+never-judge-by list.** Only the ladder saw the regression.
+
 ### act/env overlap without env groups: +7.9%, and the ceiling is CPU contention
 
 T2's payoff was reachable without the env-group split. `AsyncVectorEnv.start_step` /
@@ -1579,6 +1655,35 @@ to **linear at ~1.6% of throughput per extra live opponent**, so raising it buys
 diversity at a real, measurable price and lowering it saves very little. Do not
 change it without deciding that trade deliberately — and note this table prices
 only the throughput side; the league-quality side is unmeasured.
+
+### FIXED: the roster prune collapsed to the two ends, deleting all mid-run history
+
+`PolicyRoster.prune(keep_recent=4, keep_spaced=4)` is called after **every**
+snapshot, so it is applied to its own output dozens of times. It selected the
+"spaced" entries by **position in the surviving list**, which is not stable under
+that iteration: the survivors are already collapsed toward the ends, so evenly
+spacing by index re-selects the ends and squeezes the middle a little more each
+round.
+
+A real 1,622-update run finished holding `u100, u200, u1200, u1300, u1400, u1500,
+u1600, u1622` — eight snapshots, a **1,000-update hole**, and no mid-run policy at
+all. That silently defeats rating "mid and final" snapshots, which is the only way
+to notice a run that peaked early and then regressed — precisely what the
+`update_epochs=1` arm did.
+
+Now spaced by **birth_update** across the older block, so the targets are
+re-derived from the true age range on every call and survive repeated application.
+Simulated over a 2,200-update run: `100, 700, 1600, 1800, 1900, 2000, 2100, 2200`
+(largest gap 43% of the run) against the old `100, 200, 1200, …` (66%).
+
+The existing test passed because it added 20 snapshots and pruned **once** — which
+any spacing rule survives. `test_repeated_prune_keeps_a_genuine_mid_run_snapshot`
+prunes after every snapshot, as the caller does, and asserts something survives in
+the middle half of the range.
+
+**Generalisation worth keeping:** a rule that is applied repeatedly to its own
+output must be tested that way. Testing one application of an idempotent-looking
+selection proves nothing about the fixed point it converges to.
 
 ### Operational: `runs/roster` is unloadable by the ladder
 

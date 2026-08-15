@@ -156,21 +156,56 @@ class PolicyRoster(object):
   def prune(self, keep_recent=4, keep_spaced=4):
     """Bounds snapshot/exploiter storage (keeps main always).
 
-    Keeps the ``keep_recent`` most recent non-main entries plus
-    ``keep_spaced`` equally spaced older ones; deletes the rest's weight files.
+    Keeps the ``keep_recent`` most recent non-main entries plus ``keep_spaced``
+    older ones spread across the run's history; deletes the rest's weight files.
+
+    SPACING IS BY BIRTH UPDATE, NOT BY LIST POSITION. This is called after every
+    snapshot, so it is applied dozens of times to its own output, and a
+    position-based rule is not stable under that iteration: the surviving list is
+    already collapsed toward its ends, so "evenly spaced by index" keeps
+    re-selecting the ends and squeezes the middle out a little more each time. A
+    1,622-update run ended up holding u100, u200, u1200, u1300, u1400, u1500,
+    u1600, u1622 -- eight snapshots with a 1,000-update hole and no mid-run policy
+    at all, which silently defeats any later attempt to rate "mid and final"
+    snapshots and to notice a run that peaked early and then regressed. Spacing by
+    age re-derives the same targets from the true range every call, so it survives
+    repeated application.
     """
     non_main = [e for e in self.entries.values() if e.role != "main"]
     if len(non_main) <= keep_recent + keep_spaced:
       return
     ordered = sorted(non_main, key=lambda e: e.birth_update)
-    keep_idx = set(range(max(0, len(ordered) - keep_recent), len(ordered)))
-    if keep_spaced and len(ordered) > keep_recent:
-      span = max(1, len(ordered) - keep_recent - 1)
-      for k in range(keep_spaced):
-        keep_idx.add(min(len(ordered) - keep_recent - 1, int(
-            round(k * span / max(1, keep_spaced - 1)))))
-    for i, e in enumerate(ordered):
-      if i in keep_idx:
+    older = ordered[:-keep_recent] if keep_recent else list(ordered)
+    keep = {e.policy_id for e in (ordered[-keep_recent:] if keep_recent else [])}
+
+    if keep_spaced and older:
+      lo, hi = older[0].birth_update, older[-1].birth_update
+      if hi > lo and keep_spaced > 1:
+        targets = [lo + (hi - lo) * k / (keep_spaced - 1)
+                   for k in range(keep_spaced)]
+      else:
+        targets = [lo]
+      for t in targets:
+        # Nearest surviving older entry to this age, preferring the earlier one
+        # on a tie so the oldest snapshot is never dropped in favour of a
+        # near-duplicate.
+        keep.add(min(older,
+                     key=lambda e: (abs(e.birth_update - t), e.birth_update))
+                 .policy_id)
+      # Targets can collide once the older block is sparse. Spend any leftover
+      # budget on whichever remaining entry is furthest (in age) from everything
+      # already kept, which is the same objective the targets encode.
+      budget = keep_recent + keep_spaced
+      while len(keep) < budget:
+        rest = [e for e in older if e.policy_id not in keep]
+        if not rest:
+          break
+        kept_ages = [e.birth_update for e in ordered if e.policy_id in keep]
+        keep.add(max(rest, key=lambda e: min(abs(e.birth_update - a)
+                                             for a in kept_ages)).policy_id)
+
+    for e in ordered:
+      if e.policy_id in keep:
         continue
       p = Path(e.path)
       if p.exists():
