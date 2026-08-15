@@ -8,7 +8,7 @@ WHY
   ms/step, about a quarter of the whole 18.87 s update, is spent somewhere other
   than the network, and no doc accounts for it.
 
-  next_work.md does list "the per-step `_last_decision` copies" under
+  The planning notes did list "the per-step `_last_decision` copies" under
   "Deliberately not doing", but the measurement behind that entry was taken at
   256 envs (12.40 ms against a pooled 11.88 ms -- a wash, which is a statement
   about the FIX, not about the size of the cost). Both the copy volume and the

@@ -14,7 +14,7 @@
 
 """V5: splitting the rollout into env groups must change NOTHING it records.
 
-This is the gate `next_work.md` requires *before* the act/env overlap work (T2),
+This is the gate `docs/eclipse_rl_todo.md` requires *before* the act/env overlap work (T2),
 and the same gate the `(row, env)` reference design for `_last_decision` needs. It
 exists because the failure mode of both changes is silent: a terminal-attribution
 bug in this exact code once cost 408M steps, and the determinism note in

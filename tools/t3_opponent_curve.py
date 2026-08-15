@@ -61,7 +61,7 @@ def build(num_rows, num_workers, compile_encoder, seed, device):
           chance_event_sampler=rl_environment.ChanceEventSampler(seed=seed + i),
           observation_type=rl_environment.ObservationType.OBSERVATION,
           # Without this every reset pays observation_tensor() at ~24x
-          # observation_tensor_into() -- see next_work.md Operational.
+          # observation_tensor_into() -- see docs/eclipse_rl_todo.md Operational.
           observations_as_numpy=True)
       for i in range(num_rows)
   ]
@@ -163,7 +163,7 @@ def main():
   ap.add_argument("--repeats", type=int, default=25)
   ap.add_argument("--seed", type=int, default=1)
   ap.add_argument("--knee", type=float, default=1.15,
-                  help="ratio rule from next_work.md; reported, not decisive")
+                  help="ratio rule from the plan; reported, not decisive")
   ap.add_argument("--num_steps", type=int, default=128,
                   help="rollout steps per update, to convert ms/step to s/update")
   ap.add_argument("--baseline_update", type=float, default=5.11,
@@ -236,7 +236,7 @@ def main():
     del agent, envs, sa, snaps
     torch.cuda.empty_cache()
 
-  # The "largest K under 1.15x" rule from next_work.md was written for a curve
+  # The "largest K under 1.15x" rule was written for a curve
   # whose knee sat at K=4. On BIG the curve is ~linear from K=2, so that rule
   # returns K=1 -- and "K=1" is NOT expressible as a flag value: 0 means
   # UNBOUNDED (league.py:255), which is the worst possible setting, and 1 already

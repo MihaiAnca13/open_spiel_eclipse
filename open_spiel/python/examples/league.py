@@ -159,17 +159,12 @@ class PolicyRoster(object):
     Keeps the ``keep_recent`` most recent non-main entries plus ``keep_spaced``
     older ones spread across the run's history; deletes the rest's weight files.
 
-    SPACING IS BY BIRTH UPDATE, NOT BY LIST POSITION. This is called after every
-    snapshot, so it is applied dozens of times to its own output, and a
-    position-based rule is not stable under that iteration: the surviving list is
-    already collapsed toward its ends, so "evenly spaced by index" keeps
-    re-selecting the ends and squeezes the middle out a little more each time. A
-    1,622-update run ended up holding u100, u200, u1200, u1300, u1400, u1500,
-    u1600, u1622 -- eight snapshots with a 1,000-update hole and no mid-run policy
-    at all, which silently defeats any later attempt to rate "mid and final"
-    snapshots and to notice a run that peaked early and then regressed. Spacing by
-    age re-derives the same targets from the true range every call, so it survives
-    repeated application.
+    Spacing is by birth_update, not by list index. The caller prunes after every
+    snapshot, so this runs against its own output dozens of times, and an
+    index-based rule is not stable under that: the survivors are already
+    collapsed toward the ends, so it re-selects the ends each pass until nothing
+    mid-run is left. Spacing by age re-derives the targets from the true range
+    every call.
     """
     non_main = [e for e in self.entries.values() if e.role != "main"]
     if len(non_main) <= keep_recent + keep_spaced:

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """T0's other confirmation: do the 12 GB observation-writer wins carry to BIG?
 
-next_work.md T0 asks for two checks beyond the throughput ladder:
+docs/eclipse_rl_todo.md T0 asks for two checks beyond the throughput ladder:
   * observation_tensor_into ~= 5 us
   * observation_tensor costs ~24x observation_tensor_into -- any rl_environment
     built without observations_as_numpy=True pays that on every single step.
@@ -77,7 +77,7 @@ def main():
   # Opening AND mid-game, separately. The writer's cost tracks how populated the
   # board is, so a single number cannot distinguish "this CPU is slower" from
   # "this measurement sampled later states than the one it is compared against".
-  # next_work.md's ~5 us has no state attached to it, so both are reported and
+  # The recorded ~5 us has no state attached to it, so both are reported and
   # the reader gets to decide which one the 5 us was.
   opening = [game.new_initial_state()]
   # The opening is a chance node in Eclipse; walk to the first decision node.
@@ -109,7 +109,7 @@ def main():
         f"= {100 * per_worker / 7.4:.0f}% of the env phase")
   verdict = "CARRIES" if mid_into < 10.0 else "DOES NOT CARRY"
   print(f"\n  verdict: the 12 GB writer win {verdict} to BIG "
-        f"(next_work.md expects ~5 us).")
+        f"(the plan expects ~5 us).")
 
 
 if __name__ == "__main__":

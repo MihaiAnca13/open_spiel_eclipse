@@ -93,7 +93,7 @@ free and a capacity walk is not.
 A recurring plan is to entity-list the two dense capacity blocks (galaxy
 19,800 floats, planet slots 7,200). Two corrections before anyone builds it.
 
-**You cannot convolve a list.** The proposal in the old `next_work.md` was that
+**You cannot convolve a list.** The proposal in the old planning notes was that
 entity-listing the galaxy shrinks the conv tower's input "from 225 cells to ~96".
 It does not: `obs_layout.galaxy_view` requires the dense 15×15, and
 `TypedPointerActorHead._pick` addresses `h_cells` by cell id. The implementable

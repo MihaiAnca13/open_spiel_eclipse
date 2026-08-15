@@ -6,10 +6,10 @@
 #   `learn_share` came from a SUM of phase durations, which equals elapsed time
 #   only while phases are strictly serialized. Nothing downstream of this file is
 #   interpretable until BIG has honest wall-clock numbers on the merged tree
-#   (5f5743be). See next_work.md T0 and docs/eclipse_rl_todo.md.
+#   (5f5743be). See docs/eclipse_rl_todo.md (T0 re-baseline).
 #
 # WHAT EACH RUNG ISOLATES
-#   The ladder in next_work.md reads "committed config -> device buffer ->
+#   The ladder in docs/eclipse_rl_todo.md reads "committed config -> device buffer ->
 #   --compile_encoder -> 1,024 envs". Those rungs are only informative if the
 #   base does NOT already have the two levers, so the base forces them off:
 #
@@ -90,7 +90,7 @@ rung() {  # rung <label> <num_envs> <num_minibatches> <extra flags...>
   t1=$(date +%s.%N)
 
   # Real throughput is final_steps/elapsed, never the logged sps -- see the
-  # Operational section of next_work.md.
+  # Operational section of docs/eclipse_rl_todo.md.
   .venv/bin/python tools/parse_t0.py "$label" "$log" "$t0" "$t1" "$rc" "$total" \
     | tee -a "$OUT/summary.txt"
   echo | tee -a "$OUT/summary.txt"

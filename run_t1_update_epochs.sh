@@ -40,7 +40,7 @@ cd "$REPO_ROOT"
 export PYTHONPATH="build/open_spiel/python:$PWD"
 export CUDA_VISIBLE_DEVICES=3
 
-SECS="${1:-18000}"          # per arm; 5h. next_work.md recommends 4-6h.
+SECS="${1:-18000}"          # per arm; 5h. docs/eclipse_rl_todo.md recommends 4-6h.
 K="${2:-4}"                 # --max_live_opponents, from T3
 WORKERS="${3:-16}"          # from the T0 worker probe
 LR="${4:-2.5e-4}"           # raise this for the ue=1 re-run if T1 fails

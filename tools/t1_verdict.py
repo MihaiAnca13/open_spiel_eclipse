@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Apply T1's pass rule to a two-arm ladder.json, and refuse to guess.
 
-The rule from next_work.md, verbatim: "update_epochs=1's rating lower bound
+The rule from docs/eclipse_rl_todo.md, verbatim: "update_epochs=1's rating lower bound
 clears update_epochs=4's upper bound. Anything less and keep 4 -- it is what
 produced `long8h`, the strongest model measured."
 
@@ -69,14 +69,14 @@ def main():
   # "Best" = highest rating point estimate within the arm; its CI is then what
   # the rule is applied to. Using the arm's best rather than its final snapshot
   # is deliberate: an arm whose peak was mid-run has still demonstrated that
-  # strength, and next_work.md asks for mid AND final snapshots precisely so a
+  # strength, and the plan asks for mid AND final snapshots precisely so a
   # late collapse cannot masquerade as the arm's ceiling.
   b1 = max(ue1, key=lambda p: p["rating"])
   b4 = max(ue4, key=lambda p: p["rating"])
   lo1, hi1 = b1["rating_ci"]
   lo4, hi4 = b4["rating_ci"]
 
-  # BOTH readings, always. next_work.md's rule never said WHICH policy per arm,
+  # BOTH readings, always. The rule never said WHICH policy per arm,
   # and on the 2026-08-14 data best-of-arm and final-of-arm give OPPOSITE answers
   # (ue=1 by 0.004 on best-of-arm; ue=4 head-to-head on finals). Printing only the
   # one this script happens to implement would let an underspecified rule quietly

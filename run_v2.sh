@@ -37,7 +37,7 @@
 #   from the whole roster, so act decayed for as long as the run lasted (22.8 ->
 #   41.7 ms/step over 45 updates, still climbing) with nothing in the loss series
 #   or the ratings to show for it. The default cap of 4 makes act plateau. Do not
-#   set --max_live_opponents=0 on a long run without re-reading next_work.md.
+#   set --max_live_opponents=0 on a long run without re-reading docs/eclipse_rl_todo.md.
 #
 # MEASURED CONFIG NOTES
 #   --num_minibatches=8, not 4: at 4 the minibatch is 8,192 states x ~21 legal

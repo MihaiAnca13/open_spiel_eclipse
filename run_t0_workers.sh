@@ -5,7 +5,7 @@
 #   T1 commits ~10 GPU-hours to two sequential arms. Both arms share whatever
 #   num_workers is chosen, so a bad choice does not invalidate the A/B -- but it
 #   does buy less policy improvement per hour, in the one experiment that is
-#   least affordable to repeat. next_work.md recommends 20 for the long run; that
+#   least affordable to repeat. docs/eclipse_rl_todo.md once recommended 20 for the long run; that
 #   number came off the 12 GB box's 32 cores, not off BIG.
 #
 #   BIG has 12 physical / 24 logical cores and is SHARING them with two resident

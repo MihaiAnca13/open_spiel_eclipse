@@ -165,22 +165,21 @@ flags.DEFINE_bool("progress", True,
                   "Show a tqdm-style progress bar with it/s (env steps/sec). "
                   "Disabled automatically if tqdm is not installed.")
 flags.DEFINE_bool("anneal_lr", True,
-                  "Legacy alias used only when --lr_schedule is unset: True maps "
-                  "to 'fixed', False maps to 'fixed'. Kept for back-compat with "
-                  "old command lines; --lr_schedule wins when set explicitly. "
-                  "NOTE: this used to map True -> 'kl', which silently enabled a "
-                  "never-validated controller on every run that did not pass "
-                  "--lr_schedule. See the safety note on --lr_schedule.")
+                  "DEAD FLAG, accepted for back-compat with old command lines. "
+                  "It no longer selects anything: --lr_schedule resolves to "
+                  "'fixed' when unset regardless of this value. Use "
+                  "--lr_schedule.")
 flags.DEFINE_enum(
     "lr_schedule", None, ["fixed", "anneal", "kl"],
-    "How the learning rate is mutated after each update. 'fixed' = never "
-    "touch it. 'anneal' = the historical linear decay to zero over the run "
-    "(driven off agent.updates_done, resume-continuing). 'kl' = closed-loop "
-    "KL-targeted controller (cls. Item 4): react to the realized per-update KL "
-    "every step with a small multiplicative step and clamp within "
-    "[--lr_min, --lr_max]. A fixed anneal shuts off learning past convergence, "
-    "so 'kl' is the default when this flag is unset (falls back to --anneal_lr "
-    "if that is set False).")
+    "How the learning rate is mutated after each update. Unset resolves to "
+    "'fixed'. 'fixed' = never touch it. 'anneal' = linear decay to zero over "
+    "the run (driven off agent.updates_done, so it continues across resumes). "
+    "'kl' = closed-loop KL-targeted controller: react to the realized "
+    "per-update KL with a small multiplicative step, clamped to "
+    "[--lr_min, --lr_max]. 'kl' HAS NEVER BEEN VALIDATED ON A REAL RUN and at "
+    "the observed approx_kl ~0.003 against --kl_target=0.02 it saturates "
+    "--lr_max (40x base) within ~5 updates; opt in deliberately and watch "
+    "control/lr for the first 50 updates.")
 flags.DEFINE_float("kl_target", 0.02,
                    "Target per-update KL for the 'kl' LR controller.")
 flags.DEFINE_float("kl_lr_tau", 0.05,
@@ -2028,15 +2027,8 @@ def _step_controllers(agent, writer, update, num_updates):
   ctrl = {}
   schedule = FLAGS.lr_schedule
   if schedule is None:
-    # Default to 'fixed'. This used to default to the closed-loop 'kl'
-    # controller, which meant every run that did not explicitly pass
-    # --lr_schedule silently enabled a controller that has never been validated
-    # on a real run. With the observed approx_kl ~0.003 against --kl_target=0.02
-    # it computes mult = exp(0.85) ~ 2.34 every update and, because
-    # --kl_lr_tau=0.05 barely moves the EMA, saturates --lr_max=1e-2 (40x base)
-    # within ~5 updates. Every run that produced a good policy so far used a
-    # fixed/near-fixed LR, so that is the safe default. Opt in with
-    # --lr_schedule=kl, and watch control/lr for the first 50 updates.
+    # 'kl' was once the unset default and silently saturated --lr_max on every
+    # run that did not pass this flag; see the --lr_schedule help.
     schedule = "fixed"
 
   if schedule == "anneal":

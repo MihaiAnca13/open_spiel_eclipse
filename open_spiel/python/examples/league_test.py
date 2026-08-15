@@ -85,17 +85,8 @@ class PolicyRosterTest(absltest.TestCase):
   def test_repeated_prune_keeps_a_genuine_mid_run_snapshot(self):
     """Pruning after EVERY snapshot, as _maybe_snapshot does, must keep a spread.
 
-    The test above prunes once at the end, which any spacing rule passes. The real
-    caller prunes on every snapshot, so the rule is applied to its own output
-    dozens of times -- and a position-based rule is not stable under that: the
-    survivors are already collapsed toward the ends, so "evenly spaced by index"
-    re-selects the ends and squeezes the middle a little more each round.
-
-    A real 1,622-update run ended up holding u100, u200, u1200, u1300, u1400,
-    u1500, u1600, u1622: eight snapshots with a 1,000-update hole and nothing
-    mid-run. That silently defeats rating "mid and final" snapshots, which is the
-    only way to notice a run that peaked early and then regressed -- exactly what
-    the update_epochs=1 arm did.
+    The test above prunes once at the end, which any spacing rule passes. This
+    one prunes on every snapshot, which is what breaks an index-based rule.
     """
     with tempfile.TemporaryDirectory() as d:
       roster = PolicyRoster(d)

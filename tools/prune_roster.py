@@ -9,7 +9,7 @@ WHY THIS IS NEEDED
   and 76,800 full Eclipse games. That is not a judgement step, it is a second
   experiment.
 
-  next_work.md asks for "final and mid snapshots", not every snapshot. This
+  The plan asks for "final and mid snapshots", not every snapshot. This
   writes a roster.json holding a chosen subset -- always main and the extreme
   snapshots, plus evenly-spaced interior ones -- and leaves the weights where
   they are (roster.json paths are repo-relative, so nothing is copied).

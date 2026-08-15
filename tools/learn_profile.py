@@ -2,7 +2,7 @@
 """T4 -- where does `learn` actually go? It is 50% of the update and unexplained.
 
 `learn` is 9.37 s of BIG's 18.87 s update at 1,024 envs: 64 forward+backward
-passes (4 epochs x 16 minibatches) at ~146 ms per 8,192-row minibatch. next_work.md
+passes (4 epochs x 16 minibatches) at ~146 ms per 8,192-row minibatch. docs/eclipse_rl_todo.md
 says the "memory-bound at a flat 0.96 MB/row" characterisation has no identified
 cause, that nothing in the repo profiles memory, and that the one existing 9.08 GB
 figure came from a scratch script profiling the ENCODER ONLY -- no pointer head, no
@@ -158,7 +158,7 @@ def main():
         f"{torch.cuda.max_memory_allocated() / 1e9:.2f} GB  "
         f"reserved {torch.cuda.max_memory_reserved() / 1e9:.2f} GB")
   print(f"  = {torch.cuda.max_memory_allocated() / rows_per_mb / 1e6:.3f} MB/row "
-        f"(next_work.md's unexplained figure is 'a flat 0.96 MB/row')")
+        f"(the recorded unexplained figure is 'a flat 0.96 MB/row')")
 
   # Shapes first: a synthetic reproduction of "index backward" built from guessed
   # shapes came out 40x cheaper than the profile, so the shapes are the finding.
