@@ -429,6 +429,23 @@ flags.DEFINE_string(
     "interrupted/extended run continue from where it left off.")
 flags.DEFINE_integer("snapshot_every", 25,
                      "Snapshot the main policy into the roster every N updates.")
+flags.DEFINE_integer(
+    "roster_keep_recent", 4,
+    "Snapshots retained by the most-recent rule after every snapshot. Set "
+    "BOTH this and --roster_keep_spaced to 0 to disable pruning entirely and "
+    "keep the run's whole history.")
+flags.DEFINE_integer(
+    "roster_keep_spaced", 4,
+    "Snapshots retained by the age-spaced rule (see --roster_keep_recent). "
+    "The defaults 4/4 cap the roster at 8 non-main entries and DELETE the "
+    "weight files of everything else: a 2,192-update run at "
+    "--snapshot_every=100 ended holding 8 snapshots out of 21 written. That "
+    "pruning is not a throughput measure -- act cost scales with the number "
+    "of DISTINCT policies in a rollout batch, which --max_live_opponents "
+    "already bounds independently of roster size. What it does cost is the "
+    "run's own history: the opponent pool it leaves is 4 near-adjacent recent "
+    "policies, and there is no way afterwards to ask where a run peaked. "
+    "Snapshots are ~3 MB, so keeping ~120 of them is ~0.4 GB. Prefer 0/0.")
 flags.DEFINE_float("selfplay_fraction", 0.5,
                    "Fraction of (re)spawned lineups that are pure self-play.")
 flags.DEFINE_float("old_fraction", 0.125,
@@ -2066,13 +2083,30 @@ def _maybe_snapshot(agent, roster, update, force=False):
   Reachable without --league too: a plain self-play run previously trained for
   hours and wrote no weights at all, because this was only ever called from the
   league branch.
+
+  Keyed on ``agent.updates_done``, NOT on the caller's ``update``. The training
+  loop is ``for update in range(num_updates)``, so ``update`` restarts at 0 in
+  every process -- which means a resumed run rewrote ``snap_u25.pt``,
+  ``snap_u50.pt`` and so on over the previous run's files. The roster kept its
+  file count and silently lost the older policy at every id, and every
+  ``birth_update`` in it became a within-chunk offset rather than an age, which
+  is exactly the field the ladder's monotonicity test sorts by.
+  ``updates_done`` is restored by ``_load_train_state``, so it is the only
+  counter that survives a resume. (It has already been incremented for the
+  update just finished, so ids are 1-based against the loop variable.)
   """
   if roster is None or FLAGS.snapshot_every <= 0:
     return
-  if force or (update > 0 and update % FLAGS.snapshot_every == 0):
-    roster.record_main(agent.network, update)
-    roster.add_snapshot(agent.network, update)
-    roster.prune(keep_recent=4, keep_spaced=4)
+  age = int(agent.updates_done)
+  if force or (age > 0 and age % FLAGS.snapshot_every == 0):
+    roster.record_main(agent.network, age)
+    roster.add_snapshot(agent.network, age)
+    # Both <= 0 means "never prune". Guarded explicitly rather than passed
+    # through: prune(0, 0) takes the keep_recent=0 branch, skips the
+    # keep_spaced block, and deletes EVERY non-main entry.
+    if FLAGS.roster_keep_recent > 0 or FLAGS.roster_keep_spaced > 0:
+      roster.prune(keep_recent=max(0, FLAGS.roster_keep_recent),
+                   keep_spaced=max(0, FLAGS.roster_keep_spaced))
     _save_train_state(agent, str(roster.save_dir))
 
 
@@ -2710,14 +2744,31 @@ def main(_):
         f"  num_workers={FLAGS.num_workers}"
         f"  obs_buffer={agent.obs_buffer_device}/{agent.obs_buffer_dtype}"
         f" ({agent.obs.numel() * agent.obs.element_size() / 1e9:.1f} GB)")
+  # TRAINABLE parameters. Two things inflate the number a checkpoint appears to
+  # show, and both have to be undone to get this figure:
+  #   - nn.Module.parameters() de-duplicates shared submodules; state_dict()
+  #     does not, and with --separate_critic=False the one encoder is
+  #     registered under four names (shared / critic_trunk / critic.0 /
+  #     actor.0), so a naive sum is 2.89x too high;
+  #   - 111,170 of what remains are int64 action-factorization lookup tables
+  #     (actor.1.decode / .cell_id / .unit_id / ...), which are buffers.
+  # At --nn_width=64 --nn_depth=2 the honest figure is 545,586 -- and every
+  # null quality result this project has recorded was measured inside that box,
+  # which is why it is now logged on every run. tools/count_params.py prints
+  # all three readings from a checkpoint.
+  _emit(f"params={sum(p.numel() for p in agent.network.parameters()):,} "
+        f"trainable (nn_width={FLAGS.nn_width} nn_depth={FLAGS.nn_depth} "
+        f"encoder={FLAGS.encoder})")
   if FLAGS.resume:
+    # Uncompiled: this net exists only to be a state_dict donor for the
+    # trainable agent, so a compile trace here is pure startup cost.
     agent_fn_r = make_agent_fn(
         FLAGS.nn_width, FLAGS.nn_depth, tuple(aux_tasks or ()),
         norm=FLAGS.nn_norm, activation=FLAGS.nn_activation,
         separate_critic=FLAGS.separate_critic, factored_actions=factored,
         encoder=FLAGS.encoder,
         channels_last=FLAGS.channels_last,
-        compile_encoder=FLAGS.compile_encoder)
+        compile_encoder=False)
     resume_src = FLAGS.resume
     sd = None
     # Resolve roster ids ("main", "snap_u100", ...) whenever the roster dir
@@ -2797,13 +2848,24 @@ def main(_):
 
 
   # League (population self-play) setup: roster + matchmaker + lineups.
+  #
+  # compile_encoder=False here even under --compile_encoder, and that is
+  # deliberate. This agent_fn builds only FROZEN, inference-only nets: league
+  # opponents (_league_setup / _refresh_lineups), the eval squad, and the
+  # exploiter victim/starter. Compiling them costs a ~29 s inductor trace per
+  # net and buys nothing -- T3 measured the act path at 3.29 ms compiled vs
+  # 3.36 ms eager (256 rows, K=1), i.e. inside the noise, and T0 found
+  # --compile_encoder's entire win lands in `learn`, which frozen opponents
+  # never enter. `agent.networks` is keyed by policy id and never evicts, so
+  # with a deep roster this was N traces, not one. The TRAINABLE net is built
+  # by the PPO(...) constructor above from its own compiled agent_fn.
   agent_fn = make_agent_fn(
         FLAGS.nn_width, FLAGS.nn_depth, tuple(aux_tasks or ()),
         norm=FLAGS.nn_norm, activation=FLAGS.nn_activation,
         separate_critic=FLAGS.separate_critic, factored_actions=factored,
         encoder=FLAGS.encoder,
         channels_last=FLAGS.channels_last,
-        compile_encoder=FLAGS.compile_encoder)
+        compile_encoder=False)
   num_actions = game.num_distinct_actions()
   roster = None
   matchmaker = None

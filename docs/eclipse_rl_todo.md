@@ -61,6 +61,20 @@ something profiled it.
    `long8h` run peaked at u3900 (+1.2195) and finished lower at u4200 (+1.1431),
    and T1's ue=1 arm did the same far harder. Snapshot densely enough to locate a
    peak, and never assume the final policy is the best one.
+8. **Before hypothesizing about a run, parse its log.** Both hypotheses this file
+   carried into 2026-08-16 died in minutes against data already on disk: "entropy
+   collapse" was one mid-run sample quoted as a trend (entropy was *flat* across
+   the window that regressed), and "league overfitting" predicts an age-dependent
+   weakness the ladder's pair table flatly contradicts. Neither needed a GPU. A
+   hypothesis that makes a prediction about existing data has to be checked
+   against it *first*.
+9. **Count parameters with `parameters()`, never by summing a `state_dict`.**
+   Two inflations stack: with `--separate_critic=False` the one encoder is
+   registered under four names (2.89x), and 111,170 int64 action-factorization
+   lookup tables are buffers rather than weights. `sum(state_dict)` reads
+   1,897,461 against **545,587 trainable**. The trainer logs `params=...` at
+   startup; `tools/count_params.py` prints all three readings. Quote the
+   trainable capacity of any run you report a null result for.
 
 ## The settled configuration
 
@@ -68,10 +82,15 @@ Every value below was measured on BIG, not inherited:
 
 ```
 --num_envs=1024 --num_steps=128 --num_workers=16 --num_minibatches=16 \
---update_epochs=<T1> --max_live_opponents=4 \
+--update_epochs=4 --max_live_opponents=4 \
 --amp --compile_encoder --lr_schedule=fixed --league \
---overlap_record --snapshot_every=100 --timing --timing_every=50
+--overlap_record --obs_buffer_device=cuda \
+--snapshot_every=25 --roster_keep_recent=0 --roster_keep_spaced=0 \
+--verdict_every_sec=0 --timing --timing_every=100
 ```
+
+`run_long.sh` is this config plus chunked ladder gates; run it rather than
+retyping the flags.
 
 - `num_workers=16`, **not the 20 this file used to recommend** — that came off the
   12 GB box's 32 cores. 12→16 cuts the env phase 9%; 16/20/24 are a plateau inside
@@ -80,34 +99,161 @@ Every value below was measured on BIG, not inherited:
   measured. Raise `num_envs` and `num_minibatches` together or that ratio drifts.
 - `max_live_opponents=4` costs 6.5% of the update and is **not free** — roughly
   1.6% of throughput per extra live opponent. Never 0 (0 means unbounded).
+- `update_epochs=4` over 1: T1's `ue=1` arm is the one that regressed, its 1.35x
+  sample-rate advantage bought nothing measurable, and head-to-head of the two
+  FINAL policies favoured `ue=4`. Its diagnostics are also readable — `pg_loss`
+  degenerates to ~0 at one epoch, which makes `aux_share` uninterpretable there.
+- `roster_keep_recent=0 roster_keep_spaced=0` disables the snapshot prune, which
+  used to **delete weight files** down to 8 entries. Both must be 0: `prune(0, 0)`
+  passed through would take the `keep_recent=0` branch, skip the spaced block and
+  delete *every* non-main entry, so `_maybe_snapshot` guards it explicitly.
+- `snapshot_every=25`, not 100 — T1's peak was a mid-run snapshot and its final
+  policy rated 0.18 below it. You can only ship a peak you snapshotted.
+- `verdict_every_sec=0` **disables** verdict evals (the code tests the flag for
+  truthiness; the docstring's "override down only to debug" reads backwards).
+  They measure utility vs Greedy, which every trained net beat 127/128.
 
 ## THE GATE NOW: why does training stop improving?
 
-Both T1 arms plateau or regress well before their 5 hours are up. Until this is
-understood, a long run is buying hours of nothing. Ordered by how cheaply each can
-be tested, and all judged on ladder `rating` only:
+Both T1 arms plateau or regress well before their 5 hours are up. Three
+hypotheses were filed here on 2026-08-15; two were **refuted the next day
+against the T1 arms' own logs and the ladder's pair table**, before any GPU time
+was spent on them. Recorded in full because the refutations are cheap to redo
+and expensive to re-guess.
 
-1. **Entropy collapse.** ue=1 fell to 0.68 against ue=4's 0.92, and ue=1 is the arm
-   that regressed — a more deterministic policy is a more exploitable one in a
-   4-player game. Test: raise `--ent_coef` (currently 0.05) on a 2h ue=1 arm and
-   rate against this run's snapshots.
-2. **No LR decay.** `--lr_schedule=fixed` throughout, and the doc bans the `kl`
-   controller as unvalidated. The regression starting around u1700 is consistent
-   with too much late movement. Test: cosine or step decay, same budget.
-3. **League overfitting to the bounded live set.** `--max_live_opponents=4` keeps K
-   small for throughput, but a policy trained against 4 rotating opponents may
-   sharpen against them specifically. Test: raise the cap for a 2h arm — it costs
-   ~1.6% throughput per extra opponent, which is affordable for a diagnostic.
+### REFUTED — entropy collapse
 
-Whatever is tested, **snapshot densely** (`--snapshot_every=25`) so the peak is
-locatable. The roster now keeps a genuine mid-run spread; before 2026-08-15 it
-collapsed to the two ends and hid exactly this shape.
+The claim was "ue=1 fell to 0.68 against ue=4's 0.92, and ue=1 is the arm that
+regressed". The trajectory says otherwise. Parsed from `runs/t1_ue1/train.log`:
 
-Also worth doing regardless: **the peak policy already beats everything else
-measured.** `t1_ue1:snap_u1700` (+1.114) is the strongest net in the tournament. If
-a strong model is wanted now rather than an explanation, that snapshot is it.
+| update | 0 | 320 | 560 | 800 | 1200 | 1680 | 1900 | 2190 |
+|---|---|---|---|---|---|---|---|---|
+| entropy | 1.98 | 0.77 | 0.63 | 0.66 | 0.67 | 0.78 | 0.78 | **0.76** |
+
+Entropy bottomed at u560 and then **rose** and sat flat. Across the exact window
+where the rating fell (+1.114 at u1700 → +0.935 at u2192) entropy went 0.78 →
+0.76 — no movement at all. The single figure "0.68" was a mid-run sample quoted
+as if it were a trend. Whatever caused the regression, the policy was not
+sharpening while it happened.
+
+### REFUTED — league overfitting to the bounded live set
+
+The claim was that training against 4 rotating opponents sharpens the policy
+against them specifically. That predicts an **age-dependent** weakness: the
+final policy should lose to the policies it stopped seeing. The pair table in
+`runs/t1_ladder.json` shows the opposite — `t1_ue1:main`'s margins against every
+other net:
+
+| opponent | ue1 u100 | ue4 u100 | ue4 u1200 | ue4 u1400 | ue4 u1600 | ue4 main | ue1 u1700 | ue1 u1900 | ue1 u2100 |
+|---|---|---|---|---|---|---|---|---|---|
+| margin | −0.139 | −0.225 | −0.256 | −0.270 | −0.090 | −0.057 | −0.133 | −0.146 | −0.154 |
+
+It loses to **everything, old and new alike**, and its two worst matchups are
+mid-age policies from the *other* arm that it never trained against. That is a
+uniform strength loss, not forgetting. (It also beat Greedy 127/128 and Random
+127/128 throughout — the bot anchors are saturated and cannot see any of this.)
+
+### NOT REFUTED, BUT NOT THE PRIME SUSPECT — no LR decay
+
+`--lr_schedule=fixed` throughout, and the `kl` controller remains unvalidated.
+Untested. Note it predicts *late drift*, which fits ue=1's last 500 updates but
+does not explain ue=4 being flat from u100 onward, which is the larger anomaly.
+
+### ALREADY REFUTED IN-TREE — `--aux_coef`
+
+Do not spend a run on this. The `--aux_coef` flag's own docstring records the
+A/B: at 0.01 (aux share 0.31, against 0.1's measured gradient-norm share of 82%
+aux / 11% policy / 6% value) `approx_kl` and `clipfrac` were **unchanged** and it
+was slightly behind on VP. The loss-share diagnostic is also unreliable at
+`update_epochs=1` specifically: `pg_loss` is the clipped surrogate mean, which
+sits at ~0 when the ratio is 1 by construction, so ue=1's alarming `aux_share`
+of 0.75–0.87 is largely an artifact of having one epoch. ue=4's is 0.29–0.61.
+
+### WHAT SURVIVES: nothing was ever tried outside a ~546k-parameter box
+
+**The trained network has 545,587 trainable parameters** at `--nn_width=64
+--nn_depth=2`. Two separate inflations sit between that and the number a
+checkpoint appears to show:
+
+| reading | value | why it is wrong |
+|---|---|---|
+| `sum(state_dict)` | 1,897,461 | `shared`, `critic_trunk`, `critic.0`, `actor.0` are four aliases of **one** shared encoder (verified bit-identical) — 2.89x |
+| de-aliased total | 656,757 | still includes 111,170 **int64** action-factorization lookup tables (`actor.1.decode/cell_id/unit_id/slot_id/seat_id/direction_id/family_id`) — buffers, no gradient, not capacity |
+| **trainable** | **545,587** | what `nn.Module.parameters()` returns |
+
+`tools/count_params.py` prints all three from a checkpoint, and the trainer logs
+`params=... distinct` at startup. Quote the trainable number.
+
+Every quality lever this project has recorded was measured inside that box, and
+every one came back null:
+
+| lever | result |
+|---|---|
+| `update_epochs` 1 vs 4 (T1) | both flat; one regressed |
+| spatial pointer head (Item 7) | null on two ladders, order flipped |
+| `--aux_coef` 0.1 → 0.01 | `approx_kl`/`clipfrac` unchanged |
+| encoder architecture | null; hide-and-seek measured ~9% for the same choice |
+| 1.52x throughput (T0/T2) | more steps of the same plateau |
+
+Meanwhile **no training-side metric moves at all** after ~u300 in either arm —
+`vp_all`, `approx_kl`, `clipfrac`, `explained_var` and `entropy` are flat for
+200M+ steps. That is the signature of a converged model, not a broken optimizer.
+**Capacity has never been swept on this machine.** `run_t4_capacity.sh` prices
+it; it measures COST ONLY and says nothing about strength.
+
+### Regardless of what is tested
+
+**Snapshot densely** (`--snapshot_every=25`) so the peak is locatable, and
+**keep the whole roster** (`--roster_keep_recent=0 --roster_keep_spaced=0`).
+The hardcoded `prune(4, 4)` deleted weight files after every snapshot — a
+2,192-update run ended holding 8 of the 21 it wrote. It was never a throughput
+measure: act cost scales with the number of **distinct policies in a rollout
+batch**, which `--max_live_opponents` bounds independently of roster size.
+
+**The peak policy already beats everything else measured.**
+`t1_ue1:snap_u1700` (+1.114) is the strongest net in that tournament. If a
+strong model is wanted now rather than an explanation, that snapshot is it —
+and note it is a *mid-run* snapshot, so **never ship `main.pt` by default**.
 
 ---
+
+## T4: capacity costs far less than the throughput work implied, 2026-08-16
+
+`run_t4_capacity.sh`, BIG/GPU 3, 1,024 envs / mb=16 / `update_epochs=4`,
+`--noleague`, 24 updates per rung, STEADY = last three hot samples.
+**This is a COST table. It says nothing about strength** — that is what the
+long run's gates answer.
+
+| rung | trainable params | update | learn | rollout | steady sps | vs w64 |
+|---|---|---|---|---|---|---|
+| w64 d2 (control) | 545,586 | 12.45s | 5.76s | 6.68s | 10,530 | 1.00x |
+| w128 d2 | 1,145,586 | 14.10s | 6.92s | 7.18s | 9,306 | 1.13x ⚠ |
+| **w256 d2** | **2,886,258** | **16.14s** | 8.87s | 7.28s | **8,120** | **1.30x** |
+| w256 d3 | 3,149,426 | 16.49s | 9.18s | 7.31s | 7,950 | 1.32x |
+
+- **5.29x the trainable parameters for 1.30x the wall clock.** Capacity is far
+  cheaper here than a decade of RL folklore about model size would suggest, and
+  much cheaper than the 1.52x that the whole T0/T2 throughput program bought.
+- **The cost lands almost entirely in `learn`** (5.76 → 8.87s, +54%) while
+  `rollout` moves +9%. That is exactly what T0 predicts: the act path is 82%
+  memcpy and Python bookkeeping and only 14% network, so a bigger network barely
+  touches it. **Corollary: every future capacity increase is priced by `learn`
+  alone**, and `learn` is only ~46% of the update at w64.
+- **Depth is nearly free but was not taken.** w256 d3 costs 0.35s more than d2
+  (inside a rung-to-rung noise band) for 9% more parameters. It was rejected
+  anyway: `--nn_norm` is a **no-op** under `--encoder=spatial`, so a deeper
+  tanh trunk gets no normalization, and changing width *and* depth at once would
+  make the gates harder to read. Change one dimension.
+- **The control is load-bearing.** w64 d2 re-derived 12.45s / 10,530 sps against
+  the recorded 12.44s / 10,540 — so the harness is the same one that produced
+  the T0/T2 numbers and the other rungs are comparable to them.
+- ⚠ **w128 is contaminated and is an upper bound on its cost, not a
+  measurement.** Test suites were run on GPU 3 while that rung was live. Its
+  per-update series spreads 1.75s (u4 13.70 / u8 15.45 / u12 14.55) against
+  w64's 0.16s. Left in the table with the caveat rather than deleted, because
+  the shape of the width curve still reads correctly without it. **Never run
+  anything else on GPU 3 during a rung** — this is the same mistake as the two
+  concurrent arms that thrashed the card to ~45 SPS, just smaller.
 
 ## T1 results, 2026-08-14/15 — and the finding that matters more than T1
 
@@ -848,6 +994,24 @@ curve at update 20.
   exception with only a warning. This trap has fired twice already.
 - **`runs/roster` is unloadable** by the current tree (size mismatch, which
   `strict=False` does not forgive). Generate a fresh roster; do not try to rate it.
+  **Any `--nn_width` change orphans a roster the same way** — a width mismatch is
+  a size mismatch. Changing capacity means training from scratch.
+- **League opponents are built UNCOMPILED on purpose**, even under
+  `--compile_encoder`. `ppo_eclipse.py`'s league `agent_fn` passes
+  `compile_encoder=False` because those nets are frozen and inference-only, T3
+  measured the act path at 3.29 ms compiled vs 3.36 ms eager (inside the noise),
+  and T0 found compile's entire win lands in `learn`. `agent.networks` is keyed
+  by policy id and **never evicts**, so with a deep roster this was one ~29 s
+  inductor trace *per opponent*. The trainable net is still compiled — it is
+  built by `PPO(...)` from its own `agent_fn`.
+- **`--verdict_every_sec=0` disables verdict evals** (the code tests the flag for
+  truthiness). The docstring's "override down only to debug" reads backwards.
+  The `--max_seconds` deadline path calls `_run_verdict` **unconditionally**
+  regardless of the flag, so a chunked run pays one per chunk boundary — keep it
+  cheap with `--noeval_greedy --noeval_random`.
+- **Never ship `main.pt` by default.** It is bit-identical to the final snapshot
+  (verified on `runs/t1_ue1`), and in T1 the final snapshot was the *worst* net
+  in the tournament while a mid-run one was the best.
 
 ---
 
