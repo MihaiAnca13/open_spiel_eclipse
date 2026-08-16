@@ -992,8 +992,15 @@ class PPO(nn.Module):
       self.logprobs[row] = logprob
       self.values[row] = value.flatten()
 
-      self.legal_rows_packed[row] = mask_rows.astype(np.int64)
-      self.legal_cols_packed[row] = mask_cols.astype(np.int64)
+      # mask_rows/mask_cols come from _collect/_legal_indices already as freshly
+      # allocated int64 arrays (cols via .astype(np.int64, copy=False) into a new
+      # array, rows from np.repeat with int64 dtype). The .astype(np.int64) here
+      # was therefore a redundant full copy of an already-int64, already-fresh
+      # array on every one of the ~10k per-step act calls. Store the fresh
+      # references directly; they are stable across the next step because
+      # _collect hands out a newly allocated array each call.
+      self.legal_rows_packed[row] = mask_rows
+      self.legal_cols_packed[row] = mask_cols
 
       if self.selfplay and defer_record:
         # Hand the bookkeeping to flush_selfplay_record so the caller can start the
