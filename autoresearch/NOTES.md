@@ -38,3 +38,28 @@ results TSV; this file is the agent's own reasoning about where to look next.
 - Each session appends 2-3 lines: idea tried, result, next guess.
 - The driver appends KEEP/DISCARD verdicts with measured steps.
 - Never let this file grow into a transcript — it is a compact index only.
+- [18:55] KEEP steps=456192 (audit pass)
+
+## [19:40 session] — PROFILING finding + act-path copy/transfer reduction
+
+- PROFILED the real config (12 envs, 4x4, amp, GPU): workers are ~99% idle
+  (ASYNC_PROF: step=0.19ms vs wait=37ms) — the bottleneck is the MAIN THREAD,
+  not the env. Per-update split: act (network forward) ~0.26s, learn ~0.18s,
+  env-residual ~0.05s, post ~0.02s, overlap=1.00x (bookkeeping gap is shorter
+  than the env step, so overlap can't hide it). Both act and learn are
+  small-batch GPU kernel-Launch-LATENCY bound (12-row forwards on a 4080 are
+  ~2ms of launch; enving in workers is microseconds). => Real jumps need a
+  STRUCTURAL change, not micro-churn: (a) group-based pipelining (act group A
+  while env group B steps — the only way to hide the act forward, which is 5x
+  the env step), or (b) fusing _gumbel_sample/_segment_lse_entropy's ~10
+  scatter kernels per step. Small-batch act is the single biggest lever and it
+  is NOT addressable by cutting transfers.
+- TRIED: removed redundant per-step host work in act+learn — seats.astype once
+  (was twice), coalesced legal rows+cols into one H2D/launch, dropped the
+  redundant .astype on already-int64 cnt_mb/sparse_counts. All bit-identical
+  (verified by construction), so learning is unchanged. Expected win small
+  (<5%) because the phase is launch-bound, not transfer-bound.
+- NEXT GUESS: pursue group-pipelining of act vs env (biggest real lever,
+  hides the ~0.26s/update act phase against idle workers) OR fuse the 10
+  per-step scatter kernels. The C++ obs writer is NOT the lever — workers are
+  99% idle, so their 0.19ms step can't move main-thread-bound throughput.

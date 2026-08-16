@@ -974,9 +974,13 @@ class PPO(nn.Module):
         if self.legal_actions_mask.shape[0]:
           self.legal_actions_mask[row] = legal_actions_mask
 
-      self.players[row] = torch.from_numpy(
-          seats.astype(np.int64)).to(self.device)
-      self.players_cpu[row] = torch.from_numpy(seats.astype(np.int64))
+      # seats arrives as freshly-allocated int32 from _collect; one int64
+      # conversion, reused for both the device and host copies (the old code
+      # called .astype(np.int64) twice, allocating the same 12-element array
+      # twice on every one of the ~2k per-update act calls).
+      seats_i64 = seats.astype(np.int64)
+      self.players[row] = torch.from_numpy(seats_i64).to(self.device)
+      self.players_cpu[row] = torch.from_numpy(seats_i64)
       trainable_row = torch.tensor(
           [self._acts_trainable(i, int(sv)) for i, sv in enumerate(seats)],
           dtype=torch.bool)
@@ -1710,8 +1714,15 @@ class PPO(nn.Module):
       local[idx] = np.arange(n)
       keep = local[mask_rows] >= 0
       rows_np = local[mask_rows[keep]]
-      cols = torch.from_numpy(mask_cols[keep].astype(np.int64)).to(self.device)
-      rows = torch.from_numpy(rows_np.astype(np.int64)).to(self.device)
+      # mask_rows/mask_cols are already freshly-allocated int64 from
+      # async_vector_env._legal_indices, and `local` is int64, so both are
+      # already int64 here -- the old `.astype(np.int64)` was a redundant
+      # per-step copy. Stack rows+cols into ONE int64 H2D (one transfer + one
+      # kernel launch on the latency-bound act path) instead of two.
+      rc = torch.from_numpy(
+          np.stack((rows_np, mask_cols[keep]), axis=1)).to(self.device)
+      rows = rc[:, 0]
+      cols = rc[:, 1]
       logits_e = self._pack_logits(features, rows, cols, net.actor[-1])
       chosen = self._gumbel_sample(logits_e, rows, cols, n)
       lse, ent = self._segment_lse_entropy(logits_e, rows, n)
@@ -1968,7 +1979,7 @@ class PPO(nn.Module):
               newvalue = self.network.value_from_obs(mb_obs)
             else:
               newvalue = self._value_from_features(features)
-            cnt_mb = sparse_counts[mb_inds].astype(np.int64)
+            cnt_mb = sparse_counts[mb_inds]
             m_size = int(cnt_mb.sum())
             if m_size > 0:
               starts = sparse_offsets[mb_inds]
