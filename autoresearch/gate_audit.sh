@@ -42,9 +42,11 @@ BASE=""
 HEAD="HEAD"
 # Not OPENCODE: the opencode runtime exports OPENCODE/OPENCODE_PID and collides.
 GATE_OPENCODE="${GATE_OPENCODE:-}"
+# Provider-qualified (vllm/...) -- a bare model id fails opencode resolution.
+GATE_MODEL="${GATE_MODEL:-vllm/deepseek-v4-flash}"
 
 usage() {
-  echo "usage: gate_audit.sh --run-dir <RUN> --base <best_commit> [--head <commit|HEAD>]" >&2
+  echo "usage: gate_audit.sh --run-dir <RUN> --base <best_commit> [--head <commit|HEAD>] [--model M]" >&2
   exit 2
 }
 
@@ -53,6 +55,7 @@ while [ $# -gt 0 ]; do
     --run-dir) RUN_DIR="$2"; shift 2 ;;
     --base)    BASE="$2"; shift 2 ;;
     --head)    HEAD="$2"; shift 2 ;;
+    --model)   GATE_MODEL="$2"; shift 2 ;;
     --gate-opencode) GATE_OPENCODE="$2"; shift 2 ;;
     -h|--help) usage ;;
     *) echo "unknown arg: $1" >&2; usage ;;
@@ -142,7 +145,8 @@ AUDIT fail -- <one-line reason it cheats / is not a real speedup>
 
 echo "[audit] spawning fresh-context reviewer (this can take a minute)..."
 
-OUT="$("$GATE_OPENCODE" run --format json --dir "$ROOT" --title "gate-audit ${HEAD}" \
+OUT="$("$GATE_OPENCODE" run --format json --dir "$ROOT" --model "$GATE_MODEL" \
+  --title "gate-audit ${HEAD}" \
   "$PROMPT" 2>"$RUN_DIR/audit.err")"
 RC=$?
 

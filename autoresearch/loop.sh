@@ -25,7 +25,8 @@
 #
 #   loop.sh [--experiments N] [--model M] [--dry-run]
 #     --experiments N  run N experiments then exit (default: until interrupted)
-#     --model          model for each fresh session (default deepseek-v4-flash)
+#     --model          model for each fresh session (default
+#                      vllm/deepseek-v4-flash -- provider-qualified, required)
 #     --dry-run        spawn the agent + commit but skip bench/gate (mechanism
 #                      test only -- leaves a candidate commit, no measurement)
 #
@@ -39,7 +40,7 @@ AR_DIR="$ROOT/autoresearch"
 ENVS="${ENVS:-12}"
 SECONDS="${SECONDS:-60}"
 RUN_PREFIX="${RUN_PREFIX:-/tmp/ar_wt/run}"
-MODEL="${MODEL:-deepseek-v4-flash}"
+MODEL="${MODEL:-vllm/deepseek-v4-flash}"
 STATE="$AR_DIR/.loop_state"
 EXPERIMENTS=0
 DRY_RUN=0
