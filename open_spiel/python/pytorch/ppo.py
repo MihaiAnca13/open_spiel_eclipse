@@ -2182,7 +2182,7 @@ class PPO(nn.Module):
                              self.total_steps_done)
       self.writer.add_scalar("losses/approx_kl", approx_kl.item(),
                              self.total_steps_done)
-      self.writer.add_scalar("losses/clipfrac", np.mean(clipfracs),
+      self.writer.add_scalar("losses/clipfrac", mean_clipfrac,
                              self.total_steps_done)
       self.writer.add_scalar("losses/explained_variance", explained_var,
                              self.total_steps_done)
