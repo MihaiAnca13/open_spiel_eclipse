@@ -1,5 +1,16 @@
 # Eclipse observation V2 audit
 
+> **2026-08: the typed/spatial pointer head that consumed the "pointer keys"
+> below was REMOVED as a null result.** There is no `TypedPointerActorHead`,
+> `SpatialFactoredActorHead`, `logits_for`, `forward_with_context`, or
+> `PointerContext` anymore — the actor is always a `FactoredActorHead`. The
+> pointer-keys/pointers language in this doc is historical. The cell/unit/slot
+> rows are still decoded and embedded in the encoder (`SpatialEclipseEncoder`),
+> but no head gathers them as per-action pointer terms. If you are porting these
+> design notes, ignore the "action consumer ... pointers" column and the pointer
+> sections; localize details to the removed head in `docs/eclipse_rl_todo.md`
+> (Section 7).
+
 `observation.h` is the tensor authority and `obs_layout.py` mirrors it. V2 is
 checkpoint-incompatible (`37,596` floats) and appends keyed public entities to
 the V1 blocks. `obs_layout._self_check` pins the total and every sub-block
@@ -27,7 +38,7 @@ read by nothing** — the encoder never referenced `V2_GLOBAL_START` or
 `V2_CELLS_START` at all, and touched only 6 of 732 seat floats and 1 of 553
 combat floats. That included the tech-bag histogram, the discovery ledger and
 the entire keyed combat queue: precisely the features this block exists to
-expose. All of it is now consumed (`SpatialEclipseEncoder._encode_context`).
+expose. All of it is now consumed (`SpatialEclipseEncoder._encode_impl`).
 
 If you add a V2 field, grep the encoder for its offset constant before claiming
 the agent can use it.
@@ -95,18 +106,19 @@ A recurring plan is to entity-list the two dense capacity blocks (galaxy
 
 **You cannot convolve a list.** The proposal in the old planning notes was that
 entity-listing the galaxy shrinks the conv tower's input "from 225 cells to ~96".
-It does not: `obs_layout.galaxy_view` requires the dense 15×15, and
-`TypedPointerActorHead._pick` addresses `h_cells` by cell id. The implementable
-form is AlphaStar's *scatter connection* — emit ≤64 rows of `(cell_id, 88
-channels)`, scatter them into a zeroed `(B, 88, 15, 15)` in Python, then run the
-existing conv tower unchanged. Conv cost is therefore **unchanged**, and the
-pointer head needs no change at all.
+It does not: `obs_layout.galaxy_view` requires the dense 15×15, and the encoder
+addresses `h_cells` by cell id. The implementable form is AlphaStar's *scatter
+connection* — emit ≤64 rows of `(cell_id, 88 channels)`, scatter them into a
+zeroed `(B, 88, 15, 15)` in Python, then run the existing conv tower unchanged.
+Conv cost is therefore **unchanged** (the value of a pointer head was irrelevant
+here — it has been removed, Item 7 in `docs/eclipse_rl_todo.md`).
 
-**The slot block buys no learn memory either.** `ctx.slots` is a *view* into the
-observation (zero allocation) and `slot_target` is O(pointers), not O(1,800).
-Scattering a compacted slot list back to `(B, 1800, 4)` would *create* a 59 MB
-device allocation at minibatch 4,096 where today there is none — so if slots are
-compacted, give the head a per-cell row-base map instead of scattering.
+**The slot block buys no learn memory either.** The raw slot rows are a *view*
+into the observation (zero allocation) and only the rows the action targets need
+an embedding. Scattering a compacted slot list back to `(B, 1800, 4)` would
+*create* a 59 MB device allocation at minibatch 4,096 where today there is none —
+so if slots are compacted, give the consumer a per-cell row-base map instead of
+scattering.
 
 What the shrink genuinely buys, after the writer fix took the env-step half:
 rollout **buffer bytes**, **H2D bytes** per act step, and the fp32 minibatch
@@ -126,6 +138,7 @@ The engine offers `COMBAT_POP_TARGET_0..15` (it scans a `uint16`
 `occupied_slots_mask`), but the V2 table is 8 slots per cell and the Orbital
 occupies row `printed`. Widest real tile has 6 slots, so slots >= 8 are
 currently unreachable — but `cell*8 + slot` would silently alias into the *next*
-cell's rows, so `TypedPointerActorHead` rejects `slot >= 8` explicitly and the
-writer asserts `printed < kPlanetSlotsPerCell`. Do not remove either guard on
-the grounds that the case cannot happen.
+cell's rows. The writer asserts `printed < kPlanetSlotsPerCell`; the 
+slot>=8 rejection that used to live in the (now-removed) pointer head is gone.
+Do not remove the remaining writer guard on the grounds that the case cannot
+happen.

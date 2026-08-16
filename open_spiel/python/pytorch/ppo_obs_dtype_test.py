@@ -96,9 +96,9 @@ class ObsBufferDtypeTest(absltest.TestCase):
     x = self.obs.to(stored_dtype).to(torch.float32)
     with torch.no_grad():
       if compute_dtype is torch.float32:
-        return self.encoder.forward_with_context(x)[0].float()
+        return self.encoder.forward(x).float()
       with torch.autocast("cpu", dtype=compute_dtype):
-        return self.encoder.forward_with_context(x)[0].float()
+        return self.encoder.forward(x).float()
 
   @staticmethod
   def _rel(a, b):

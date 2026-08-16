@@ -190,7 +190,7 @@ every one came back null:
 | lever | result |
 |---|---|
 | `update_epochs` 1 vs 4 (T1) | both flat; one regressed |
-| spatial pointer head (Item 7) | null on two ladders, order flipped |
+| spatial pointer head (Item 7, since removed) | null on two ladders, order flipped |
 | `--aux_coef` 0.1 → 0.01 | `approx_kl`/`clipfrac` unchanged |
 | encoder architecture | null; hide-and-seek measured ~9% for the same choice |
 | 1.52x throughput (T0/T2) | more steps of the same plateau |
@@ -241,9 +241,9 @@ long run's gates answer.
   alone**, and `learn` is only ~46% of the update at w64.
 - **Depth is nearly free but was not taken.** w256 d3 costs 0.35s more than d2
   (inside a rung-to-rung noise band) for 9% more parameters. It was rejected
-  anyway: `--nn_norm` is a **no-op** under `--encoder=spatial`, so a deeper
-  tanh trunk gets no normalization, and changing width *and* depth at once would
-  make the gates harder to read. Change one dimension.
+  anyway: `--nn_norm` was a **no-op** under `--encoder=spatial` at the time, so
+  a deeper tanh trunk had no normalization. It is now wired into every spatial
+  branch MLP; this historical rung still changed one dimension only.
 - **The control is load-bearing.** w64 d2 re-derived 12.45s / 10,530 sps against
   the recorded 12.44s / 10,540 — so the harness is the same one that produced
   the T0/T2 numbers and the other rungs are comparable to them.
@@ -987,8 +987,8 @@ curve at update 20.
   all-zero observation; that invalidated one of this round's own measurements.
 - **`observation_tensor()` costs ~49x `observation_tensor_into()`** (not the ~24x
   recorded). Any `rl_environment` built without `observations_as_numpy=True` pays it.
-- **`--nn_norm` is a no-op** under `--encoder=spatial`; `--separate_critic`
-  doubles the encoder forward *and* backward.
+- **`--separate_critic` doubles the encoder forward and backward.**
+  `--nn_norm` now reaches the spatial branch MLPs as well as the flat encoder.
 - **Re-check the compile targets** if the encoder or head entry points are
   refactored: `_encode_context` *and* `_pairs` both fall back to eager on any
   exception with only a warning. This trap has fired twice already.
@@ -1020,55 +1020,48 @@ curve at update 20.
 Nothing below is in flight. Items 6/6b are explicitly out of scope this cycle;
 Item 8 is queued behind a decision that has not been made.
 
-### 7. Pointer/attention head — SHIPPED, and a null result on the ladder
+### 7. Pointer/attention head — REMOVED (was a null result)
 
-> **Status: landed behind `--spatial_pointer` (default off), trained, and rated — it did not
-> move the ladder. Keep this section for the traps, not as queued work.** What was measured
-> when it landed:
+> **Status: this feature was built, trained, rated, and then DELETED. Do not go
+> looking for `TypedPointerActorHead`, `SpatialFactoredActorHead`, a
+> `--spatial_pointer` flag, `logits_for`, `forward_with_context`, or
+> `PointerContext` — none of them exist anymore. The current head is always a
+> plain `FactoredActorHead` (flat `nn.Linear` when `--factored_actions=False`).**
 >
-> | check | result |
-> |---|---|
-> | `ActionFactorization.cell_id` populated | 7,650 / 11,117 actions, range [-1, 224] |
-> | Cell-routing acceptance test | boosting cell 42 moves colony-actions targeting **cell 42 by 0.0448** vs **cell 100 by 0.0021** — **ratio 21.25** (was 0.60) |
-> | `--spatial_pointer=False` unchanged | logits / value / features **bit-identical** to `git HEAD` on `runs/roster/main.pt` (`max\|diff\|=0.000e+00`) |
-> | Test suites | `action_factors_test`, `ppo_pytorch_test`, `ppo_win_test`, `ppo_sparse_act_test`, `ppo_league_test`, `ppo_selfplay_pytorch_test`, `league_test` — all OK |
+> What it was, so the history stays readable: a "typed" actor head that, for
+> every action id (which already names its target entity), gathered the target
+> cell/unit/slot/seat embedding from the observation and scored that
+> (state, action) pair — a state-conditioned pointer mechanism. The spatial
+> encoder (default `--encoder=spatial`) used to expose those per-entity
+> embeddings as a second output; it now returns only the fused feature vector.
 >
-> Requires `--factored_actions` and `--encoder=spatial` (it raises otherwise — a flat trunk has
-> no per-cell features to point at). New pieces: `head_logits`/`shared_and_cells` (`ppo.py`),
-> `SpatialEclipseEncoder.forward_with_cells`, `SpatialFactoredActorHead`, and
-> `EclipsePPOAgent.dense_logits`. **Trap, documented on the class:** `SpatialFactoredActorHead`
-> inherits `rows_for`/`full_weight` from `FactoredActorHead` and those return the BASE term only
-> — anything checking `hasattr(head, "rows_for")` will think it has the complete weight. The
-> dense eval/ladder path must go through `dense_logits`, or the ladder would score a different
-> (base-only) policy than the one being trained.
+> Why it is gone: the routing *mechanism* was real and correct (the cell-boost
+> ratio went from 0.60 to 21.25), but **two separate ladders placed it inside
+> the CI of the same config, and their order flipped between runs — a textbook
+> null result.** It was not the binding constraint at this scale. The action
+> targets are fixed, indexed board cells (0..224), not a variable set of screen
+> pixels, so a pointer buys nothing here over a factored head that shares
+> weights across cells. This matches hide-and-seek's finding (encoder choice
+> ~9% of episodes, not pass/fail).
 >
-> `roster_ladder.py` threads `spatial_pointer` out of `arch.json` into `make_agent_fn`
-> (verified: a pointer roster rebuilds as `SpatialFactoredActorHead` with `logits_for`). Without
-> that thread the ladder rebuilds a base-only head and silently rates a *board-blind* policy
-> instead of the trained one — if you add another arch flag, thread it here too.
->
-> This has since been trained and judged — see the verdict immediately below.
-
-
-**Ladder verdict: the pointer head was a null result.** Two separate tournaments
-put it inside the CI of the same config without it, and their order flipped
-between ladders — which is what "no real difference" looks like. The routing
-*mechanism* is real and fixed (cell-boost ratio 0.60 → 21.25); it simply was not
-the binding constraint at this scale. OpenAI's hide-and-seek work corroborates
-this independently (encoder choice was ~9% of episodes for them, not pass/fail).
-Keep the trap notes above — they are live for anyone touching the dense/eval path
-— and do not build more spatial routing on the premise that this one paid off.
+> Keep the one residual lesson, not the head: the dense/eval path must score the
+> SAME policy that training uses. `roster_ladder.py` / `ffa_metagame.py` rebuild
+> nets from `arch.json` via `make_agent_fn`; any new arch flag that changes the
+> actor head must be threaded through there, or the ladder silently rates a
+> different policy than the one trained.
 
 ### 8. The ~22% blind actions — engine "which cell is unit u on" lookup (QUEUED — 100% gate before Item 6)
 
-**Known gap, must be fixed.** The pointer head (Item 7) only routes actions whose string carries a
-board coordinate. The following families carry **no hex coordinate** in their action strings, so
-their `cell_id = -1` and the agent stays blind to them:
+**Known gap, must be fixed.** The removed pointer head (see Item 7) was the only
+mechanism that routed an action to a board cell, and it only handled actions whose
+string carries a board coordinate. The current `FactoredActorHead` has no per-cell
+routing at all. The following families carry **no hex coordinate** in their action
+strings, so the agent stays blind to them:
 
 - `upgrade` (`UPGRADE_<ship>_SLOT<slot>_<part>` — ship/slot/part)
 - `move_unit` (`MOVE_UNIT_<unit>_<dir>`) and `move_warp` (`MOVE_UNIT_<unit>_WARP`)
 
-These are ~22% of actions. **Without a fix the agent is still partially blind even after Item 7**
+These are ~22% of actions. **Without a fix the agent is still partially blind**
 — it must act on "upgrade the ship that usually sits on cell 42 / move unit 7" without being told
 which hex that ship or unit occupies this game.
 
@@ -1076,24 +1069,25 @@ which hex that ship or unit occupies this game.
 > What is missing is the *action→cell routing*, not the underlying state. Unit positions **are**
 > in the observation: the galaxy block carries per-cell my/enemy/NPC ship counts and damage
 > (`observation.h`, block C), so the trunk can see where ships are. The defect is that
-> `MOVE_UNIT_7_E` names a unit and a direction rather than a hex, so the factorization cannot
-> assign it a `cell_id`, and the pointer head therefore has no per-cell term to add for it. The
-> practical consequence is the same as stated — those actions get no board-conditioned logit —
+> `MOVE_UNIT_7_E` names a unit and a direction rather than a hex, so the action id names no cell.
+> The practical consequence is the same as stated — those actions get no board-conditioned logit —
 > but the fix is a mapping from action id to the cell the unit currently occupies, not new
 > observation content. That also means it need not be an action-string change: a per-decision
 > `(action -> cell)` array supplied alongside the observation would do, which is likely cheaper
-> than threading coordinates through the engine's action naming.
+> than threading coordinates through the engine's action naming. Note the pointer head's per-cell
+> term was removed (Item 7), so today the *coordinate-bearing* families are not board-routed
+> either — this whole item is now the only path to any board-routed action logit.
 
 **The fix needs an engine-side lookup that does not exist today**: "which cell is unit/ship `u`
 on" (`upgrade`/`move_unit` reference unit ids, not coordinates). Thread the resolved cell into the
 action string (or into a parallel per-action array) so the factorization can set `cell_id`
 like the coordinate-bearing families already do.
 
-**Priority/when:** fix after the main pointer head (Item 7) proves out — Item 7 should land and be
-validated on the ladder first, and only then take on the engine-side lookup. But it is **required
-to reach 100% before Item 6 UI integration is picked up**: UI play-time integration must not
-start until both Items 7 *and* 8 are complete, so the policy the UI exposes is not partly blind.
-Item 6 remains out of scope this cycle regardless.
+**Priority/when:** the pointer head it was meant to complement (Item 7) was removed as a null
+result, so this is no longer gated on it — but it is still a real gap on its own and is
+**required to reach full board-awareness before Item 6 UI integration is picked up**: UI play-time
+integration must not start until Item 6's prerequisite coverage is complete, so the policy the UI
+exposes is not partly blind. Item 6 remains out of scope this cycle regardless.
 
 #### Engine ground truth (investigated 2026-08-07, with citations)
 
@@ -1104,7 +1098,7 @@ The 22% splits into two genuinely different problems, and only one of them is a 
 | `upgrade` | 1600 | 14.4% | **not spatial — exclude by design** |
 | `move_unit` | 768 | 6.9% | spatial, needs dynamic lookup |
 | `move_warp` (unit-select) | 128 | 1.2% | spatial, source cell only |
-| `MOVE_WARP_TO_<q>_<r>` | 225 | 2.0% | already coordinate-bearing → already fixed by Item 7 (`warp_dest`) |
+| `MOVE_WARP_TO_<q>_<r>` | 225 | 2.0% | coordinate-bearing (names a cell directly); no lookup needed |
 
 - **`upgrade` targets a blueprint, not a hex.** `execute_upgrade` (`systems/actions/upgrade.cpp:178-188`)
   edits `player.blueprints[static_cast<size_t>(ship_type)]` — one template per ship *class*, shared
@@ -1148,23 +1142,23 @@ ignores a trailing block). All three current rosters are `encoder=spatial`, so a
 3. **`action_factors.py`**: for `move_unit`/`move_warp`, record the `unit_idx` (and direction) in a
    parallel array, the same way `cell_id` is recorded — but resolved per-row at forward time, not
    statically.
-4. **`SpatialFactoredActorHead`**: generalize the cell index from `cell_id[col]` (static) to a
-   per-row resolution `cell_of(row, col)`, reading `UNIT_CELLS` out of the observation for move
-   families and falling back to the static `cell_id` for the coordinate-bearing ones. The
-   `(row, col)` gather in `logits_for` already has the right shape for this — this is the change
-   Item 7's design anticipated.
+4. **Actor**: consume `UNIT_CELLS` so `move_unit`/`move_warp` logits are conditioned on the hex a
+   unit currently occupies. With the pointer head gone (Item 7), the current `FactoredActorHead`
+   has no per-cell routing at all, so this is a fresh, self-contained change: resolve, per row, the
+   cell of each unit action (static `cell_id` where the action names a cell, else the new
+   `UNIT_CELLS` lookup) and feed it into the factored logit. Do not resurrect the old
+   `SpatialFactoredActorHead`/`logits_for` machinery — redesign around the factored head.
 5. **Point at the SOURCE cell first** (ponytail). Destination pointing (`GetAdjacency`) is likely
    more informative for "should I move *into* that hex", but costs 768 adjacency calls per
    observation instead of 128 lookups, and needs the warped-universe topology. Ship source-cell
    routing, measure, and only add destination if the ladder says moves are still the weak spot.
 
-**Acceptance check** (mirror Item 7's): with two units on different hexes, boosting one unit's hex
-must move that unit's `MOVE_UNIT_<i>_*` logits substantially more than the other's — and
-`--spatial_pointer=False` must stay bit-identical.
+**Acceptance check:** with two units on different hexes, boosting one unit's hex must move that
+unit's `MOVE_UNIT_<i>_*` logits substantially more than the other's.
 
-**Sequencing:** do not start until the Item 7 ladder verdict is in. If the pointer head does not
-move the rating, a second spatial-routing change is not the right next bet, and this work would be
-building on an unvalidated premise.
+**Sequencing:** this is no longer gated on the (removed, null-result) pointer head — the gap is a
+real, self-contained defect in the current factored head. Implement it standalone and gate on the
+ladder before considering any further spatial-routing change.
 
 
 ### 6. Play-time search + the UI opponent — OUT OF SCOPE THIS CYCLE (design notes kept, do not pick up)
@@ -1234,7 +1228,7 @@ which play-time search never re-resolves.
   This gives thread-parallel rollouts + virtual-loss for free, and solves the "can we parallelize
   the UCB-seq rollouts" question: keep selection sequential, batch the per-leaf evaluations.
 - `EclipsePPOAgent.dense_logits(x)` — the (B, num_actions) eval/argmax
-  entry point; routes through `SpatialFactoredActorHead` for spatial/factored configs (else plain
+  entry point; runs `self.actor` (the shared trunk + `FactoredActorHead`)
   `self.actor`). Relation to `get_action_and_value` (line 910): that does
   `CategoricalMasked(...).sample()`; single-state rollout just needs `dense_logits` + mask.
 - Raw-state obs: `state.observation_tensor()` (template: `alpha_zero/evaluator.py`) →
