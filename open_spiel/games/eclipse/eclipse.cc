@@ -2211,11 +2211,13 @@ void EclipseState::AdvanceUpkeepState() {
       }
 
       // Capture the score *before* flagging elimination and stripping the
-      // player's components: compute_all_player_scores skips eliminated seats,
-      // and RemovePlayerFromBoard would zero the board-derived VP anyway.
+      // player's components. Future score reads restore this snapshot because
+      // RemovePlayerFromBoard zeroes the board-derived VP.
       // Rulebook (PLAYER ELIMINATION): "Eliminated players count their score."
+      eclipse_state_.eliminated_score_breakdowns[player_id] =
+          compute_player_score(eclipse_state_, player_id);
       player.vp_at_elimination =
-          compute_player_score(eclipse_state_, player_id).total_vp;
+          eclipse_state_.eliminated_score_breakdowns[player_id].total_vp;
       player.eliminated = true;
       player.has_passed = true;
       RemovePlayerFromBoard(eclipse_state_, player_id);

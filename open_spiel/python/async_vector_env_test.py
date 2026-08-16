@@ -26,6 +26,7 @@ import numpy as np
 import pyspiel
 from open_spiel.python import rl_environment
 from open_spiel.python.async_vector_env import AsyncVectorEnv
+from open_spiel.python.eclipse import obs_layout
 
 
 def _game_string(seed):
@@ -166,6 +167,58 @@ class AsyncVectorEnvTest(absltest.TestCase):
       self.assertIs(seen[1].obs, seen[3].obs)
     finally:
       vec.close()
+
+  def test_terminal_fields_are_captured_before_auto_reset(self):
+    num_envs = 2
+    columns = list(range(
+        obs_layout.player_block_start(0) + obs_layout.P_VP_BREAKDOWN,
+        obs_layout.player_block_start(0) + obs_layout.P_VP_BREAKDOWN + 9))
+    envs = [_make_env(30 + i) for i in range(num_envs)]
+    vec = AsyncVectorEnv(
+        envs, num_workers=1, sampler_seeds=[30, 31],
+        game_strs=[_game_string(30), _game_string(31)],
+        terminal_obs_indices=columns)
+    reference = [_make_env(30 + i) for i in range(num_envs)]
+    for env in reference:
+      env.reset(players="current")
+    vec.reset(players="current")
+    arrays = vec.reset_np()
+    terminals = 0
+    try:
+      for _ in range(800):
+        counts = np.bincount(arrays.legal_rows, minlength=num_envs)
+        offsets = np.zeros(num_envs, dtype=np.int64)
+        np.cumsum(counts[:-1], out=offsets[1:])
+        actions = np.asarray([
+            arrays.legal_cols[offsets[i]] for i in range(num_envs)
+        ], dtype=np.int32)
+        next_ref = [reference[i].step([int(actions[i])], players="current")
+                    for i in range(num_envs)]
+        arrays = vec.step_np(actions, reset_if_done=True)
+        for i, time_step in enumerate(next_ref):
+          self.assertEqual(bool(arrays.dones[i]), time_step.last())
+          if not time_step.last():
+            continue
+          terminals += 1
+          expected = np.stack([
+              np.asarray(time_step.observations["info_state"][seat])[columns]
+              for seat in range(4)
+          ])
+          np.testing.assert_array_equal(arrays.terminal_obs[i], expected)
+          scales = np.asarray(
+              [30, 10, 30, 20, 20, 20, 4, 20, 20], dtype=np.float32)
+          component_totals = np.rint(expected * scales).sum(axis=1)
+          # Returns may add a sub-VP resource tiebreaker; integer parts must be
+          # the captured category sum (negative eliminated totals clamp to 0).
+          np.testing.assert_array_equal(
+              np.asarray(arrays.rewards[i], dtype=np.int32),
+              np.maximum(component_totals, 0).astype(np.int32))
+          next_ref[i] = reference[i].reset(players="current")
+        if terminals >= num_envs:
+          break
+    finally:
+      vec.close()
+    self.assertGreaterEqual(terminals, num_envs)
 
 
 if __name__ == "__main__":

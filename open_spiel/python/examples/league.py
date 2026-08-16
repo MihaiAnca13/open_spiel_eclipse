@@ -298,8 +298,8 @@ class Matchmaker(object):
   def sample_lineup(self):
     """One (num_players,) lineup of policy ids.
 
-    Mixed lineups always keep ``train_pid`` on seat 0 (so main always learns
-    from that env); the remaining seats draw opponents, occasionally main.
+    Mixed lineups always include ``train_pid`` so the environment contributes
+    training rows, then shuffle seats to avoid a persistent turn-order bias.
     """
     if self.rng.rand() < self.selfplay_fraction:
       return [self.train_pid] * self.num_players
@@ -310,6 +310,7 @@ class Matchmaker(object):
         picks.append(str(self.rng.choice(opponents, size=1)[0]))
       else:
         picks.append(self.train_pid)
+    self.rng.shuffle(picks)
     return picks
 
   def lineups(self):

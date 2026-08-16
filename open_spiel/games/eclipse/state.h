@@ -206,6 +206,11 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(UpkeepState, step, player_id, pending_returns
 
 struct State {
     FixedVector<Player, MAX_PLAYERS> players;
+    // Score components captured before elimination removes board pieces. This
+    // is the exact decomposition of Player::vp_at_elimination used by terminal
+    // observations and auxiliary value targets.
+    std::array<open_spiel::eclipse::PlayerScoreBreakdown, MAX_PLAYERS>
+        eliminated_score_breakdowns{};
     Galaxy galaxy;
     FixedVector<ReputationTiles, 40> reputation_tiles;
     FixedVector<Unit, 128> unit_registry;
@@ -370,6 +375,7 @@ inline void to_json(nlohmann::json& j, const State& s) {
 
     j = nlohmann::json{
         {"players", s.players},
+        {"eliminated_score_breakdowns", s.eliminated_score_breakdowns},
         {"galaxy", s.galaxy},
         {"reputation_tiles", s.reputation_tiles},
         {"unit_registry", s.unit_registry},
@@ -412,6 +418,7 @@ inline void to_json(nlohmann::json& j, const State& s) {
 
 inline void from_json(const nlohmann::json& j, State& s) {
     j.at("players").get_to(s.players);
+    j.at("eliminated_score_breakdowns").get_to(s.eliminated_score_breakdowns);
     j.at("galaxy").get_to(s.galaxy);
     j.at("reputation_tiles").get_to(s.reputation_tiles);
     j.at("unit_registry").get_to(s.unit_registry);

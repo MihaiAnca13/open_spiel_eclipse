@@ -26,7 +26,6 @@ All equations and variable names correspond to the following paper:
 import numpy as np
 import scipy.linalg as la
 
-from open_spiel.python.egt import alpharank_visualizer
 from open_spiel.python.egt import utils
 
 
@@ -554,6 +553,7 @@ def sweep_pi_vs_epsilon(payoff_tables,
   pi_list = np.asarray(pi_list)
 
   if visualize:
+    from open_spiel.python.egt import alpharank_visualizer
     if strat_labels is None:
       strat_labels = utils.get_strat_profile_labels(payoff_tables,
                                                     payoffs_are_hpt_format)
@@ -671,6 +671,7 @@ def sweep_pi_vs_alpha(payoff_tables,
         break
 
   if visualize:
+    from open_spiel.python.egt import alpharank_visualizer
     if strat_labels is None:
       strat_labels = utils.get_strat_profile_labels(payoff_tables,
                                                     payoffs_are_hpt_format)
@@ -708,6 +709,8 @@ def compute_and_report_alpharank(payoff_tables,
   Returns:
     pi: AlphaRank stationary distribution/rankings.
   """
+  from open_spiel.python.egt import alpharank_visualizer
+
   payoffs_are_hpt_format = utils.check_payoffs_are_hpt(payoff_tables)
   rhos, rho_m, pi, _, _ = compute(payoff_tables, m=m, alpha=alpha)
   strat_labels = utils.get_strat_profile_labels(payoff_tables,

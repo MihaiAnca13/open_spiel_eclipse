@@ -147,6 +147,18 @@ class MatchmakerTest(absltest.TestCase):
       self.assertIn("main", ids)
       self.assertIn("snap_u2", ids)
 
+  def test_mixed_lineups_balance_main_across_seats(self):
+    with tempfile.TemporaryDirectory() as d:
+      roster = PolicyRoster(d)
+      roster.record_main(_TinyNet(5), update=1)
+      roster.add_snapshot(_TinyNet(5), update=2)
+      mm = Matchmaker(roster, num_envs=4000, num_players=4, train_pid="main",
+                      selfplay_fraction=0.0, old_fraction=0.0, seed=5)
+      counts = np.sum(mm.lineups() == "main", axis=0)
+      self.assertLess(
+          int(counts.max() - counts.min()), 100,
+          f"main policy remains seat-skewed: {counts.tolist()}")
+
   def test_live_opponent_set_is_bounded_but_still_covers_the_roster(self):
     """A batch may hold few distinct opponents; the run must still see them all.
 

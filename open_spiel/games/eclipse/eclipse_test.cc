@@ -2392,10 +2392,12 @@ void ScoringEliminatedPlayerCountsSnapshotTest() {
   ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
   s.players[0].ambassador_tiles_held = 3;
   s.players[0].discovery_vp_tiles_kept = 2;
-  const int16_t alive_total = compute_player_score(s, 0).total_vp;
+  const PlayerScoreBreakdown alive_score = compute_player_score(s, 0);
+  const int16_t alive_total = alive_score.total_vp;
   SPIEL_CHECK_EQ(alive_total, 7);  // 3 ambassadors + 2 tiles x 2 VP
 
   // Eliminate: snapshot first (as the upkeep bankruptcy path does), then strip.
+  s.eliminated_score_breakdowns[0] = alive_score;
   s.players[0].vp_at_elimination = alive_total;
   s.players[0].eliminated = true;
   s.players[0].ambassador_tiles_held = 0;
@@ -2403,6 +2405,10 @@ void ScoringEliminatedPlayerCountsSnapshotTest() {
 
   auto returns = evaluate_final_returns(s);
   SPIEL_CHECK_EQ(returns[0], static_cast<double>(alive_total));
+  const PlayerScoreBreakdown restored_score = compute_player_score(s, 0);
+  SPIEL_CHECK_EQ(restored_score.ambassador_vp, 3);
+  SPIEL_CHECK_EQ(restored_score.discovery_vp, 4);
+  SPIEL_CHECK_EQ(restored_score.total_vp, alive_total);
 
   // A negative snapshot (traitor penalty) is clamped so MinUtility() holds.
   s.players[0].vp_at_elimination = -2;
@@ -2417,6 +2423,9 @@ void ScoringEliminationSerializationTest() {
   ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
   s.players[0].vp_at_elimination = 9;
   s.players[0].eliminated = true;
+  s.eliminated_score_breakdowns[0].ambassador_vp = 3;
+  s.eliminated_score_breakdowns[0].discovery_vp = 6;
+  s.eliminated_score_breakdowns[0].total_vp = 9;
 
   // ::Player is the eclipse struct; unqualified Player is open_spiel::Player
   // (an int alias) inside this namespace.
@@ -2424,6 +2433,12 @@ void ScoringEliminationSerializationTest() {
   ::Player restored = j.get<::Player>();
   SPIEL_CHECK_EQ(restored.vp_at_elimination, 9);
   SPIEL_CHECK_TRUE(restored.eliminated);
+
+  nlohmann::json state_json = s;
+  ::State restored_state = state_json.get<::State>();
+  SPIEL_CHECK_EQ(restored_state.eliminated_score_breakdowns[0].ambassador_vp, 3);
+  SPIEL_CHECK_EQ(restored_state.eliminated_score_breakdowns[0].discovery_vp, 6);
+  SPIEL_CHECK_EQ(restored_state.eliminated_score_breakdowns[0].total_vp, 9);
 
   // And it reaches the payoff through evaluate_final_returns.
   ::State t = s;

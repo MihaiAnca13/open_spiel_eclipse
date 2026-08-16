@@ -147,8 +147,12 @@ std::array<PlayerScoreBreakdown, MAX_PLAYERS> compute_all_player_scores(const ::
 
     // Per-player components that don't touch the galaxy / unit registry.
     for (size_t i = 0; i < num_players; ++i) {
-        if (state.players[i].eliminated) continue;
-        AddPlayerStaticComponents(scores[i], state.players[i], active_ancients_count);
+        if (state.players[i].eliminated) {
+            scores[i] = state.eliminated_score_breakdowns[i];
+        } else {
+            AddPlayerStaticComponents(scores[i], state.players[i],
+                                      active_ancients_count);
+        }
     }
 
     return scores;

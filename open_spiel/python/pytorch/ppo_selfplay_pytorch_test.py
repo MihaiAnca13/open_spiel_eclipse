@@ -188,6 +188,24 @@ class PPOSelfPlayTest(absltest.TestCase):
       agent.learn(time_step)
     self.assertGreater(boundaries_checked, 0)
 
+  def test_batch_boundary_never_bootstraps_from_another_seat(self):
+    agent = PPO(input_shape=(4,), num_actions=3, num_players=2, num_envs=1,
+                steps_per_batch=4, num_minibatches=1, gamma=1.0,
+                gae_lambda=1.0, device="cpu", agent_fn=PPOAgent)
+    agent.players[:, 0] = torch.tensor([0, 1, 0, 1])
+    agent.values[:, 0] = torch.tensor([10.0, 20.0, 30.0, 40.0])
+    agent.rewards.zero_()
+    agent.dones.zero_()
+
+    returns = agent._compute_returns(torch.tensor([100.0]),
+                                     np.array([0], dtype=np.int32))
+
+    # Seat 0 owns the next observation and may bootstrap from 100. Seat 1's
+    # boundary row is neutral; its preceding row chains through value 40, not
+    # through seat 0's value 100.
+    torch.testing.assert_close(returns[:, 0],
+                               torch.tensor([100.0, 40.0, 100.0, 40.0]))
+
 
 class _SparseDummy(torch.nn.Module):
   """Minimal shared-trunk network, enough for PPO's buffer bookkeeping."""

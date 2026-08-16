@@ -34,6 +34,7 @@ from open_spiel.python import rl_environment
 from open_spiel.python.pytorch.ppo import PPO
 from open_spiel.python.pytorch.ppo import layer_init
 from open_spiel.python.pytorch.ppo import rank_utility
+from open_spiel.python.pytorch.ppo import rank_distribution
 from open_spiel.python.pytorch.ppo import rank_of
 from open_spiel.python.pytorch.ppo import vp_bonus_cap
 from open_spiel.python.pytorch.ppo import DEFAULT_RANK_UTILITY
@@ -208,12 +209,16 @@ class DistributionalCriticTest(absltest.TestCase):
     agent.learn_np(np.zeros((2, 6), dtype=np.float32), np.zeros(2, np.int32))
     return agent.last_metrics
 
-  def test_rank_labels_are_realized_placements(self):
+  def test_rank_labels_average_tied_placements(self):
     agent = self._agent(0.5)
     for vec in ([10, 20, 30, 40], [0, 0, 0, 0], [40, 40, 10, 5]):
       got = [agent._terminal_rank(vec, s) for s in range(4)]
-      expected = [min(rank_of(vec, s) - 1, 3) for s in range(4)]
-      self.assertEqual(got, expected)
+      expected = [rank_distribution(vec, s) for s in range(4)]
+      np.testing.assert_allclose(got, expected)
+      for seat in range(4):
+        self.assertAlmostEqual(
+            float(np.dot(got[seat], DEFAULT_RANK_UTILITY)),
+            rank_utility(vec, seat))
 
   def test_cross_entropy_only_active_when_enabled(self):
     off = self._run_batch(self._agent(0.0))
@@ -228,6 +233,39 @@ class DistributionalCriticTest(absltest.TestCase):
     self._run_batch(agent)
     # Rows are overwritten next batch, so stale labels must not survive.
     self.assertEqual(float(agent.rank_label_mask.sum()), 0.0)
+
+
+class TerminalAuxTargetTest(absltest.TestCase):
+
+  def _agent(self):
+    from open_spiel.python.examples.ppo_eclipse import build_aux_targets
+    from open_spiel.python.examples.ppo_eclipse import make_agent_fn
+    tasks, target_fn = build_aux_targets("breakdown", 30.0)
+    return PPO(
+        input_shape=(6,), num_actions=3, num_players=2, num_envs=1,
+        steps_per_batch=2, num_minibatches=1, device="cpu",
+        agent_fn=make_agent_fn(8, 1, tasks), value_mode="win",
+        aux_tasks=tasks, aux_target_fn=target_fn)
+
+  def test_exact_terminal_targets_are_required_and_backfilled(self):
+    agent = self._agent()
+    agent.players_cpu[0, 0] = 0
+    agent.trainable_cpu[0, 0] = True
+    agent.trainable[0, 0] = True
+    targets = np.arange(18, dtype=np.float32).reshape(1, 2, 9)
+    agent.post_step_np(
+        np.zeros((1, 2), dtype=np.float32), np.ones(1, dtype=bool),
+        terminal_aux=targets)
+    np.testing.assert_array_equal(agent.aux_targets[0, 0].numpy(), targets[0, 0])
+    np.testing.assert_array_equal(agent.aux_mask[0, 0].numpy(), np.ones(9))
+
+    missing = self._agent()
+    missing.players_cpu[0, 0] = 0
+    missing.trainable_cpu[0, 0] = True
+    missing.trainable[0, 0] = True
+    with self.assertRaisesRegex(ValueError, "were not captured"):
+      missing.post_step_np(
+          np.zeros((1, 2), dtype=np.float32), np.ones(1, dtype=bool))
 
 
 class PPOWinValueTest(absltest.TestCase):

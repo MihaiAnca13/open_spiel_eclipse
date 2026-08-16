@@ -46,13 +46,25 @@ namespace open_spiel {
             };
         }
 
+        inline void from_json(const nlohmann::json& j, PlayerScoreBreakdown& sb) {
+            sb.reputation_vp = j.value("reputation_vp", 0);
+            sb.ambassador_vp = j.value("ambassador_vp", 0);
+            sb.sector_vp = j.value("sector_vp", 0);
+            sb.monolith_vp = j.value("monolith_vp", 0);
+            sb.discovery_vp = j.value("discovery_vp", 0);
+            sb.tech_track_vp = j.value("tech_track_vp", 0);
+            sb.traitor_vp = j.value("traitor_vp", 0);
+            sb.species_vp = j.value("species_vp", 0);
+            sb.minor_species_vp = j.value("minor_species_vp", 0);
+            sb.total_vp = j.value("total_vp", 0);
+        }
+
         // Computes absolute total and itemized breakdown values for a specific player
         PlayerScoreBreakdown compute_player_score(const ::State& state, uint8_t player_id);
 
-        // Computes all live players' scores in one pass (one unit-registry walk
-        // and one galaxy scan shared across seats) instead of re-scanning per
-        // player. Used by the observation tensor, which needs every seat's live
-        // VP every decision.
+        // Computes live scores in one pass and restores the captured component
+        // breakdown for eliminated players. Used by the observation tensor,
+        // which needs every seat's score every decision.
         std::array<PlayerScoreBreakdown, MAX_PLAYERS> compute_all_player_scores(const ::State& state);
 
         // Populates raw utility vector for Open Spiel interface (State::Returns())

@@ -54,6 +54,7 @@ import traceback
 import numpy as np
 
 from open_spiel.python import rl_environment
+from open_spiel.python.rl_agent import StepOutput
 from open_spiel.python.rl_environment import StepType
 from open_spiel.python.rl_environment import TimeStep
 from open_spiel.python.vector_env import SyncVectorEnv
@@ -61,7 +62,8 @@ from open_spiel.python.vector_env import SyncVectorEnv
 
 class _StepArrays(
     collections.namedtuple("StepArrays", [
-        "obs", "seats", "legal_rows", "legal_cols", "rewards", "dones"
+        "obs", "seats", "legal_rows", "legal_cols", "rewards", "dones",
+        "terminal_obs"
     ])):
   """Array-native step payload for the vectorized interface.
 
@@ -72,6 +74,8 @@ class _StepArrays(
     legal_cols: (M,) int64 - legal action id for each.
     rewards: (num_envs, num_players) float32.
     dones: (num_envs,) bool.
+    terminal_obs: optional (num_envs, num_players, num_fields) float32 values
+      selected from each seat's true terminal observation before auto-reset.
   """
 
 
@@ -84,7 +88,8 @@ class AsyncVectorEnv(object):
                sampler_seeds=None,
                max_legal=None,
                game_str=None,
-               game_strs=None):
+               game_strs=None,
+               terminal_obs_indices=None):
     """Constructor.
 
     Args:
@@ -109,6 +114,10 @@ class AsyncVectorEnv(object):
         ``envs``), used when each environment should be built from a different
         configuration (e.g. per-env ``rng_seed``). Takes precedence over
         ``game_str``.
+      terminal_obs_indices: optional observation columns copied for every seat
+        at terminal states before workers reset the environment. This avoids
+        transporting a full terminal observation when only a few labels are
+        needed.
     """
     if not isinstance(envs, list) or not envs:
       raise ValueError("Need a non-empty list of rl_environment.Environment")
@@ -134,6 +143,13 @@ class AsyncVectorEnv(object):
       raise ValueError(
           f"game_strs must have length num_envs ({self.num_envs}), got "
           f"{len(self._game_strs)}")
+    self._terminal_obs_indices = np.asarray(
+        terminal_obs_indices if terminal_obs_indices is not None else [],
+        dtype=np.int32)
+    if (self._terminal_obs_indices < 0).any() or (
+        self._terminal_obs_indices >= self.obs_size).any():
+      raise ValueError(
+          "terminal_obs_indices contains an invalid observation column")
     self._sampler_seeds = sampler_seeds
     # Width of the shared legal-action buffer. Defaults to the full action
     # space: any smaller value silently truncates legal sets at decision nodes
@@ -175,6 +191,13 @@ class AsyncVectorEnv(object):
                                np.float32)
     self.done_buf = self._alloc("done", (num_envs,), np.uint8)
     self.cur_buf = self._alloc("current", (num_envs,), np.int32)
+    self.terminal_obs_buf = None
+    if self._terminal_obs_indices.size:
+      self.terminal_obs_buf = self._alloc(
+          "terminal_obs",
+          (num_envs, self.num_players, self._terminal_obs_indices.size),
+          np.float32)
+      self.terminal_obs_buf.fill(0.0)
     # Destination generations for _collect(), allocated lazily on first use so
     # the fork below copies as little parent heap as possible.
     #
@@ -204,7 +227,8 @@ class AsyncVectorEnv(object):
           args=(start, count, self.num_players, games,
                 self._max_legal, self.obs_size, seeds, self.action_buf,
                 self.obs_buf, self.legal_buf, self.legal_len, self.rew_buf,
-                self.done_buf, self.cur_buf, go, done))
+                self.done_buf, self.cur_buf, self.terminal_obs_buf,
+                self._terminal_obs_indices, go, done))
       p.start()
       self._worker_procs.append(p)
 
@@ -376,28 +400,30 @@ class AsyncVectorEnv(object):
     ``obs`` is 38.5 MB at 256 envs and mmap'ing + first-touching that many pages
     every step cost ~65% of the copy (5.97 ms vs 2.11 ms measured at 256 envs).
 
-    Two generations, not one, because the PPO loop legitimately reads the
-    PREVIOUS step's observations after the current step has been collected --
-    ``last_obs_batch`` feeds ``_terminal_obs_for`` during ``post_step_np``. It
-    never reaches back further than that (``_last_decision`` takes its own
-    per-env copies for anything it must keep longer), so depth 2 is exact: the
-    generation being overwritten here is already unreferenced.
+    Two generations, not one, because the PPO loop overlaps worker stepping
+    with bookkeeping over the previous observation batch. It never reaches
+    back further than that, so depth 2 is exact: the generation being
+    overwritten here is already unreferenced.
     """
     rows, cols = self._legal_indices()
     if self._collect_bufs is None:
       self._collect_bufs = [
           (self._alloc_obs_dest(), np.empty_like(self.cur_buf),
-           np.empty_like(self.rew_buf), np.empty((self.num_envs,), dtype=bool))
+           np.empty_like(self.rew_buf), np.empty((self.num_envs,), dtype=bool),
+           (None if self.terminal_obs_buf is None else
+            np.empty_like(self.terminal_obs_buf)))
           for _ in range(2)
       ]
-    obs, seats, rew, done = self._collect_bufs[self._collect_gen]
+    obs, seats, rew, done, terminal_obs = self._collect_bufs[self._collect_gen]
     self._collect_gen ^= 1
     np.copyto(obs, self.obs_buf)
     np.copyto(seats, self.cur_buf)
     np.copyto(rew, self.rew_buf)
     np.not_equal(self.done_buf, 0, out=done)
+    if terminal_obs is not None:
+      np.copyto(terminal_obs, self.terminal_obs_buf)
     return _StepArrays(obs=obs, seats=seats, legal_rows=rows, legal_cols=cols,
-                       rewards=rew, dones=done)
+                       rewards=rew, dones=done, terminal_obs=terminal_obs)
 
   def _obs_lock(self):
     return self.__dict__.setdefault("_buf_lock", threading.Lock())
@@ -457,7 +483,8 @@ class AsyncVectorEnv(object):
 
 def _worker_main(start, count, num_players, games, max_legal, obs_size,
                  seeds, action_buf, obs_buf, legal_buf, legal_len, rew_buf,
-                 done_buf, cur_buf, go, done):
+                 done_buf, cur_buf, terminal_obs_buf, terminal_obs_indices,
+                 go, done):
   """Worker process body: owns a shard of ``SyncVectorEnv``."""
   envs = []
   for i in range(count):
@@ -506,12 +533,21 @@ def _worker_main(start, count, num_players, games, max_legal, obs_size,
     t0 = time.perf_counter()
     go.acquire()
     t1 = time.perf_counter()
-    outs = []
-    for i in range(count):
-      outs.append(type("SO", (), {"action": int(action_buf[start + i])})())
+    outs = [StepOutput(action=int(action_buf[start + i]), probs=None)
+            for i in range(count)]
     try:
-      ts, reward, done_list, _ = vec.step(outs, reset_if_done=True,
-                                          players="current")
+      terminal_steps, reward, done_list, _ = vec.step(
+          outs, reset_if_done=False, players="current")
+      if terminal_obs_buf is not None:
+        terminal_obs_buf[start:start + count].fill(0.0)
+        for i, is_done in enumerate(done_list):
+          if not is_done:
+            continue
+          rows = terminal_steps[i].observations["info_state"]
+          for seat in range(num_players):
+            terminal_obs_buf[start + i, seat, :] = np.asarray(
+                rows[seat], dtype=np.float32)[terminal_obs_indices]
+      ts = vec.reset(envs_to_reset=done_list, players="current")
       t2 = time.perf_counter()
       publish(ts, done_list, reward)
     except BaseException:

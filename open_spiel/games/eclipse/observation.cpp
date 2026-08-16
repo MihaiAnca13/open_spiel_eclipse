@@ -285,7 +285,11 @@ void WriteObservationTensor(const ::State& state, int player, int num_players,
     o += kMaxSeats + 1;
 
     const PlayerScoreBreakdown& sb = scores[seat];
-    Frac(values, o++, static_cast<float>(sb.total_vp), 60.0f);
+    // An eliminated snapshot total can be negative (traitor -2); clamp it to
+    // match the clamped vp_at_elimination column below and the returns path.
+    const int16_t live_total_vp =
+        p.eliminated ? std::max<int16_t>(sb.total_vp, 0) : sb.total_vp;
+    Frac(values, o++, static_cast<float>(live_total_vp), 60.0f);
     Frac(values, o++, static_cast<float>(sb.reputation_vp), 30.0f);
     Frac(values, o++, static_cast<float>(sb.ambassador_vp), 10.0f);
     Frac(values, o++, static_cast<float>(sb.sector_vp), 30.0f);
