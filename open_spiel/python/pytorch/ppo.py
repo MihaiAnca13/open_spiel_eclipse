@@ -1612,15 +1612,57 @@ class PPO(nn.Module):
     the shared features for the batch. Returns (M,) logits."""
     return head_logits(head, features, rows, cols)
 
+  # Reusable device scratch for the per-step Gumbel/segment kernels below.
+  # `_act_sparse`/`_sparse_minibatch` call these on a fixed `batch_size` many
+  # times per update (128 steps/update on the launch-latency-bound small act
+  # path), and every local tensor they used to allocate was another cudaMalloc
+  # plus a fill kernel on the critical path. The buffers are grown-on-demand to
+  # the largest `batch_size` seen and RE-FILLED in place before every use
+  # (fill_-/rand_), so reused state can never leak and the values are
+  # bit-identical to the fresh-allocation version (same RNG stream, same math).
+  def _seg_scratch(self, batch_size):
+    cache = getattr(self, "_seg_scratch_c", None)
+    if cache is None:
+      cache = self._seg_scratch_c = {}
+    s = cache.get(batch_size)
+    if s is not None:
+      return s
+    dev = self.device
+    s = {
+        "m": torch.full((batch_size,), float("-inf"), device=dev),
+        "s": torch.zeros(batch_size, device=dev),
+        "num": torch.zeros(batch_size, device=dev),
+        "mx": torch.full((batch_size,), float("-inf"), device=dev),
+        "chosen": torch.empty(batch_size, dtype=torch.long, device=dev),
+    }
+    self._seg_scratch_c[batch_size] = s
+    return s
+
+  def _gumbel_rand(self, m):
+    """Reusable (m,) Gumbel-noise source on the device, grown on demand.
+
+    ``_gumbel_sample`` needs one random value per packed legal entry (``m``),
+    which vastly outnumbers env rows and varies step to step -- so this buffer
+    lives outside the batch-size-keyed scratch and is grown to the largest ``m``
+    seen, keeping per-step mallocs off the launch-bound act path. ``rand_()``
+    draws from the same global RNG stream as the old ``torch.rand``, so values
+    are bit-identical.
+    """
+    rng = getattr(self, "_gumbel_rand_buf", None)
+    if rng is None or rng.numel() < m:
+      rng = self._gumbel_rand_buf = torch.empty(m, device=self.device)
+    return rng[:m]
+
   def _segment_lse_entropy(self, logits_e, rows, batch_size):
     """Per-row logsumexp + entropy of the (masked) distribution given the
     (M,) logits of legal entries grouped contiguously by row."""
-    m = torch.full((batch_size,), float("-inf"), device=self.device)
+    sc = self._seg_scratch(batch_size)
+    m = sc["m"].fill_(float("-inf"))
     m.scatter_reduce_(0, rows, logits_e, reduce="amax", include_self=False)
     e = (logits_e - m[rows]).exp()
-    s = torch.zeros(batch_size, device=self.device)
+    s = sc["s"].fill_(0.0)
     s.scatter_add_(0, rows, e)
-    num = torch.zeros(batch_size, device=self.device)
+    num = sc["num"].fill_(0.0)
     num.scatter_add_(0, rows, e * logits_e)
     # A row with no legal entries leaves m = -inf and s = 0, giving
     # lse = -inf and entropy = -inf - 0/0 = NaN, which poisons the whole loss.
@@ -1641,16 +1683,20 @@ class PPO(nn.Module):
     ``CategoricalMasked`` distribution without materializing the full
     (B, num_actions) logits. Returns (B,) chosen action ids.
     """
-    g = -torch.log(-torch.log(torch.rand(logits_e.shape, device=self.device)))
+    sc = self._seg_scratch(batch_size)
+    m = logits_e.shape[0]
+    # .uniform_(0,1) fills in place like torch.rand (there is no Tensor.rand_()
+    # in torch 2.11 -- that call raised AttributeError and crashed every act).
+    rand = self._gumbel_rand(m).uniform_(0, 1)
+    g = -torch.log(-torch.log(rand))
     u = logits_e + g
-    mx = torch.full((batch_size,), float("-inf"), device=self.device)
+    mx = sc["mx"].fill_(float("-inf"))
     mx.scatter_reduce_(0, rows, u, reduce="amax", include_self=False)
     maxima = (u == mx[rows])
     # Sentinel num_actions marks a row with an empty legal segment or NaN logits
     # (the bookkeeping slip documented at _segment_lse_entropy). Clamped below to
     # a valid index so the gather can never OOB; healthy rows keep a real col.
-    chosen = torch.full((batch_size,), self.num_actions, dtype=torch.long,
-                        device=self.device)
+    chosen = sc["chosen"].fill_(self.num_actions)
     mrows = rows[maxima]
     mcols = cols[maxima]
     if mrows.size(0):

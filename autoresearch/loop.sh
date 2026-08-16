@@ -38,7 +38,10 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AR_DIR="$ROOT/autoresearch"
 ENVS="${ENVS:-12}"
-SECONDS="${SECONDS:-60}"
+# NB: NOT "SECONDS" -- bash reserves SECONDS and auto-increments it each second,
+# so the wall-clock budget and the results filename drifted upward run-to-run.
+# BUDGET_SECS is a fixed, user-settable value shared with bench.sh.
+BUDGET_SECS="${BUDGET_SECS:-60}"
 RUN_PREFIX="${RUN_PREFIX:-/tmp/ar_wt/run}"
 MODEL="${MODEL:-vllm/deepseek-v4-flash}"
 STATE="$AR_DIR/.loop_state"
@@ -58,7 +61,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-RESULTS="$ROOT/results_${ENVS}env_${SECONDS}s.tsv"
+RESULTS="$ROOT/results_${ENVS}env_${BUDGET_SECS}s.tsv"
 NOTES="$AR_DIR/NOTES.md"
 OPENCODE="$(command -v opencode 2>/dev/null || echo "$HOME/.opencode/bin/opencode")"
 
@@ -86,9 +89,9 @@ objective() {
 cat <<EOF
 You are an autonomous research agent in a throughput-optimization loop. Your
 goal: make the Eclipse RL training/environment roll out MORE training env-steps
-within a fixed ${SECONDS}-second budget, without cheating or breaking real
+within a fixed ${BUDGET_SECS}-second budget, without cheating or breaking real
 learning. The score is score_steps (training steps reached in the budget); the
-number to beat is the best score_steps in results_${ENVS}env_${SECONDS}s.tsv.
+number to beat is the best score_steps in results_${ENVS}env_${BUDGET_SECS}s.tsv.
 
 Do EXACTLY ONE experiment this session, then exit:
 1. Read the results TSV (best so far) and NOTES.md (what was tried, where the
@@ -148,7 +151,7 @@ while [ "$EXPERIMENTS" -eq 0 ] || [ "$exp" -lt "$EXPERIMENTS" ]; do
 
   # ---- 2. Driver measures the commit with the immutable bench.sh ------------
   say "running bench.sh..."
-  BENCH_OUT="$($AR_DIR/bench.sh "$RUN_DIR" "$ENVS" "$SECONDS")"
+  BENCH_OUT="$($AR_DIR/bench.sh "$RUN_DIR" "$ENVS" "$BUDGET_SECS")"
   printf '%s\n' "$BENCH_OUT"
   THIS="$(echo "$BENCH_OUT" | sed -n 's/.*score_steps=\([0-9]*\).*/\1/p' | tail -1)"
   BEST="$(best_score)"

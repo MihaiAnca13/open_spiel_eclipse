@@ -57,7 +57,10 @@ MANIFEST="$AR_DIR/immutables.sha"
 
 RUN_DIR="${1:?usage: bench.sh <run_dir> [envs] [seconds]}"
 ENVS="${2:-12}"
-SECONDS="${3:-60}"
+# NB: NOT "SECONDS" -- that is a bash reserved auto-incrementing variable (counts
+# shell uptime); using it here made the wall-clock budget and results filename
+# drift upward with every experiment. BUDGET_SECS is a fixed, user-settable value.
+BUDGET_SECS="${3:-60}"
 # steps-per-update = envs x num_steps (must match the training invocation below).
 NUM_STEPS=128
 BATCH=$((ENVS * NUM_STEPS))
@@ -86,7 +89,7 @@ fi
 say "immutability gate passed"
 
 # ---- 2. Baseline record (first run always establishes the number to beat) ---
-RESULTS="$ROOT/results_${ENVS}env_${SECONDS}s.tsv"
+RESULTS="$ROOT/results_${ENVS}env_${BUDGET_SECS}s.tsv"
 if [ ! -f "$RESULTS" ]; then
   printf 'ts\tcommit\tbranch\tscore_steps\tupdates\tsteps_per_sec\tstatus\tdesc\n' > "$RESULTS"
 fi
@@ -94,13 +97,13 @@ fi
 # ---- 3. Run the experiment: 12 envs, fixed budget --------------------------
 COMMIT="$(git -C "$ROOT" rev-parse --short HEAD)"
 BRANCH="$(git -C "$ROOT" branch --show-current)"
-say "variant: commit=$COMMIT branch=$BRANCH envs=$ENVS budget=${SECONDS}s batch=${BATCH}/update"
+say "variant: commit=$COMMIT branch=$BRANCH envs=$ENVS budget=${BUDGET_SECS}s batch=${BATCH}/update"
 say "launching ppo_eclipse (roster -> $RUN_DIR)"
 
 export PYTHONPATH="build/open_spiel/python:$ROOT"
 START=$(date +%s)
 # 2x budget hard kill; the training loop itself also enforces --max_seconds.
-timeout $((SECONDS * 2 + 120)) \
+timeout $((BUDGET_SECS * 2 + 120)) \
   "$ROOT/.venv/bin/python" -m open_spiel.python.examples.ppo_eclipse \
   --game="eclipse(players=4)" \
   --num_envs="$ENVS" \
@@ -109,7 +112,7 @@ timeout $((SECONDS * 2 + 120)) \
   --num_minibatches=4 \
   --update_epochs=4 \
   --total_timesteps=100000000000 \
-  --max_seconds="$SECONDS" \
+  --max_seconds="$BUDGET_SECS" \
   --snapshot_every="${SNAPSHOT_EVERY:-25}" \
   --roster_dir="$RUN_DIR" \
   --run_dir="$RUN_DIR" \
@@ -186,7 +189,7 @@ say "throughput: steps=$steps updates=$update wall=${WALL}s steps_per_sec=$sps c
 echo "RESULT run=$RUN_DIR commit=$COMMIT score_steps=$steps updates=$update steps_per_sec=$sps"
 printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
   "$(date +%Y%m%d-%H%M%S)" "$COMMIT" "$BRANCH" "$steps" "$update" "$sps" "run" \
-  "crosscheck=${mismatch} budget=${SECONDS}s" >> "$RESULTS"
+  "crosscheck=${mismatch} budget=${BUDGET_SECS}s" >> "$RESULTS"
 
 echo "  recorded. Compare to the best score_steps in $RESULTS; the agent keeps this"
 echo "  commit only if score_steps > previous best (Karpathy keep/discard), and"
