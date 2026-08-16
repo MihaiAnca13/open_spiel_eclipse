@@ -121,6 +121,7 @@ while [ "$EXPERIMENTS" -eq 0 ] || [ "$exp" -lt "$EXPERIMENTS" ]; do
   wait_gpu
 
   # ---- 1. Agent session: pick idea, edit, commit, write NOTES, exit ---------
+  mkdir -p "$(dirname "$RUN_DIR")"
   say "spawning fresh agent session (model=${MODEL})..."
   AGENT_OUT="$("$OPENCODE" run --format json --dir "$ROOT" \
     --model "$MODEL" --title "ar-exp-${exp}" "$(objective)" 2>"$RUN_DIR.agent.err")"
