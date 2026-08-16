@@ -1,6 +1,7 @@
 # auxiliary inputs
 checkpoints
 checkpoint*
+.omo/
 
 # training output (tensorboard events + league rosters/checkpoints)
 runs/
