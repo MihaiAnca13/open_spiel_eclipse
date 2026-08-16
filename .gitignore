@@ -77,3 +77,7 @@ open_spiel/.vs
 apps/eclipse_ui/visualizer/node_modules
 *.png
 *.jpg
+
+# auto-research runtime outputs (not source)
+results_*.tsv
+autoresearch/.loop_state
