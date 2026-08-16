@@ -63,3 +63,12 @@ results TSV; this file is the agent's own reasoning about where to look next.
   hides the ~0.26s/update act phase against idle workers) OR fuse the 10
   per-step scatter kernels. The C++ obs writer is NOT the lever — workers are
   99% idle, so their 0.19ms step can't move main-thread-bound throughput.
+- [19:25] KEEP steps=1568256 (audit pass)
+
+## Driver infra fix (2026-08-16)
+
+- BUG: loop.sh + bench.sh used the var name `SECONDS` for the budget, but
+  `SECONDS` is a bash built-in (shell running-time counter, always 0 at start),
+  so the `:-60` default never fired -> budget 0 -> results_12env_0s.tsv -> awk
+  fatal in best_score(). Renamed to `BUDGET_SECS` in both files and re-pinned
+  immutables.sha. Run now resolves to results_12env_60s.tsv / 60 s budget.
