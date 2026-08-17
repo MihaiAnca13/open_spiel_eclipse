@@ -72,3 +72,27 @@ results TSV; this file is the agent's own reasoning about where to look next.
   so the `:-60` default never fired -> budget 0 -> results_12env_0s.tsv -> awk
   fatal in best_score(). Renamed to `BUDGET_SECS` in both files and re-pinned
   immutables.sha. Run now resolves to results_12env_60s.tsv / 60 s budget.
+
+## [21:15 session] — 3 rare sparse-path crashes: root-caused as TRANSIENT (dead ar/speed branch edits), NOT master
+
+Investigated 3 crash types from the ar/speed experiment runs (train.log stacks):
+  1. TypeError scatter_reduce_ index must be Tensor not numpy.ndarray (2x, run_6/84)
+  2. NameError 'ent' is not defined (1x, run_42)
+  3. IndexError tensors as indices must be long/int/byte/bool (1x, run_106, head_logits->rows_for)
+
+FINDING: NONE exist in master. All three were transient, UNCOMMITTED intermediate
+edit states of the sparse-path kernel refactors (skip-entropy / fuse-gumbel /
+scratch-reuse / cut-safe_s), all on the discarded ar/speed experiment branch, NOT
+an ancestor of master. Committed experiment versions handled them correctly
+(e.g. a0f4c629 guards `if ent is not None`); the crashes came from mid-edit drops.
+Master is clean by construction:
+  - _gumbel_sample rows = rc[:,0] via torch.from_numpy (always a CUDA tensor)
+  - _act_sparse always does `lse, ent = _segment_lse_entropy(...)` (line 1774)
+  - _sparse_minibatch actions_mb = b_actions.long()[mb_inds] (always int64)
+VERIFIED: 12x35s bench-style runs on master = 12/12 clean, 0/4 signatures (incl.
+backward-twice holding, which WAS a real master bug, fixed in 3fe8348a).
+
+LESSON for any future sparse-act/learn-path refactor: never pass numpy `rows`
+straight into torch segment ops (coerce via torch.from_numpy before the scatter),
+never reference `ent` on a need_entropy=False path without guarding `if ent is
+not None`, and always .long() action/col index tensors before head indexing.
