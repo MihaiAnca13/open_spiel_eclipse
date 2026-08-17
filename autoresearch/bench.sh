@@ -88,13 +88,11 @@ if [ "$bad" = "1" ]; then
 fi
 say "immutability gate passed"
 
-# ---- 2. Baseline record (first run always establishes the number to beat) ---
-RESULTS="$ROOT/results_${ENVS}env_${BUDGET_SECS}s.tsv"
-if [ ! -f "$RESULTS" ]; then
-  printf 'ts\tcommit\tbranch\tscore_steps\tupdates\tsteps_per_sec\tstatus\tdesc\n' > "$RESULTS"
-fi
-
-# ---- 3. Run the experiment: 12 envs, fixed budget --------------------------
+# ---- 2. Run the experiment: 12 envs, fixed budget ---------------------------
+# bench.sh only MEASURES and prints RESULT to stdout. It never writes the
+# results TSV: loop.sh owns keep/discard and is the sole writer, appending a
+# row only for KEPT fixes. Thus best_score() (max over the TSV) reflects kept
+# commits only.
 COMMIT="$(git -C "$ROOT" rev-parse --short HEAD)"
 BRANCH="$(git -C "$ROOT" branch --show-current)"
 say "variant: commit=$COMMIT branch=$BRANCH envs=$ENVS budget=${BUDGET_SECS}s batch=${BATCH}/update"
@@ -136,14 +134,8 @@ if [ $RC -ne 0 ]; then
     update=$(echo "$last_steps" | awk '{print $2}')
     sps=$((steps / WALL))
     echo "RESULT run=$RUN_DIR commit=$COMMIT status=crash rc=$RC score_steps=$steps updates=$update steps_per_sec=$sps desc=partial_${RC}"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-      "$(date +%Y%m%d-%H%M%S)" "$COMMIT" "$BRANCH" "$steps" "$update" "$sps" "crash" "partial_rc_${RC}" \
-      >> "$RESULTS"
   else
     echo "RESULT run=$RUN_DIR commit=$COMMIT status=crash rc=$RC"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-      "$(date +%Y%m%d-%H%M%S)" "$COMMIT" "$BRANCH" "0" "0" "0" "crash" "exit_rc_${RC}" \
-      >> "$RESULTS"
   fi
   exit 1
 fi
@@ -159,9 +151,6 @@ else
   last=$(grep -E '^\[update [0-9]+\] steps=' "$RUN_DIR/train.log" 2>/dev/null | tail -1)
   if [ -z "$last" ]; then
     echo "RESULT run=$RUN_DIR commit=$COMMIT status=crash reason=no_steps_in_log"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-      "$(date +%Y%m%d-%H%M%S)" "$COMMIT" "$BRANCH" "0" "0" "0" "crash" "no_steps_in_log" \
-      >> "$RESULTS"
     exit 1
   fi
   steps=$(echo "$last" | sed -n 's/.*\[update \([0-9]*\)\] steps=\([0-9]*\).*/\2/p')
@@ -187,11 +176,6 @@ fi
 
 say "throughput: steps=$steps updates=$update wall=${WALL}s steps_per_sec=$sps crosscheck=$mismatch"
 echo "RESULT run=$RUN_DIR commit=$COMMIT score_steps=$steps updates=$update steps_per_sec=$sps"
-printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-  "$(date +%Y%m%d-%H%M%S)" "$COMMIT" "$BRANCH" "$steps" "$update" "$sps" "run" \
-  "crosscheck=${mismatch} budget=${BUDGET_SECS}s" >> "$RESULTS"
-
-echo "  recorded. Compare to the best score_steps in $RESULTS; the agent keeps this"
-echo "  commit only if score_steps > previous best (Karpathy keep/discard), and"
-echo "  only after gate_audit.sh (the fresh-context honesty review) passes it."
+# No TSV write here: loop.sh decides keep/discard and appends the row only for
+# a KEPT fix, so discarded commits never pollute the best-score baseline.
 exit 0

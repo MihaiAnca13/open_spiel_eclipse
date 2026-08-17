@@ -63,7 +63,19 @@ done
 
 RESULTS="$ROOT/results_${ENVS}env_${BUDGET_SECS}s.tsv"
 NOTES="$AR_DIR/NOTES.md"
+BRANCH="$(git -C "$ROOT" branch --show-current)"
 OPENCODE="$(command -v opencode 2>/dev/null || echo "$HOME/.opencode/bin/opencode")"
+
+# Results TSV is the ONLY record of measurement. The driver is the sole writer.
+# Kept fixes are scored normally; DISCARDED experiments are recorded too, but
+# with score_steps=0 and status discard-low / discard-audit / crash so they are
+# traceable (an agent may gain real speed and still be denied by the audit gate,
+# or simply not beat the best) yet NEVER surface as a best: best_score() takes
+# the max, and a 0 never wins. The desc column explains the discard; the idea
+# description itself lives in the agent's NOTES.md entry.
+if [ ! -f "$RESULTS" ]; then
+  printf 'ts\tcommit\tbranch\tscore_steps\tupdates\tsteps_per_sec\tstatus\tdesc\n' > "$RESULTS"
+fi
 
 say() { echo "[loop] $*"; }
 
@@ -132,7 +144,11 @@ while [ "$EXPERIMENTS" -eq 0 ] || [ "$exp" -lt "$EXPERIMENTS" ]; do
   ARC=$?
   say "agent session exited rc=${ARC}"
   COMMIT="$(git -C "$ROOT" rev-parse --short HEAD)"
-  say "current HEAD: ${COMMIT}"
+  # The agent commits as "experiment: <idea>", so the subject is the one-liner
+  # of what was attempted. Captured before any rollback so every TSV row (keep
+  # or discard) can name the attempt.
+  MSG="$(git -C "$ROOT" log -1 --format=%s)"
+  say "current HEAD: ${COMMIT} (${MSG})"
 
   if [ $ARC -ne 0 ]; then
     say "agent session failed (rc=${ARC}); leaving working tree as-is"
@@ -154,11 +170,26 @@ while [ "$EXPERIMENTS" -eq 0 ] || [ "$exp" -lt "$EXPERIMENTS" ]; do
   BENCH_OUT="$($AR_DIR/bench.sh "$RUN_DIR" "$ENVS" "$BUDGET_SECS")"
   printf '%s\n' "$BENCH_OUT"
   THIS="$(echo "$BENCH_OUT" | sed -n 's/.*score_steps=\([0-9]*\).*/\1/p' | tail -1)"
+  UPDATES="$(echo "$BENCH_OUT" | sed -n 's/.*updates=\([0-9]*\).*/\1/p' | tail -1)"
+  SPS="$(echo "$BENCH_OUT" | sed -n 's/.*steps_per_sec=\([0-9]*\).*/\1/p' | tail -1)"
   BEST="$(best_score)"
   say "this=${THIS:-0} best=${BEST:-0}"
 
-  if [ -z "$THIS" ] || [ "$THIS" -le "$BEST" ]; then
-    say "no improvement (${THIS:-0} <= ${BEST:-0}) -> discard ${COMMIT}"
+  if [ -z "$THIS" ]; then
+    say "bench produced no score (crash?) -> discard ${COMMIT}"
+    printf '%s\t\t%s\t0\t0\t0\t%s\t%s\n' \
+      "$(date +%Y%m%d-%H%M%S)" "$BRANCH" "crash" "$MSG" >> "$RESULTS"
+    git -C "$ROOT" reset --hard "$KEPT" 2>/dev/null
+    continue
+  fi
+
+  if [ "$THIS" -le "$BEST" ]; then
+    say "no improvement (${THIS} <= ${BEST}) -> discard ${COMMIT}"
+    printf '%s\t\t%s\t0\t0\t0\t%s\t%s\n' \
+      "$(date +%Y%m%d-%H%M%S)" "$BRANCH" "discard-low" \
+      "${MSG} (steps=${THIS} <= best=${BEST}, not kept)" >> "$RESULTS"
+    printf -- '- [%s] DISCARD steps=%s (no improvement, <= best %s): %s\n' \
+      "$(date +%H:%M)" "$THIS" "$BEST" "$MSG" >> "$NOTES"
     git -C "$ROOT" reset --hard "$KEPT" 2>/dev/null
     continue
   fi
@@ -170,10 +201,20 @@ while [ "$EXPERIMENTS" -eq 0 ] || [ "$exp" -lt "$EXPERIMENTS" ]; do
     say "AUDIT pass -> KEEP ${COMMIT} as new best"
     printf '%s\n' "$COMMIT" > "$STATE"
     printf -- '- [%s] KEEP steps=%s (audit pass)\n' "$(date +%H:%M)" "$THIS" >> "$NOTES"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$(date +%Y%m%d-%H%M%S)" "$COMMIT" "$BRANCH" "${THIS:-0}" "${UPDATES:-0}" "${SPS:-0}" "run" \
+      "$MSG" >> "$RESULTS"
   else
     say "AUDIT fail -> discard ${COMMIT} despite score"
+    # A genuine speedup rejected by the freshness gate is recorded at score 0 so
+    # it is never lost: the rollback drops the code, but the attempt + why stay
+    # traceable, and a later session can see (and re-test) what was tried.
+    printf '%s\t\t%s\t0\t0\t0\t%s\t%s\n' \
+      "$(date +%Y%m%d-%H%M%S)" "$BRANCH" "discard-audit" \
+      "${MSG} (steps=${THIS} > best=${BEST} but fresh-context audit failed)" >> "$RESULTS"
+    printf -- '- [%s] AUDIT-DENIED steps=%s (was new best %s): %s\n' \
+      "$(date +%H:%M)" "$THIS" "$BEST" "$MSG" >> "$NOTES"
     git -C "$ROOT" reset --hard "$KEPT" 2>/dev/null
-    printf -- '- [%s] DISCARD steps=%s (audit fail)\n' "$(date +%H:%M)" "$THIS" >> "$NOTES"
   fi
 done
 

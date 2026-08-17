@@ -2012,6 +2012,13 @@ class PPO(nn.Module):
 
         with torch.autocast(device_type=amp_device_type, dtype=torch.bfloat16,
                             enabled=self.amp):
+          # Raw distributional-critic tail (network.critic[-1]) for this
+          # minibatch, computed ONCE and reused so the value and the rank-CE
+          # heads never invoke the same Linear twice on the same `features`.
+          # Two calls made shared-trunk autocast/bf16 create two AddmmBackward
+          # nodes pointing at ONE cast-saved `features` node; whichever runs
+          # first frees it and the second raises "backward a second time".
+          mb_rank_logits = None
           if use_sparse:
             # Slice the packed legal entries for this minibatch (vectorized via
             # the per-sample cumulative offsets).
@@ -2020,7 +2027,18 @@ class PPO(nn.Module):
             # the *actor* features; value_from_obs runs the right trunk. When the
             # critic shares the actor trunk, reuse the already-computed features.
             if getattr(self.network, "value_from_actor_features", False):
-              newvalue = self._value_from_features(features)
+              if hasattr(self.network, "rank_value"):
+                # Distributional-critic family (Eclipse): BOTH the value head
+                # (value_from_features = rank_value(critic[-1](features))) and
+                # the rank-CE head (rank_logits_from_features = critic[-1](
+                # features)) consume the same critic tail. Compute it ONCE here
+                # and reuse it, so the two heads never run the same Linear
+                # twice on one `features` (avoids the autocast/bf16
+                # shared-saved-tensor "backward a second time").
+                mb_rank_logits = self.network.critic[-1](features)
+                newvalue = self.network.rank_value(mb_rank_logits)
+              else:
+                newvalue = self._value_from_features(features)
             elif hasattr(self.network, "value_from_obs"):
               newvalue = self.network.value_from_obs(mb_obs)
             else:
@@ -2048,6 +2066,7 @@ class PPO(nn.Module):
                 action=b_actions.long()[mb_inds])
             logprob = newlogprob
             features = None
+            mb_rank_logits = None
           logratio = logprob - b_logprobs[mb_inds]
           ratio = logratio.exp()
 
@@ -2146,15 +2165,15 @@ class PPO(nn.Module):
           rank_ce = torch.zeros((), device=self.device)
           if self.rank_ce_coef and hasattr(self.network, "rank_logits_from_obs"):
             msk = b_rank_mask[mb_inds]
-            # Same shared-trunk recompute as the aux heads above: when the
-            # critic shares the actor trunk, the rank logits are just the
-            # critic's tail applied to `features`. `features is not None` is
-            # load-bearing: the dense path leaves it None, and only the sparse
-            # path produces trunk features to reuse.
-            if (features is not None
-                and getattr(self.network, "value_from_actor_features", False)
-                and hasattr(self.network, "rank_logits_from_features")):
-              logits_r = self.network.rank_logits_from_features(features)
+            # Reuse the single critic-tail call hoisted in the sparse
+            # value-from-features branch (mb_rank_logits = critic[-1](features)).
+            # This keeps the value head and the rank-CE head from each running
+            # critic[-1] on the same `features` (two AddmmBackward over one
+            # cast-saved node), which autocast/bf16 can free between them. Only
+            # the sparse shared-trunk path sets mb_rank_logits; everywhere else
+            # (dense, or a network with its own critic trunk) recompute from obs.
+            if mb_rank_logits is not None:
+              logits_r = mb_rank_logits
             else:
               logits_r = self.network.rank_logits_from_obs(mb_obs)
             per_row = -(b_ranks[mb_inds] * nn.functional.log_softmax(
