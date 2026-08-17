@@ -375,6 +375,18 @@ flags.DEFINE_bool(
 flags.DEFINE_enum("nn_activation", "tanh", ["tanh", "gelu"],
                   "Hidden activation. Tanh saturates; gelu is the C1 default "
                   "for the wider trunk.")
+flags.DEFINE_enum(
+    "critic_readout", "rank", ["rank", "cell_attn"],
+    "Critic readout. 'rank' (default) reproduces the historical behaviour "
+    "exactly: an expected-rank-utility value HARD-bounded to [-0.5, 1] from 4 "
+    "rank logits off the shared trunk. 'cell_attn' is the Stage 1 architectural "
+    "core: ONE value feature built from the fused state plus ONE state-"
+    "conditioned cross-attention query over all 225 per-cell features (no "
+    "C_PRESENT mask -- empty cells are future action targets), with three "
+    "heads off it: an UNBOUNDED scalar value (used by PPO/GAE), four rank "
+    "logits, and nine UNBOUNDED VP-component predictions normalized with FROZEN "
+    "train-split mean/std. The actor path is bitwise unchanged under both "
+    "readouts. Requires --encoder=spatial and --noseperate_critic.")
 flags.DEFINE_bool(
     "factored_actions", True,
     "Replace the flat Linear(width, 11117) actor head with a sum of factor "
@@ -669,7 +681,9 @@ class SpatialEclipseEncoder(nn.Module):
     --compile_encoder failures surface at the first real call, not at
     construction time (torch.compile is lazy), so the try/except lives here:
     one bad call falls back to eager for the rest of the run instead of
-    crashing training.
+    crashing training. Returns ONLY the fused state vector ``(B, width)`` -- the
+    contract every actor-path caller (``self.actor``, ``ppo.shared``) depends
+    on and what the compiled graph is built for.
     """
     if self._compiled_context is None:
       return self._encode_impl(x)
@@ -682,7 +696,19 @@ class SpatialEclipseEncoder(nn.Module):
       self._compiled_context = None
       return self._encode_impl(x)
 
-  def _encode_impl(self, x):
+  def forward_with_cells(self, x):
+    """(fused, h_cells): the fused state PLUS the per-cell conv features.
+
+    The cell-attention critic needs ``h_cells`` (B, 64, 225) -- the actor path
+    never does, so the plain ``forward``/``_encode_context`` path keeps
+    returning just ``fused`` and this method exists only for the critic. ``x``
+    is encoded once (the same body, eager -- torch.compile is not set up for
+    the two-tensor return, and this is the new, not-yet-hot critic path).
+    """
+    fused, h_cells = self._encode_impl(x, return_cells=True)
+    return fused, h_cells
+
+  def _encode_impl(self, x, return_cells=False):
     b = x.shape[0]
     x = x.reshape(b, -1)
 
@@ -808,7 +834,164 @@ class SpatialEclipseEncoder(nn.Module):
 
     fused = self.fuse(torch.cat(
         [gal_lat, self_lat, tail_lat, rel_lat, entity_lat], dim=1))
+    if return_cells:
+      # fused stays the FIRST element so actor-path consumers that call
+      # `forward`/`_encode_context` (which pass return_cells=False) keep seeing
+      # exactly what they did before -- bitwise identical actor input.
+      return fused, h_cells
     return fused
+
+
+class CellAttentionCritic(nn.Module):
+  """Three-head critic readout over the spatial encoder's per-cell features.
+
+  This is the Stage 1 §2 architectural core: ONE value feature is built from
+  (a) the encoder's fused state vector plus (b) a singularity-conditioned
+  cross-attention query over ALL 225 per-cell conv features (``h_cells``). The
+  three heads that attach to that feature -- an UNBOUNDED scalar value, four
+  rank logits, and nine UNBOUNDED VP-component predictions -- are all read off
+  a layer shared with nothing else, so the fused vector the ACTOR consumes is
+  bitwise untouched by this module (it only ever reads it).
+
+  Cross-attention is deliberately ONE QUERY (a single (B, 1, hidden) query from
+  the fused state attending over the 225 cell-key tokens), so it is O(225), not
+  a 225-token self-attention stack. There is NO ``C_PRESENT`` mask: empty cells
+  are future exploration/action targets and must be attended. The query/key/
+  value projections sit AFTER a LayerNorm (pre-LayerNorm pattern); the fused
+  query vector is pre-normed too.
+
+  VP components: the 9-wide head predicts values in FIXED normalized (z-score)
+  units -- mean/std statistics computed ONCE from a train split and registered
+  as frozen buffers via ``set_vp_stats`` (never per-minibatch). A documented
+  variance floor prevents a constant component (e.g. all zeros in a seed) from
+  blowing normalised targets up; registration clamps ``std`` to ``VP_STD_FLOOR``.
+  ``vp_components`` denormalises predictions back to raw VP units for reporting,
+  and ``sum``-ing them gives the predicted total VP (no redundant total-VP head).
+  """
+
+  # Variance floor for the frozen per-component stats. If a component measured
+  # zero variance on the train split (constant across every sampled episode),
+  # dividing by ~0 would explode normalised targets. Clamping keeps units sane
+  # while never normalising per-minibatch.
+  VP_STD_FLOOR = 1e-6
+  NUM_VP_COMPONENTS = 9
+
+  def __init__(self, width, hidden=None, num_cells=None, num_heads=1,
+               activation="gelu"):
+    super().__init__()
+    hidden = hidden or width
+    num_cells = num_cells or obs_layout.GALAXY_CELLS
+    self.hidden = hidden
+    self.num_cells = num_cells
+
+    # Learned per-cell position embedding, added to each cell's conv features
+    # so the query can tell cells apart structurally (not just by content).
+    # Width matches the cell channel dim (CELL_FEATURE_CHANNELS), so the add is
+    # well-typed regardless of `hidden`.
+    self.cell_pos = nn.Embedding(
+        num_cells, SpatialEclipseEncoder.CELL_FEATURE_CHANNELS)
+    nn.init.normal_(self.cell_pos.weight, std=0.02)
+
+    # pre-LayerNorm: the query (from fused) and the key/value (from cells) are
+    # normalised BEFORE the q/k/v projection, following the modern
+    # pre-LayerNorm transformer pattern rather than the older post-norm one.
+    self.query_norm = nn.LayerNorm(width)
+    self.key_norm = nn.LayerNorm(hidden)
+
+    # Single-query cross-attention. key/value go from each cell's channel
+    # dimension (64) up to `hidden`. num_heads=1: ONE query vector.
+    self.q_proj = layer_init(nn.Linear(width, hidden))
+    self.k_proj = layer_init(nn.Linear(
+        SpatialEclipseEncoder.CELL_FEATURE_CHANNELS, hidden), std=1.0)
+    self.v_proj = layer_init(nn.Linear(
+        SpatialEclipseEncoder.CELL_FEATURE_CHANNELS, hidden), std=1.0)
+
+    # Combine the fused state with the attention context into the value feature.
+    self.attn_fc = layer_init(nn.Linear(width + hidden, width))
+
+    # Three independent heads off the value feature.
+    act = nn.GELU if activation == "gelu" else nn.Tanh
+    self.act = act()
+
+    # (1) UNBOUNDED scalar value -- consumed by PPO/GAE, deliberately NOT
+    #     softmax/bounded like the old rank-value.
+    self.v_head = layer_init(nn.Linear(width, 1), std=1.0)
+    # (2) four rank logits (trained against the corrected soft-tie target; no
+    #     longer defines the PPO scalar).
+    self.rank_head = layer_init(nn.Linear(width, 4), std=1.0)
+    # (3) nine UNBOUNDED VP-component predictions in frozen mean/std units.
+    self.vp_head = layer_init(nn.Linear(width, self.NUM_VP_COMPONENTS),
+                              std=1.0)
+
+    # Frozen per-component statistics (mean/std), set ONCE via set_vp_stats from
+    # a train split. Registered as buffers so they ride along in checkpoints and
+    # are never trained.
+    self.register_buffer("vp_mean", torch.zeros(self.NUM_VP_COMPONENTS))
+    self.register_buffer("vp_std", torch.ones(self.NUM_VP_COMPONENTS))
+
+  def set_vp_stats(self, mean, std):
+    """Registers frozen per-component mean/std statistics.
+
+    ``mean``/``std`` are (9,) float tensors computed ONCE from a train split.
+    ``std`` is floored at ``VP_STD_FLOOR`` so no component divides by ~0. This
+    is the ONLY place the normalisation constants live; everything downstream
+    in ``vp_components`` just denormalises with them.
+    """
+    mean = torch.as_tensor(mean, dtype=torch.float32)
+    std = torch.clamp(torch.as_tensor(std, dtype=torch.float32),
+                      min=self.VP_STD_FLOOR)
+    self.vp_mean.copy_(mean)
+    self.vp_std.copy_(std)
+
+  def _value_feature(self, fused, h_cells):
+    """(B, width) single value feature from fused state + cell cross-attention.
+
+    ``fused`` is (B, width) -- the actor's state vector, read-only. ``h_cells``
+    is (B, CELL_FEATURE_CHANNELS, 225) from the encoder.
+    """
+    # Cells: (B, 64, 225) -> (B, 225, 64), add position embeddings.
+    cells = h_cells.transpose(1, 2)  # (B, 225, 64)
+    pos = self.cell_pos(
+        torch.arange(self.num_cells, device=cells.device))  # (225, 64)
+    cells = cells + pos.unsqueeze(0)
+
+    # ONE query from the fused state; keys/values from every cell. pre-LayerNorm.
+    query = self.query_norm(fused).unsqueeze(1)  # (B, 1, width)
+    k = self.k_proj(self.key_norm(cells))        # (B, 225, hidden)
+    v = self.v_proj(self.key_norm(cells))        # (B, 225, hidden)
+    q = self.q_proj(query)                       # (B, 1, hidden)
+
+    # unscaled-dot-product attention over all 225 cells (NO C_PRESENT mask).
+    attn = q @ k.transpose(-2, -1) / (self.hidden ** 0.5)  # (B, 1, 225)
+    attn = attn.softmax(dim=-1)                            # over cells
+    context = attn @ v                                     # (B, 1, hidden)
+    context = context.squeeze(1)                           # (B, hidden)
+
+    # Fuse the state vector with the cell context.
+    feature = self.attn_fc(torch.cat([fused, context], dim=-1))
+    return self.act(feature)
+
+  def feature(self, fused, h_cells):
+    """(B, width) shared value feature -- used by all three heads."""
+    return self._value_feature(fused, h_cells)
+
+  def value(self, fused, h_cells):
+    """(B,) UNBOUNDED scalar value for PPO/GAE."""
+    return self.v_head(self._value_feature(fused, h_cells)).squeeze(-1)
+
+  def rank_logits(self, fused, h_cells):
+    """(B, 4) rank logits."""
+    return self.rank_head(self._value_feature(fused, h_cells))
+
+  def vp_components(self, fused, h_cells):
+    """(B, 9) VP-component predictions in RAW VP units.
+
+    The head predicts normalised (z-score) values; denormalise them with the
+    frozen per-component stats so the output reports actual VP units. Summing
+    across components gives the predicted total VP.
+    """
+    z = self.vp_head(self._value_feature(fused, h_cells))
+    return z * self.vp_std + self.vp_mean
 
 
 class FactoredActorHead(nn.Module):
@@ -897,10 +1080,12 @@ class EclipsePPOAgent(nn.Module):
                depth=2, aux_tasks=("final_vp",), norm=False,
                activation="tanh", separate_critic=False,
                factored_actions=None, encoder="flat",
-               channels_last=False, compile_encoder=False):
+               channels_last=False, compile_encoder=False,
+               critic_readout="rank"):
     super().__init__()
     in_features = int(np.array(observation_shape).prod())
     self.encoder = encoder
+    self.critic_readout = critic_readout
     if encoder == "spatial":
       self.shared = SpatialEclipseEncoder(
           width, depth=max(1, depth), activation=activation, device=device,
@@ -913,7 +1098,15 @@ class EclipsePPOAgent(nn.Module):
     # value straight off the features they already computed instead of
     # re-running the whole conv encoder a second time via value_from_obs. This
     # flag tells ppo.py to prefer value_from_features.
-    self.value_from_actor_features = not separate_critic
+    #
+    # ``cell_attn`` deliberately sets this False even though the trunk is
+    # shared: the cell-attention value needs ``h_cells`` (per-cell conv
+    # features), which the actor-forward ``shared(x)`` does NOT return (it
+    # returns only the fused ``(B, width)`` vector, bitwise).
+    # ``value_from_actor_features`` means "the value is readable from the actor
+    # features alone" -- under ``cell_attn`` that is false, so ppo.py routes to
+    # ``value_from_obs``, which runs the encoder once more to recover ``h_cells``.
+    self.value_from_actor_features = not separate_critic and critic_readout != "cell_attn"
 
     if separate_critic:
       # An independent trunk for the value/aux objectives. With a shared trunk
@@ -935,6 +1128,15 @@ class EclipsePPOAgent(nn.Module):
         self.critic_trunk,
         layer_init(nn.Linear(width, 4), std=1.0),
     )
+    if self.critic_readout == "cell_attn":
+      # Three-head readout over the shared trunk's fused state + cell features.
+      # Only valid when the spatial encoder is shared (never under
+      # separate_critic, which would lack the h_cells feed).
+      assert encoder == "spatial" and not separate_critic, (
+          "--critic_readout=cell_attn requires --encoder=spatial (shared "
+          "trunk); it cannot run under --separate_critic.")
+      self.cell_attn = CellAttentionCritic(
+          width, hidden=width, activation=activation)
     if factored_actions is None:
       actor_head = layer_init(nn.Linear(width, num_actions), std=0.01)
     else:
@@ -953,30 +1155,102 @@ class EclipsePPOAgent(nn.Module):
     self.register_buffer("mask_value", torch.tensor(-1e6))
 
   def get_value(self, x):
+    if self.critic_readout == "cell_attn":
+      # Unbounded scalar value from the cell-attention readout. Re-runs the
+      # shared encoder once to recover h_cells (the actor path never hands them
+      # to the critic, so they have to be recomputed here -- the same cost the
+      # rank path already pays via self.critic(x)).
+      fused, h_cells = self._critic_features(x)
+      return self.cell_attn.value(fused, h_cells)
     return self.rank_value(self.critic(x))
+
+  def _critic_features(self, x):
+    """(fused, h_cells) under cell_attn; fused-only otherwise.
+
+    cell_attn's value/rank/vp heads all need the per-cell conv features, which
+    ``shared(x)`` (the actor path) does not return. This re-runs the shared
+    encoder and asks it for both.
+    """
+    return self.shared.forward_with_cells(x)
 
   def rank_logits_from_obs(self, x):
     """(B, 4) rank logits -- the distributional critic's raw output."""
+    if self.critic_readout == "cell_attn":
+      fused, h_cells = self._critic_features(x)
+      return self.cell_attn.rank_logits(fused, h_cells)
     return self.critic(x)
 
   def rank_logits_from_features(self, features):
     """(B, 4) rank logits from already-computed shared-trunk features.
 
-    Only equivalent to ``rank_logits_from_obs`` when the critic shares the
-    actor trunk (``value_from_actor_features``); callers must check that, as
-    the sparse learn path does.
+    Under ``rank``, ``features`` is the fused ``(B, width)`` vector and this is
+    ``critic[-1]``. Under ``cell_attn``, ``features`` is the ``(fused,
+    h_cells)`` tuple produced by ``shared.forward_with_cells`` / the encoder's
+    two-tensor return -- the rank head needs the cells, so a fused-only vector
+    is insufficient.
     """
+    if self.critic_readout == "cell_attn":
+      fused, h_cells = features
+      return self.cell_attn.rank_logits(fused, h_cells)
     return self.critic[-1](features)
+
+  def vp_components_from_features(self, features):
+    """(B, 9) VP-component predictions in raw VP units (cell_attn only).
+
+    ``features`` is the ``(fused, h_cells)`` tuple. The head predicts in frozen
+    mean/std units; this denormalises back to VP units so the caller can report
+    per-component and summed (predicted total) VP.
+    """
+    fused, h_cells = features
+    return self.cell_attn.vp_components(fused, h_cells)
 
   def value_from_obs(self, x):
     """Scalar value straight from observations.
 
     Required when the critic has its own trunk: the sparse paths compute actor
-    features once and would otherwise feed those to the value head.
+    features once and would otherwise feed those to the value head. Under
+    ``cell_attn`` it returns the unbounded scalar (and is the path ppo.py takes,
+    since ``value_from_actor_features`` is False there).
     """
+    if self.critic_readout == "cell_attn":
+      fused, h_cells = self._critic_features(x)
+      return self.cell_attn.value(fused, h_cells)
     return self.rank_value(self.critic(x))
 
+  def _vp_breakdown_from_features(self, fused, h_cells):
+    """{(B,) per-component VP predictions} for the cell_attn breakdown tasks.
+
+    Sources the 9 ``bd_`` aux tasks from ``CellAttentionCritic.vp_head`` rather
+    than the old flat ``aux_heads``: component ``k`` (index in
+    ``_VP_BREAKDOWN_TASK_NAMES``) maps to task name ``k`` -- the same order
+    ``build_aux_targets``/``_terminal_breakdown_from_steps`` lay the breakdown
+    target matrix out in. ``vp_components`` denormalises the head's frozen
+    z-score output back to raw VP units, so the per-name predictions sit in the
+    same units as the raw-VP breakdown targets the aux MSE compares against.
+    Only names actually registered as aux tasks are returned.
+
+    With no train-split stats registered (the default), ``vp_mean=0`` /
+    ``vp_std=1`` make ``vp_components`` the bare head output -- sane raw VP
+    units until ``set_vp_stats`` is called from the data path.
+    """
+    vp = self.cell_attn.vp_components(fused, h_cells)  # (B, 9)
+    return {
+        name: vp[:, _VP_BREAKDOWN_COMPONENT_INDEX[name]]
+        for name in _VP_BREAKDOWN_TASK_NAMES if name in self.aux_heads
+    }
+
   def aux_from_obs(self, x):
+    if self.critic_readout == "cell_attn":
+      fused, h_cells = self._critic_features(x)
+      pred = self._vp_breakdown_from_features(fused, h_cells)
+      # Any non-breakdown aux task (e.g. final_vp/final_rank) still uses the
+      # flat aux head off the fused vector.
+      flat_names = [n for n in self.aux_heads if n not in pred]
+      if flat_names:
+        feats = self.critic_trunk(x)
+        for n in flat_names:
+          pred[n] = self.aux_heads[n](feats)
+      return pred
     feats = self.critic_trunk(x)
     return {name: head(feats) for name, head in self.aux_heads.items()}
 
@@ -989,21 +1263,43 @@ class EclipsePPOAgent(nn.Module):
 
   def value_from_features(self, features):
     """Scalar win value from shared features (sparse learn path)."""
+    if self.critic_readout == "cell_attn":
+      fused, h_cells = features
+      return self.cell_attn.value(fused, h_cells)
     return self.rank_value(self.critic[-1](features))
 
   def value_bounds(self):
     """(min, max) representable value.
 
-    ``rank_value`` is a convex combination of RANK_UTILITY, so the critic is
-    *hard bounded* to [-0.5, 1.0]. Any value target outside that band is
+    ``rank_value`` is a convex combination of RANK_UTILITY, so the rank critic
+    is *hard bounded* to [-0.5, 1.0]. Any value target outside that band is
     unfittable no matter how long training runs, which caps explained variance
     and corrupts every advantage derived from it. PPO reports the out-of-band
     fraction so a shaping choice that pushes returns out of range is visible.
+
+    ``cell_attn`` returns an UNBOUNDED scalar head instead, so the representable
+    band is (-inf, inf); the magnitude scale is roughly the raw VP/return units
+    (the head is a plain linear, no activation cap).
     """
+    if self.critic_readout == "cell_attn":
+      return (None, float("inf"))
     return min(self.RANK_UTILITY), max(self.RANK_UTILITY)
 
   def get_aux(self, features):
-    """Auxiliary-head raw outputs keyed by task name."""
+    """Auxiliary-head raw outputs keyed by task name.
+
+    Under ``cell_attn``, ``features`` is the ``(fused, h_cells)`` tuple; the
+    VP-breakdown tasks are supervised by the cell-attention VP head (via
+    ``_vp_breakdown_from_features``) while any flat names still use the old
+    ``aux_heads`` off the fused vector.
+    """
+    if self.critic_readout == "cell_attn":
+      fused, h_cells = features
+      pred = self._vp_breakdown_from_features(fused, h_cells)
+      for n in self.aux_heads:
+        if n not in pred:
+          pred[n] = self.aux_heads[n](fused)
+      return pred
     return {name: head(features) for name, head in self.aux_heads.items()}
 
   def dense_logits(self, x):
@@ -1032,7 +1328,7 @@ def make_agent_fn(width, depth, aux_tasks=("final_vp",), norm=False,
                   activation="tanh", separate_critic=False,
                   factored_actions=None, encoder="flat",
                   channels_last=False,
-                  compile_encoder=False):
+                  compile_encoder=False, critic_readout="rank"):
   def agent_fn(num_actions, observation_shape, device):
     return EclipsePPOAgent(num_actions, observation_shape, device,
                            width=width, depth=depth, aux_tasks=aux_tasks,
@@ -1041,7 +1337,8 @@ def make_agent_fn(width, depth, aux_tasks=("final_vp",), norm=False,
                            factored_actions=factored_actions,
                            encoder=encoder,
                            channels_last=channels_last,
-                           compile_encoder=compile_encoder)
+                           compile_encoder=compile_encoder,
+                           critic_readout=critic_readout)
 
   return agent_fn
 
@@ -1056,6 +1353,18 @@ _AUX_TASKS_BY_MODE = {
         "bd_discovery", "bd_tech_track", "bd_traitor", "bd_species",
         "bd_minor_species"),
     "none": (),
+}
+
+# Under --critic_readout=cell_attn with a VP-breakdown aux objective, the 9
+# ``bd_`` task names are supervised by ``CellAttentionCritic.vp_head`` (the
+# 9-wide cross-attention VP head consuming fused + h_cells), NOT the old flat
+# ``aux_heads``. Column ``k`` of the breakdown target matrix (as produced by
+# ``build_aux_targets``) maps to component ``k`` of the VP head; both follow
+# this task order. These are resolved at call time from inside the class
+# methods, so defining them after ``_AUX_TASKS_BY_MODE`` is fine.
+_VP_BREAKDOWN_TASK_NAMES = _AUX_TASKS_BY_MODE["breakdown"]
+_VP_BREAKDOWN_COMPONENT_INDEX = {
+    name: i for i, name in enumerate(_VP_BREAKDOWN_TASK_NAMES)
 }
 
 _TERMINAL_BREAKDOWN_COLUMNS = tuple(range(
@@ -1778,6 +2087,7 @@ def _write_arch(roster_dir, num_actions, input_shape, aux_tasks):
       "num_actions": int(num_actions),
       "input_shape": list(input_shape),
       "encoder": FLAGS.encoder,
+      "critic_readout": FLAGS.critic_readout,
   }
   with open(os.path.join(str(roster_dir), "arch.json"), "w") as f:
     json.dump(arch, f, indent=2)
@@ -2525,7 +2835,8 @@ def main(_):
         separate_critic=FLAGS.separate_critic, factored_actions=factored,
         encoder=FLAGS.encoder,
         channels_last=FLAGS.channels_last,
-        compile_encoder=FLAGS.compile_encoder),
+        compile_encoder=FLAGS.compile_encoder,
+        critic_readout=FLAGS.critic_readout),
       value_mode=FLAGS.value_mode,
       aux_tasks=aux_tasks,
       aux_target_fn=aux_target_fn,
@@ -2567,7 +2878,8 @@ def main(_):
         separate_critic=FLAGS.separate_critic, factored_actions=factored,
         encoder=FLAGS.encoder,
         channels_last=FLAGS.channels_last,
-        compile_encoder=False)
+        compile_encoder=False,
+        critic_readout=FLAGS.critic_readout)
     resume_src = FLAGS.resume
     sd = None
     # Resolve roster ids ("main", "snap_u100", ...) whenever the roster dir
@@ -2664,7 +2976,8 @@ def main(_):
         separate_critic=FLAGS.separate_critic, factored_actions=factored,
         encoder=FLAGS.encoder,
         channels_last=FLAGS.channels_last,
-        compile_encoder=False)
+        compile_encoder=False,
+        critic_readout=FLAGS.critic_readout)
   num_actions = game.num_distinct_actions()
   roster = None
   matchmaker = None
