@@ -95,6 +95,31 @@ def test_round_trip_exact_equality():
     np.testing.assert_array_equal(read["phase"], orig["phase"])
 
 
+def test_manifest_metadata_populated_on_write():
+  """default_manifest's None placeholders are filled by write_episodes.
+
+  The schema docstring promises code_revision / collector_cli / collection_ts
+  are "populated in write_episodes if not supplied" -- but default_manifest
+  pre-fills them with None, which defeats a setdefault (the key exists). This
+  pins that the on-disk manifest gets a real code revision, the cli, and a
+  timestamp so a collected dataset is traceable to the exact code revision.
+  """
+  manifest = frozen_dataset.default_manifest(
+      num_players=NUM_PLAYERS, obs_len=OBS_LEN, gamma=GAMMA, vp_scale=VP_SCALE,
+      rank_vp_beta=0.0, collector_cli="pytest test_manifest_metadata")
+  episodes = [_make_episode(7, 0, 4)]
+
+  with tempfile.TemporaryDirectory() as tmp:
+    frozen_dataset.write_episodes(tmp, manifest, episodes)
+    with open(os.path.join(tmp, "manifest.json")) as f:
+      import json
+      back = json.load(f)
+    # code_revision must not be the None placeholder (real git SHAs are truthy).
+    assert back.get("code_revision"), "code_revision not populated on disk"
+    assert back.get("collector_cli") == "pytest test_manifest_metadata"
+    assert back.get("collection_ts"), "collection_ts not populated on disk"
+
+
 def test_split_disjointness():
   """train/val episode sets are disjoint; a step's episode_id decides its side."""
   manifest = frozen_dataset.default_manifest(

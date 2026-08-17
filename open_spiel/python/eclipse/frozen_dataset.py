@@ -201,8 +201,12 @@ def write_episodes(out_dir, manifest_dict, batches):
   manifest = dict(manifest_dict)
   manifest.setdefault("npz", [])
   manifest.setdefault("split", {"train": [], "val": []})
-  manifest.setdefault("code_revision", _git_revision())
-  manifest.setdefault("collection_ts", time.time())
+  # Override, not setdefault: default_manifest pre-fills these with None, and
+  # setdefault would keep the None, leaving the written manifest untraceable.
+  if manifest.get("code_revision") is None:
+    manifest["code_revision"] = _git_revision()
+  if manifest.get("collection_ts") is None:
+    manifest["collection_ts"] = time.time()
   split_seed = manifest.get("split_seed", 0)
 
   train_ids = set(manifest["split"]["train"])
