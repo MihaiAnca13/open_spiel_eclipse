@@ -1,3 +1,63 @@
+if (OPEN_SPIEL_ECLIPSE_BUILD)
+  find_package(Python3 COMPONENTS Interpreter Development Development.Module REQUIRED)
+  find_package(OpenSSL REQUIRED)
+
+  option(OPEN_SPIEL_BUILD_WITH_FCM "Build with the FCM (Fast Food Magnate) adapter" ON)
+  if (NOT OPEN_SPIEL_BUILD_WITH_FCM)
+    message(FATAL_ERROR "The Eclipse build requires the FCM adapter.")
+  endif()
+
+  set(FCM_CORE_DIR "/home/mihai/personal/FCM" CACHE PATH
+      "Path to the FCM repository root")
+  set(FCM_CORE_BUILD "${FCM_CORE_DIR}/build" CACHE PATH
+      "Path to the FCM build dir containing libfcm_migration_core.a")
+  set(FCM_CORE_LIBRARY "${FCM_CORE_BUILD}/libfcm_migration_core.a")
+  if (NOT EXISTS "${FCM_CORE_DIR}/target/src/fcm_openspiel_state.cc" OR
+      NOT EXISTS "${FCM_CORE_LIBRARY}")
+    message(FATAL_ERROR
+      "Build FCM first: expected ${FCM_CORE_DIR}/target/src/fcm_openspiel_state.cc "
+      "and ${FCM_CORE_LIBRARY}")
+  endif()
+
+  add_library(pyspiel MODULE
+    fcm/pyspiel.cc
+    pybind11/evaluation_elo.cc
+    ../evaluation/elo.cc
+    ${FCM_CORE_DIR}/target/src/fcm_openspiel_state.cc
+  )
+  target_include_directories(pyspiel PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../..
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../pybind11/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../pybind11_abseil
+    ${CMAKE_CURRENT_SOURCE_DIR}/../pybind11_json/include
+    ${FCM_CORE_DIR}/target/include
+  )
+  target_link_libraries(pyspiel PRIVATE
+    eclipse_game
+    open_spiel_core
+    ${FCM_CORE_LIBRARY}
+    OpenSSL::Crypto
+    absl::algorithm
+    absl::flags
+    absl::flags_parse
+    absl::flat_hash_map
+    absl::optional
+    absl::random_random
+    absl::str_format
+    absl::strings
+    absl::time
+  )
+  if (TARGET Python3::Module)
+    target_link_libraries(pyspiel PRIVATE Python3::Module)
+  endif()
+  set_target_properties(pyspiel PROPERTIES PREFIX "")
+  if (WIN32)
+    set_target_properties(pyspiel PROPERTIES SUFFIX ".pyd")
+  endif()
+  return()
+endif()
+
 if (OPEN_SPIEL_BUILDING_WHEEL)
   # When building a wheel, need to use this. See:
   # https://github.com/joerick/cibuildwheel/issues/639#issuecomment-817872369

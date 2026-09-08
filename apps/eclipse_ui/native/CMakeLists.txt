@@ -10,27 +10,8 @@ if (NOT TARGET open_spiel_core)
     "  cmake --build build --target eclipse_ui_native")
 endif()
 
-set(ECLIPSE_UI_NATIVE_SOURCES
-  api.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/../../../open_spiel/games/eclipse/eclipse.cc
-  ${CMAKE_CURRENT_SOURCE_DIR}/../../../open_spiel/games/eclipse/observation.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/../../../open_spiel/games/eclipse/systems/setup.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/../../../open_spiel/games/eclipse/systems/combat.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/../../../open_spiel/games/eclipse/systems/upkeep.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/../../../open_spiel/games/eclipse/systems/scoring.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/../../../open_spiel/games/eclipse/systems/actions/bonus.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/../../../open_spiel/games/eclipse/systems/actions/explore.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/../../../open_spiel/games/eclipse/systems/actions/research.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/../../../open_spiel/games/eclipse/systems/actions/build.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/../../../open_spiel/games/eclipse/systems/actions/diplomacy.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/../../../open_spiel/games/eclipse/systems/actions/minor_species_diplomacy.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/../../../open_spiel/games/eclipse/systems/actions/influence.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/../../../open_spiel/games/eclipse/systems/actions/upgrade.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/../../../open_spiel/games/eclipse/systems/actions/move.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/../../../open_spiel/games/eclipse/warped_universe/warped_universe.cpp
-)
-
-add_library(eclipse_ui_native MODULE ${ECLIPSE_UI_NATIVE_SOURCES})
+add_library(eclipse_ui_native MODULE api.cpp)
+target_link_libraries(eclipse_ui_native PRIVATE eclipse_game)
 
 find_package(Python3 COMPONENTS Interpreter Development Development.Module REQUIRED)
 

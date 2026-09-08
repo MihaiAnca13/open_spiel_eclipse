@@ -192,6 +192,11 @@ include_directories (abseil-cpp)
 add_subdirectory (json)
 include_directories (json/include)
 
+# We have the parent of this directory in the include path, so that we can
+# include for example "open_spiel/spiel.h" (assuming this directory is named
+# open_spiel).
+include_directories(..)
+
 # Find basic Python paths needed by C++ code (e.g. pybind11_json and pybind11_abseil).
 if (OPEN_SPIEL_BUILD_WITH_PYTHON)
   find_package(Python3 COMPONENTS Interpreter Development)
@@ -218,6 +223,13 @@ link_libraries(open_spiel_core
   absl::time
 )
 
+if (OPEN_SPIEL_ECLIPSE_BUILD)
+  add_subdirectory(games/eclipse)
+  add_subdirectory(python)
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../apps/eclipse_ui/native
+                   ${CMAKE_CURRENT_BINARY_DIR}/apps/eclipse_ui_native)
+  return()
+endif()
 
 # Just the minimal base library: no games.
 set (OPEN_SPIEL_CORE_OBJECTS $<TARGET_OBJECTS:open_spiel_core>)
@@ -280,11 +292,6 @@ if (OPEN_SPIEL_BUILD_WITH_ORTOOLS)
   # Use following to link your_target_executable with OrTools libraries:
   # target_link_libraries(your_target_executable ${ORTOOLS_LIBS})
 endif()
-
-# We have the parent of this directory in the include path, so that we can
-# include for example "open_spiel/spiel.h" (assuming this directory is named
-# open_spiel).
-include_directories(..)
 
 add_subdirectory (algorithms)
 add_subdirectory (bots)
