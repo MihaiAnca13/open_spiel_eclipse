@@ -493,7 +493,7 @@ void ExploreExhaustedRingTest() {
   anchor.owner_id = 0;
   anchor.coords = {0, 0};
 
-  // Empty inner bag: an exhausted ring cannot be explored (no reshuffle).
+  // Empty stack and discard pile: the ring cannot be explored.
   s.sector_bag_inner = 0;
   SPIEL_CHECK_FALSE(is_legal_explore_zone(s, 0, 1, 0));
   SPIEL_CHECK_TRUE(legal_explore_zones(s, 0).empty());
@@ -741,6 +741,30 @@ void ExploreStopAndDracoDrawTest() {
     SPIEL_CHECK_TRUE(select_drawn_tile(s, 0, 0));
     SPIEL_CHECK_TRUE(s.explore_state.phase == ExplorePhase::place_or_discard);
     SPIEL_CHECK_EQ(s.explore_state.selected_sector_id, 301);
+    SPIEL_CHECK_EQ(s.sector_discard_outer, 0b10);
+
+    // The unchosen tile becomes the new stack only after the live stack empties.
+    s.explore_state.drawn_sector_ids = {0, 0};
+    s.explore_state.drawn_count = 0;
+    s.explore_state.phase = ExplorePhase::draw_tile;
+    apply_explore_draw(s, /*ring_bit=*/1);
+    SPIEL_CHECK_EQ(s.explore_state.selected_sector_id, 302);
+    SPIEL_CHECK_EQ(s.sector_bag_outer, 0);
+    SPIEL_CHECK_EQ(s.sector_discard_outer, 0);
+  }
+
+  // A normally drawn tile rejected by the player also enters the discard pile.
+  {
+    ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+    s.explore_state.player_id = 0;
+    s.explore_state.activations_remaining = 1;
+    s.explore_state.ring = SectorType::OUTER;
+    s.explore_state.selected_sector_id = 301;
+    s.explore_state.phase = ExplorePhase::place_or_discard;
+
+    SPIEL_CHECK_TRUE(discard_drawn_tile(s, 0));
+    SPIEL_CHECK_EQ(s.sector_discard_outer, 0b1);
+    SPIEL_CHECK_EQ(ring_bag_value(s, SectorType::OUTER), 0b1);
   }
 }
 

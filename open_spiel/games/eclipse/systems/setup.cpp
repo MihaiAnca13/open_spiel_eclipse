@@ -215,6 +215,9 @@ void ResolveInitialSetupRandomness(std::mt19937_64& rng,
     // 5. Populate sector bags as bitmasks.
     state.sector_bag_inner = (1U << 10) - 1;
     state.sector_bag_middle = (1U << 13) - 1;
+    state.sector_discard_inner = 0;
+    state.sector_discard_middle = 0;
+    state.sector_discard_outer = 0;
 
     std::vector<uint8_t> outer_indices(22);
     std::iota(outer_indices.begin(), outer_indices.end(), 0);

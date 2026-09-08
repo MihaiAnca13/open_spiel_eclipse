@@ -75,7 +75,8 @@ namespace open_spiel::eclipse {
 // in, so it can anchor an Explore zone / wormhole connection (rulebook p.13).
 bool is_explore_anchor(const ::State& state, uint8_t player_id, const ::Sector& sector);
 
-// The current bitmask bag for a ring (INNER / MIDDLE / OUTER).
+// The current drawable bitmask for a ring, using its discard pile if the live
+// stack is empty.
 uint32_t ring_bag_value(const ::State& state, SectorType ring);
 
 // Sector id of the bit-th tile of a ring, in SECTOR_TABLE order (matches how

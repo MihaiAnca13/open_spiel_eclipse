@@ -221,6 +221,9 @@ struct State {
     uint16_t sector_bag_inner = 0;
     uint16_t sector_bag_middle = 0;
     uint32_t sector_bag_outer = 0;
+    uint16_t sector_discard_inner = 0;
+    uint16_t sector_discard_middle = 0;
+    uint32_t sector_discard_outer = 0;
     NPCDifficulty gcds_difficulty = NPCDifficulty::EASY;
     NPCDifficulty guardian_difficulty = NPCDifficulty::EASY;
     NPCDifficulty ancient_difficulty = NPCDifficulty::EASY;
@@ -387,6 +390,9 @@ inline void to_json(nlohmann::json& j, const State& s) {
         {"sector_bag_inner", s.sector_bag_inner},
         {"sector_bag_middle", s.sector_bag_middle},
         {"sector_bag_outer", s.sector_bag_outer},
+        {"sector_discard_inner", s.sector_discard_inner},
+        {"sector_discard_middle", s.sector_discard_middle},
+        {"sector_discard_outer", s.sector_discard_outer},
         {"gcds_difficulty", s.gcds_difficulty},
         {"guardian_difficulty", s.guardian_difficulty},
         {"ancient_difficulty", s.ancient_difficulty},
@@ -467,6 +473,15 @@ inline void from_json(const nlohmann::json& j, State& s) {
     }
     if (j.contains("sector_bag_outer")) {
         j.at("sector_bag_outer").get_to(s.sector_bag_outer);
+    }
+    if (j.contains("sector_discard_inner")) {
+        j.at("sector_discard_inner").get_to(s.sector_discard_inner);
+    }
+    if (j.contains("sector_discard_middle")) {
+        j.at("sector_discard_middle").get_to(s.sector_discard_middle);
+    }
+    if (j.contains("sector_discard_outer")) {
+        j.at("sector_discard_outer").get_to(s.sector_discard_outer);
     }
     j.at("gcds_difficulty").get_to(s.gcds_difficulty);
     j.at("guardian_difficulty").get_to(s.guardian_difficulty);

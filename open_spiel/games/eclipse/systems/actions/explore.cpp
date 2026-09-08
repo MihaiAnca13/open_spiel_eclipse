@@ -63,11 +63,44 @@ SectorType zone_ring(int distance) {
     return SectorType::OUTER;
 }
 
-// A zone is only explorable if its ring still has tiles left in the bag. There
-// is no discard-pile reshuffle: once a ring's bag is empty, that ring can no
-// longer be explored.
+// A zone is explorable while its stack or corresponding discard pile has tiles.
 bool zone_ring_has_tiles(const State& state, int q, int r) {
     return ring_bag_value(state, zone_ring(hex_distance(0, 0, q, r))) != 0;
+}
+
+void refill_ring_bag(State& state, SectorType ring) {
+    switch (ring) {
+        case SectorType::INNER:
+            if (state.sector_bag_inner == 0) {
+                state.sector_bag_inner = state.sector_discard_inner;
+                state.sector_discard_inner = 0;
+            }
+            break;
+        case SectorType::MIDDLE:
+            if (state.sector_bag_middle == 0) {
+                state.sector_bag_middle = state.sector_discard_middle;
+                state.sector_discard_middle = 0;
+            }
+            break;
+        default:
+            if (state.sector_bag_outer == 0) {
+                state.sector_bag_outer = state.sector_discard_outer;
+                state.sector_discard_outer = 0;
+            }
+            break;
+    }
+}
+
+void discard_sector(State& state, SectorType ring, uint16_t sector_id) {
+    const std::vector<uint16_t>& ids = ring_sector_ids(ring);
+    auto it = std::find(ids.begin(), ids.end(), sector_id);
+    if (it == ids.end()) return;
+    const uint32_t bit = 1u << std::distance(ids.begin(), it);
+    switch (ring) {
+        case SectorType::INNER: state.sector_discard_inner |= bit; break;
+        case SectorType::MIDDLE: state.sector_discard_middle |= bit; break;
+        default: state.sector_discard_outer |= bit; break;
+    }
 }
 
 void clear_ring_bag_bit(State& state, SectorType ring, uint8_t bit) {
@@ -269,9 +302,15 @@ bool is_explore_anchor(const ::State& state, uint8_t player_id, const ::Sector& 
 
 uint32_t ring_bag_value(const State& state, SectorType ring) {
     switch (ring) {
-        case SectorType::INNER: return state.sector_bag_inner;
-        case SectorType::MIDDLE: return state.sector_bag_middle;
-        default: return state.sector_bag_outer;
+        case SectorType::INNER:
+            return state.sector_bag_inner != 0 ? state.sector_bag_inner
+                                              : state.sector_discard_inner;
+        case SectorType::MIDDLE:
+            return state.sector_bag_middle != 0 ? state.sector_bag_middle
+                                               : state.sector_discard_middle;
+        default:
+            return state.sector_bag_outer != 0 ? state.sector_bag_outer
+                                              : state.sector_discard_outer;
     }
 }
 
@@ -384,6 +423,7 @@ void stop_exploring(State& state) {
 
 void apply_explore_draw(State& state, uint8_t ring_bit) {
     ExploreState& es = state.explore_state;
+    refill_ring_bag(state, es.ring);
 
     if (ring_bag_value(state, es.ring) != 0) {
         uint16_t sector_id = ring_bit_to_sector_id(es.ring, ring_bit);
@@ -434,6 +474,7 @@ bool select_drawn_tile(State& state, uint8_t player_id, uint8_t tile_index) {
     if (es.phase != ExplorePhase::select_drawn_tile) return false;
     if (tile_index >= es.drawn_count) return false;
     es.selected_sector_id = es.drawn_sector_ids[tile_index];
+    discard_sector(state, es.ring, es.drawn_sector_ids[1 - tile_index]);
     es.phase = ExplorePhase::place_or_discard;
     return true;
 }
@@ -449,8 +490,7 @@ bool place_drawn_tile(State& state, uint8_t player_id) {
 bool discard_drawn_tile(State& state, uint8_t player_id) {
     ExploreState& es = state.explore_state;
     if (es.phase != ExplorePhase::place_or_discard) return false;
-    // Discarded tiles are gone for good (no discard pile / reshuffle): a ring's
-    // bag only depletes, and an exhausted ring becomes unexplorable.
+    discard_sector(state, es.ring, es.selected_sector_id);
     end_explore_activation(state);
     return true;
 }

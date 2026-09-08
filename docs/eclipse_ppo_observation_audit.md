@@ -30,7 +30,7 @@ Eclipse's strategic tradeoff is spending actions and influence discs to grow pro
 | OBS-10 | Empty units | Masked maximum returns -1e9 when no units are valid | Synthetic check: fused latent magnitude approximately 953 million |
 | VIS-01 | Reputation privacy | Opponents' face-down reputation values and exact reputation VP are exposed | Writer compared with rulebook; total VP also reveals the hidden contribution |
 | VIS-02 | Sector privacy | Exact randomly selected outer-sector supply is exposed | Setup randomly selects a subset; global writer exposes its bitmask |
-| RULE-01 | Game model | Exploration discards are permanently removed instead of reshuffled on depletion | Explicit engine behavior differs from supplied rulebook |
+| RULE-01 | Game model | Discarded sectors are returned when their stack is depleted | Fixed: per-ring discard piles preserve the setup-limited tile pool |
 
 These statuses distinguish observed numerical failures, structural code findings, and issues still needing targeted gameplay reproduction. The ledger is not proof that every other state field is sufficient.
 
@@ -129,7 +129,7 @@ This information is currently ignored by the spatial encoder but present in the 
 
 Face-down discovery identities are deliberately withheld; revealed discoveries have a ledger. This is the correct distinction between hidden outcomes and remembered public information.
 
-[`explore.cpp`](../open_spiel/games/eclipse/systems/actions/explore.cpp) explicitly removes discarded sectors permanently. The rulebook reshuffles the corresponding discard pile when a stack runs out. This is a game-model difference requiring an engine decision, not an observation-only fix. RNG state and hidden draw order should not become policy inputs.
+[`explore.cpp`](../open_spiel/games/eclipse/systems/actions/explore.cpp) now puts discarded sectors, including the Descendants of Draco's unchosen tile, in the corresponding faceup discard pile and reuses that pile when the live stack empties. Sector III refills only reuse tiles selected for the player-count-limited setup pool; excluded tiles cannot enter play. Because chance outcomes sample uniformly from a bitmask, refilling needs no hidden draw order. The PPO observation does not expose discard-pile contents.
 
 ## Research and implementation comparisons
 
