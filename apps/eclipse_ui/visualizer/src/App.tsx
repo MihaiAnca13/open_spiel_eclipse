@@ -33,6 +33,9 @@ import ResearchTracks from './ResearchTracks';
 import ShipLegend from './components/game/ShipLegend';
 import ReputationTrack from './components/ui/ReputationTrack';
 import DiplomacyPanel from './components/overlays/DiplomacyPanel';
+import EndgameScreen from './components/overlays/EndgameScreen';
+import MinorSpeciesPool from './components/overlays/MinorSpeciesPool';
+import ScoreBreakdown from './components/ui/ScoreBreakdown';
 import { minorSpeciesImageUrl } from './types/lobby';
 
 type MainActionPreview = 'research' | 'build' | 'influence' | 'upgrade' | 'move' | 'explore';
@@ -668,19 +671,9 @@ function App({
         <div className="economy-name">
           <span style={{ color: getPlayerColor(playerId) }}>{playerLabel(playerId)} {player.species_id ? `(${player.species_id})` : ''}</span>
           <span className="economy-score" title={scoreBreakdown ? "Hover for VP Breakdown" : undefined}>
-            ⭐ {player.score}
+            ⭐ {scoreBreakdown?.total_vp ?? player.score}
             {scoreBreakdown && (
-              <div className="score-tooltip">
-                <div className="score-tooltip-row"><span>Reputation:</span> <span>+{scoreBreakdown.reputation_vp}</span></div>
-                <div className="score-tooltip-row"><span>Ambassadors:</span> <span>+{scoreBreakdown.ambassador_vp}</span></div>
-                <div className="score-tooltip-row"><span>Sectors:</span> <span>+{scoreBreakdown.sector_vp}</span></div>
-                <div className="score-tooltip-row"><span>Monoliths:</span> <span>+{scoreBreakdown.monolith_vp}</span></div>
-                <div className="score-tooltip-row"><span>Discoveries:</span> <span>+{scoreBreakdown.discovery_vp}</span></div>
-                <div className="score-tooltip-row"><span>Tech tracks:</span> <span>+{scoreBreakdown.tech_track_vp}</span></div>
-                <div className="score-tooltip-row"><span>Traitor:</span> <span>{scoreBreakdown.traitor_vp}</span></div>
-                <div className="score-tooltip-row"><span>Species:</span> <span>+{scoreBreakdown.species_vp}</span></div>
-                <div className="score-tooltip-row score-tooltip-total"><span>Total VP:</span> <span>{scoreBreakdown.total_vp}</span></div>
-              </div>
+              <ScoreBreakdown score={scoreBreakdown} className="score-tooltip" />
             )}
           </span>
         </div>
@@ -892,6 +885,11 @@ function App({
               <ShipLegend onClose={() => setShowShipLegend(false)} />
             )}
 
+            <MinorSpeciesPool
+              pool={minorSpeciesPool ?? []}
+              catalog={gameMetadata.minor_species_catalog ?? {}}
+            />
+
             {/* Floating upkeep / cleanup panel */}
             {isStarted && isMyTurn && !isTerminal && (currentPhase === 'upkeep' || currentPhase === 'cleanup') && (
               <div className="action-float">
@@ -988,16 +986,7 @@ function App({
               </div>
             )}
 
-            {/* Terminal screen */}
-            {isTerminal && (
-              <div
-                className="action-float"
-                style={{ top: '8px', left: '50%', transform: 'translateX(-50%)', maxWidth: '300px', textAlign: 'center' }}
-              >
-                <h3 className="panel-title" style={{ textAlign: 'center' }}>Game Over</h3>
-                <span className="text-xs text-[#94a3b8]">Final scores determine the winner.</span>
-              </div>
-            )}
+            {isTerminal && <EndgameScreen gameState={gameState} playerLabel={playerLabel} />}
           </div>
         </>
       )}

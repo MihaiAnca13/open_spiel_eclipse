@@ -313,6 +313,7 @@ export interface PlayerScoreBreakdown {
   tech_track_vp: number;
   traitor_vp: number;
   species_vp: number;
+  minor_species_vp: number;
   total_vp: number;
 }
 

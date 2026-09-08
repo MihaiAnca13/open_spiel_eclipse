@@ -24,8 +24,8 @@ maybe later:
 
 
 # UI Integration Backlog (Not Yet Integrated)
-- [ ] **Diplomacy & Ambassador Pacts**: Lacks visual diplomacy grid, pact indicator, or ambassador board space in the UI to manage alliances/pacts.
+- [x] **Diplomacy & Ambassador Pacts**: Pact resolution is interactive and ambassador cubes on the reputation track show active relations.
 - [x] **Upgrade Action & Discovery Parts**: UI includes blueprint customization, discovery reward choice, and stored discovery part inventory.
 - [x] **Warped Universe Module Selection**: Lobby/setup config can enable the module for supported player counts.
 - [x] **Warped Universe Wormhole Visuals**: Layout loaders and selection are operational, but galaxy rendering still needs a focused visual review for warp-region/wormhole clarity.
-- [ ] **Minor Species Module**: Ambassador relations and abilities have no UI presence or interactive components.
+- [x] **Minor Species Module**: Available relations are shown in the match UI and formation remains part of the action controls.

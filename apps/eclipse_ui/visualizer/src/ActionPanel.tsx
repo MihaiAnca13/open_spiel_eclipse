@@ -3,33 +3,16 @@
 // `gameState.explore_state`, so the UI never needs to reimplement game rules.
 
 import { ACTION } from './actionTypes';
-import type { InfluenceState, BuildState, UpgradeState, MoveState, Unit, BuildCosts, Player, ShipPartCatalog, DiscoveryTileDefinition, GameMetadata, MinorSpeciesDef } from './types/game';
+import type { InfluenceState, BuildState, UpgradeState, MoveState, Unit, BuildCosts, Player, ShipPartCatalog, DiscoveryTileDefinition, GameMetadata } from './types/game';
 import BuildPanel from './components/ui/BuildPanel';
 import MovePanel from './components/ui/MovePanel';
 import UpgradePanel from './components/ui/UpgradePanel';
 import DiscoveryChoice from './components/ui/DiscoveryChoice';
 import { minorSpeciesImageUrl } from './types/lobby';
+import { minorSpeciesEffectText } from './utils/minorSpecies';
 
 const RING_NAME: Record<number, string> = { 0: 'Inner (I)', 1: 'Middle (II)', 2: 'Outer (III)' };
 type MainActionPreview = 'research' | 'build' | 'influence' | 'upgrade' | 'move' | 'explore';
-
-const MINOR_SPECIES_ABILITY_TEXT: Record<number, (param: number) => string> = {
-  0: () => '',
-  1: () => '1 VP per Reputation tile at game end',
-  2: (param) => `−${param} Materials for Dreadnoughts`,
-  3: () => '1 VP per Ambassador tile at game end',
-  4: (param) => `−${param} Materials for Orbitals`,
-  5: () => '',
-  6: (param) => `−${param} Materials for Monoliths`,
-  7: () => 'Place 1 Population Cube',
-  8: (param) => `−${param} Science for Research`,
-  9: (param) => `−${param} Materials for Cruisers`,
-};
-
-function minorSpeciesEffectText({ ability, ability_param: abilityParam, end_vp: endVp }: MinorSpeciesDef): string {
-  const abilityText = MINOR_SPECIES_ABILITY_TEXT[ability]?.(abilityParam);
-  return [abilityText, endVp > 0 ? `${endVp} VP at game end` : ''].filter(Boolean).join(' · ');
-}
 
 export interface ExploreState {
   phase: string;
