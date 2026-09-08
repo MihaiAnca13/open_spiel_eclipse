@@ -278,6 +278,9 @@ def head_logits(head, features, rows, cols):
   ``nn.Linear``). ``cells`` formerly threaded a spatial pointer term into the
   head; that mechanism was removed.
   """
+  logits_for = getattr(head, "logits_for", None)
+  if logits_for is not None:
+    return logits_for(features, rows, cols)
   rows_for = getattr(head, "rows_for", None)
   w = rows_for(cols) if rows_for is not None else head.weight[cols]
   return (features[rows] * w).sum(-1) + head.bias[cols]
@@ -1505,6 +1508,8 @@ class PPO(nn.Module):
     log_prob / entropy only over the ~legal actions instead of all 11117.
     """
     net = self.network
+    if hasattr(net, "actor_context") and hasattr(net, "logits_for"):
+      return True
     if not (hasattr(net, "shared") and isinstance(net.actor, nn.Sequential)):
       return False
     head = net.actor[-1]
@@ -1754,7 +1759,8 @@ class PPO(nn.Module):
     values = torch.empty(batch, device=self.device)
     for net, idx in zip(nets, groups):
       n = len(idx)
-      features = net.shared(obs[idx])
+      features = net.actor_context(obs[idx]) if hasattr(
+          net, "actor_context") else net.shared(obs[idx])
       # Remap env (== row) indices in this group to local 0..n-1.
       local = np.full(batch, -1, dtype=np.int64)
       local[idx] = np.arange(n)
@@ -1769,10 +1775,11 @@ class PPO(nn.Module):
           np.stack((rows_np, mask_cols[keep]), axis=1)).to(self.device)
       rows = rc[:, 0]
       cols = rc[:, 1]
-      logits_e = self._pack_logits(features, rows, cols, net.actor[-1])
+      head = net.actor_head if hasattr(net, "actor_head") else net.actor[-1]
+      logits_e = self._pack_logits(features, rows, cols, head)
       chosen = self._gumbel_sample(logits_e, rows, cols, n)
       lse, ent = self._segment_lse_entropy(logits_e, rows, n)
-      lp = self._log_prob_chosen(features, chosen, lse, net.actor[-1])
+      lp = self._log_prob_chosen(features, chosen, lse, head)
       if getattr(net, "value_from_actor_features", False):
         # Critic shares the actor trunk: features are already computed, so read
         # the value from them instead of re-running the whole encoder via
@@ -2022,7 +2029,8 @@ class PPO(nn.Module):
           if use_sparse:
             # Slice the packed legal entries for this minibatch (vectorized via
             # the per-sample cumulative offsets).
-            features = self.network.shared(mb_obs)
+            features = (self.network.actor_context(mb_obs) if hasattr(
+                self.network, "actor_context") else self.network.shared(mb_obs))
             # A network with its own critic trunk must not have its value read off
             # the *actor* features; value_from_obs runs the right trunk. When the
             # critic shares the actor trunk, reuse the already-computed features.
@@ -2035,7 +2043,9 @@ class PPO(nn.Module):
                 # and reuse it, so the two heads never run the same Linear
                 # twice on one `features` (avoids the autocast/bf16
                 # shared-saved-tensor "backward a second time").
-                mb_rank_logits = self.network.critic[-1](features)
+                critic_features = (features.fused if hasattr(features, "fused")
+                                   else features)
+                mb_rank_logits = self.network.critic[-1](critic_features)
                 newvalue = self.network.rank_value(mb_rank_logits)
               else:
                 newvalue = self._value_from_features(features)
@@ -2051,9 +2061,11 @@ class PPO(nn.Module):
               rep = np.repeat(np.arange(len(mb_inds)), cnt_mb)
               within = np.arange(m_size) - borders[rep]
               col_idx = np.repeat(starts, cnt_mb) + within
+              head = (self.network.actor_head if hasattr(self.network, "actor_head")
+                      else self.network.actor[-1])
               logprob, entropy = self._sparse_minibatch(
                   features, rep, sparse_cols[col_idx],
-                  b_actions.long()[mb_inds], self.network.actor[-1])
+                  b_actions.long()[mb_inds], head)
             else:
               # Degenerate empty minibatch: uniform, zero-entropy losses.
               b = mb_obs.shape[0]

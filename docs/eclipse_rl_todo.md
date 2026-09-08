@@ -1050,7 +1050,13 @@ Item 8 is queued behind a decision that has not been made.
 > actor head must be threaded through there, or the ladder silently rates a
 > different policy than the one trained.
 
-### 8. The ~22% blind actions — engine "which cell is unit u on" lookup (QUEUED — 100% gate before Item 6)
+### 8. Action-addressed entity scoring (IMPLEMENTED — historical plan below is superseded)
+
+> **2026-09 status:** the existing V2 unit rows already carry the source cell
+> and six resolved destinations. The spatial candidate MLP now gathers those
+> rows by `unit_id`, gathers exact planet slots and blueprint slots, and combines
+> them nonlinearly with the action factors. Do not append `UNIT_CELLS` or alter
+> action strings; the remaining text records the investigation that led here.
 
 **Known gap, must be fixed.** The removed pointer head (see Item 7) was the only
 mechanism that routed an action to a board cell, and it only handled actions whose

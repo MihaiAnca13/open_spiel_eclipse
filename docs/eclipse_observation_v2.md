@@ -1,15 +1,9 @@
 # Eclipse observation V2 audit
 
-> **2026-08: the typed/spatial pointer head that consumed the "pointer keys"
-> below was REMOVED as a null result.** There is no `TypedPointerActorHead`,
-> `SpatialFactoredActorHead`, `logits_for`, `forward_with_context`, or
-> `PointerContext` anymore — the actor is always a `FactoredActorHead`. The
-> pointer-keys/pointers language in this doc is historical. The cell/unit/slot
-> rows are still decoded and embedded in the encoder (`SpatialEclipseEncoder`),
-> but no head gathers them as per-action pointer terms. If you are porting these
-> design notes, ignore the "action consumer ... pointers" column and the pointer
-> sections; localize details to the removed head in `docs/eclipse_rl_todo.md`
-> (Section 7).
+> **2026-09: the prior typed pointer head remains removed.** The spatial actor
+> now uses a shared candidate MLP that scores legal `(state, action)` pairs
+> from factor embeddings and the existing named unit, route, cell, planet-slot,
+> and blueprint-slot rows. It does not add an engine-side `UNIT_CELLS` block.
 
 `observation.h` is the tensor authority and `obs_layout.py` mirrors it. V2 is
 checkpoint-incompatible (`37,804` floats) and appends keyed public entities to
@@ -18,8 +12,8 @@ offset, so a C++ change fails loudly in Python instead of mis-reshaping.
 
 | Public state | Encoding | Action consumer |
 | --- | --- | --- |
-| Units | 128 registry rows: owner (8-wide rel-seat one-hot), type, cell/coords, damage, arrival RECENCY, movement and die-target flags; six resolved routes | pooled unit context (routes are not yet consumed) |
-| Planet slots | 225 x 8 exact rows: valid, type, occupied, orbital | not yet consumed |
+| Units | 128 registry rows: owner (8-wide rel-seat one-hot), type, cell/coords, damage, arrival RECENCY, movement and die-target flags; six resolved routes | candidate scorer gathers named unit rows and routes |
+| Planet slots | 225 x 8 exact rows: valid, type, occupied, orbital | candidate scorer gathers colony and combat-population targets |
 | Players | V1 relative blocks with exact blueprint slot part IDs, plus V2 absolute seat key and independent military/grid/nano bitmaps | pooled player context |
 | Galaxy | V1 semantic channels plus sector-definition id and rotation | spatial encoder |
 | Combat | ordered battle participant/arrival, destruction/killer, firing queue, dice, retreat start rounds, population target cell | tail MLP |
@@ -39,8 +33,9 @@ Writing a field into the tensor does not mean the network sees it. As first
 committed, **1,835 of the 12,882 V2 floats (14.2%) were written every step and
 read by nothing** — the encoder never referenced `V2_GLOBAL_START` or
 `V2_CELLS_START` at all, and touched only 6 of 732 seat floats and 1 of 553
-combat floats. The global, seat, cell-identity, and combat fields are now
-consumed; unit routes and planet-slot rows are still written but unconsumed.
+combat floats. The global, seat, cell-identity, combat, unit-route, and
+planet-slot fields are now consumed; unit and slot rows remain indexed until
+candidate scoring.
 The original public global block is also consumed by the tail MLP.
 
 If you add a V2 field, grep the encoder for its offset constant before claiming
@@ -54,9 +49,9 @@ Several V2 fields are normalised integer ids, not magnitudes: `sector_id`
 worse than V1, which one-hots the same planet types.
 
 They stay narrow in the tensor and are **decoded back to integers and embedded
-in Python** (`sector_embed`, `rotation_embed`, and the shared blueprint-part
-embedding). Planet-slot types remain unconsumed. This keeps the tensor at
-37,788 instead of widening it for one-hots.
+in Python** (`sector_embed`, `rotation_embed`, shared blueprint-part embedding,
+and planet-slot type embedding). This keeps categorical fields narrow in the
+tensor instead of widening them to one-hots.
 
 Cell ids (`U_CELL`, unit routes, `pop_attack` cell) are different: those are
 **pointer keys**, decoded to indices rather than learned as features. Note the
@@ -79,7 +74,7 @@ Measured over random 4p games (sampled every 25 moves, warped and unwarped):
 
 | | occupied | capacity | share |
 |---|---|---|---|
-| nonzero floats | 877–1,250 | 37,596 | **2.5%** |
+| nonzero floats | 877–1,250 | 37,804 | **2.5%** |
 | galaxy cells present | 7–11 | 225 | 3–5% |
 | valid planet-slot rows | 24–38 | 1,800 | ~2% |
 | valid unit rows | 6–10 | 128 | ~7% |
@@ -126,7 +121,7 @@ scattering.
 What the shrink genuinely buys, after the writer fix took the env-step half:
 rollout **buffer bytes**, **H2D bytes** per act step, and the fp32 minibatch
 materialization in the learn input term (`ppo.py:365`/`:1740`, which upcasts
-regardless of `--obs_buffer_dtype`). Roughly 37,596 → ~17,000 floats. On a 12 GB
+regardless of `--obs_buffer_dtype`). Roughly 37,804 → ~17,000 floats. On a 12 GB
 card that is the difference between 256–512 envs and about double that.
 
 Cost is unchanged and still the blocker: it invalidates every checkpoint, and

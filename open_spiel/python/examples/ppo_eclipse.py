@@ -526,6 +526,12 @@ flags.DEFINE_float("exploit_lr", 1e-3,
                    "Learning rate used in exploiter mode (higher than main).")
 
 
+SpatialActorContext = collections.namedtuple(
+    "SpatialActorContext",
+    ("fused", "cell_h", "unit_h", "route_h", "planet_slot_h",
+     "blueprint_slot_h", "unit_cell_h", "pop_cell"))
+
+
 class SpatialEclipseEncoder(nn.Module):
   """Spatial + relational encoder for the flat Eclipse observation tensor.
 
@@ -627,6 +633,19 @@ class SpatialEclipseEncoder(nn.Module):
     nn.init.normal_(self.blueprint_ship_embed.weight, std=0.02)
     nn.init.normal_(self.blueprint_slot_embed.weight, std=0.02)
 
+    # Planet-slot rows are action-addressable, so retain their identity rather
+    # than pooling them into the galaxy latent. Their type is categorical just
+    # like a blueprint part; slot order and the containing cell disambiguate
+    # otherwise identical Money/Science/Materials rows.
+    self.planet_type_embed = nn.Embedding(obs_layout.PLANET_TYPE_COUNT, width)
+    self.planet_slot_embed = nn.Embedding(obs_layout.PLANET_SLOTS_PER_CELL,
+                                          width)
+    self.planet_slot_mlp = self._mlp(obs_layout.PLANET_SLOT_SIZE + width, width,
+                                     depth, act, norm)
+    self.cell_actor_fc = layer_init(nn.Linear(c, width))
+    nn.init.normal_(self.planet_type_embed.weight, std=0.02)
+    nn.init.normal_(self.planet_slot_embed.weight, std=0.02)
+
     # ── Keyed V2 entity rows (unit relational block).
     self.unit_mlp = self._mlp(obs_layout.UNIT_ROW_SIZE + width + c, width,
                               depth, act, norm)
@@ -720,7 +739,11 @@ class SpatialEclipseEncoder(nn.Module):
     fused, h_cells = self._encode_impl(x, return_cells=True)
     return fused, h_cells
 
-  def _encode_impl(self, x, return_cells=False):
+  def actor_context(self, x):
+    """Retain the V2 entities needed by candidate-action scoring."""
+    return self._encode_impl(x, return_context=True)
+
+  def _encode_impl(self, x, return_cells=False, return_context=False):
     b = x.shape[0]
     x = x.reshape(b, -1)
 
@@ -747,6 +770,7 @@ class SpatialEclipseEncoder(nn.Module):
     h_cells = h_cells + (self.sector_embed(sector_id) +
                          self.rotation_embed(rotation)).transpose(1, 2)
     gal_lat = self.galaxy_fc(h_cells.mean(dim=-1))  # global avg pool -> (B,width)
+    cell_actor_h = self.cell_actor_fc(h_cells.transpose(1, 2))
 
     # Viewer self block (slot 0 is always the viewer).
     self_start = obs_layout.PLAYERS_START
@@ -796,6 +820,9 @@ class SpatialEclipseEncoder(nn.Module):
                    self.blueprint_ship_embed(ship_ids)[None, None, :, None] +
                    self.blueprint_slot_embed(slot_ids)[None, None, None, :]
                   ).mean(dim=(2, 3))
+    blueprint_slot_h = (self.part_embed(part_ids) +
+                        self.blueprint_ship_embed(ship_ids)[None, None, :, None] +
+                        self.blueprint_slot_embed(slot_ids)[None, None, None, :])
     self_lat = self_lat + blueprint_h[:, 0]
     v2seats = x[:, obs_layout.V2_SEATS_START:
                 obs_layout.V2_SEATS_START +
@@ -834,6 +861,8 @@ class SpatialEclipseEncoder(nn.Module):
                      0, obs_layout.GALAXY_CELLS - 1)
     unit_cell_h = h_cells.transpose(1, 2).gather(
         1, unit_cell.unsqueeze(-1).expand(-1, -1, h_cells.shape[1]))
+    unit_cell_actor_h = cell_actor_h.gather(
+        1, unit_cell.unsqueeze(-1).expand(-1, -1, cell_actor_h.shape[-1]))
     unit_h = self.unit_mlp(torch.cat([units, owner_h, unit_cell_h], dim=-1))
 
     # Entity self-attention so units see each other (fleet composition, who is
@@ -866,8 +895,46 @@ class SpatialEclipseEncoder(nn.Module):
     unit_mean, unit_max = masked_mean_max(unit_h, unit_valid)
     entity_lat = self.entity_fc(torch.cat([unit_mean, unit_max], dim=1))
 
+    routes = x[:, obs_layout.V2_UNIT_ROUTES_START:
+               obs_layout.V2_UNIT_ROUTES_START +
+               obs_layout.UNIT_ROWS * obs_layout.UNIT_ROUTE_SIZE].reshape(
+                   b, obs_layout.UNIT_ROWS, obs_layout.UNIT_ROUTE_SIZE)
+    route_cell = (routes * obs_layout.GALAXY_CELLS).round().long() - 1
+    route_valid = route_cell >= 0
+    route_cell = route_cell.clamp(0, obs_layout.GALAXY_CELLS - 1)
+    route_h = cell_actor_h.gather(
+        1, route_cell.reshape(b, -1, 1).expand(-1, -1, cell_actor_h.shape[-1])
+        ).reshape(b, obs_layout.UNIT_ROWS, obs_layout.UNIT_ROUTE_SIZE, -1)
+    route_h = route_h * route_valid.unsqueeze(-1)
+
+    planet_slots = x[:, obs_layout.V2_PLANET_SLOTS_START:
+                     obs_layout.V2_PLANET_SLOTS_START +
+                     obs_layout.PLANET_SLOT_ROWS * obs_layout.PLANET_SLOT_SIZE
+                     ].reshape(b, obs_layout.GALAXY_CELLS,
+                               obs_layout.PLANET_SLOTS_PER_CELL,
+                               obs_layout.PLANET_SLOT_SIZE)
+    planet_valid = planet_slots[..., 0] >= .5
+    planet_types = (planet_slots[..., 1] *
+                    (obs_layout.PLANET_TYPE_COUNT - 1)).round().long().clamp(
+                        0, obs_layout.PLANET_TYPE_COUNT - 1)
+    planet_cell_h = cell_actor_h[:, :, None, :].expand(
+        -1, -1, obs_layout.PLANET_SLOTS_PER_CELL, -1)
+    planet_slot_ids = torch.arange(obs_layout.PLANET_SLOTS_PER_CELL,
+                                   device=x.device)
+    planet_slot_h = (self.planet_slot_mlp(
+        torch.cat([planet_slots, planet_cell_h], dim=-1)) +
+        self.planet_type_embed(planet_types) +
+        self.planet_slot_embed(planet_slot_ids)[None, None, :, :])
+    planet_slot_h = planet_slot_h * planet_valid.unsqueeze(-1)
+
     fused = self.fuse(torch.cat(
         [gal_lat, self_lat, tail_lat, rel_lat, entity_lat], dim=1))
+    if return_context:
+      pop_raw = x[:, obs_layout.V2_COMBAT_START + obs_layout.VCB_POP_CELL]
+      pop_cell = (pop_raw * obs_layout.GALAXY_CELLS).round().long() - 1
+      return SpatialActorContext(
+          fused, cell_actor_h, unit_h, route_h, planet_slot_h,
+          blueprint_slot_h[:, 0], unit_cell_actor_h, pop_cell)
     if return_cells:
       # fused stays the FIRST element so actor-path consumers that call
       # `forward`/`_encode_context` (which pass return_cells=False) keep seeing
@@ -1077,6 +1144,92 @@ class FactoredActorHead(nn.Module):
     return features @ self.full_weight().t() + self.bias
 
 
+class CandidateActorHead(nn.Module):
+  """Shared nonlinear scorer for a state and the entity named by an action."""
+
+  def __init__(self, factorization, width, part_embed):
+    super().__init__()
+    self.num_actions = len(factorization.families)
+    self.out_features = self.num_actions
+    slots = factorization.decode.shape[1]
+    self.embedding = nn.Parameter(torch.randn(
+        factorization.num_rows, width) * (0.01 / np.sqrt(slots)))
+    self.part_embed = part_embed
+    self.register_buffer("decode", torch.from_numpy(
+        factorization.decode.astype(np.int64)))
+    for name in ("cell_id", "unit_id", "slot_id", "direction_id",
+                 "ship_id", "part_id"):
+      self.register_buffer(name, torch.from_numpy(
+          getattr(factorization, name).astype(np.int64)))
+    self.register_buffer("combat_population", torch.from_numpy(np.asarray(
+        [family == "combat_population" for family in factorization.families],
+        dtype=np.bool_)))
+    self.scorer = nn.Sequential(
+        layer_init(nn.Linear(8 * width, width)), nn.GELU(),
+        layer_init(nn.Linear(width, 1), std=0.01))
+
+  def _pick(self, values, rows, ids):
+    valid = ids >= 0
+    safe = ids.clamp(0, values.shape[1] - 1)
+    picked = values[rows, safe]
+    return picked * valid.unsqueeze(-1)
+
+  def logits_for(self, context, rows, cols):
+    """Scores packed `(observation row, action id)` candidates."""
+    factor_h = F.embedding_bag(self.decode[cols], self.embedding, mode="sum")
+    unit_h = self._pick(context.unit_h, rows, self.unit_id[cols])
+    unit_cell_h = self._pick(context.unit_cell_h, rows, self.unit_id[cols])
+    static_cell_h = self._pick(context.cell_h, rows, self.cell_id[cols])
+    cell_h = torch.where((self.cell_id[cols] >= 0).unsqueeze(-1),
+                         static_cell_h, unit_cell_h)
+
+    unit_id = self.unit_id[cols]
+    direction_id = self.direction_id[cols]
+    route_valid = (unit_id >= 0) & (direction_id >= 0)
+    route_h = context.route_h[
+        rows,
+        unit_id.clamp(0, context.route_h.shape[1] - 1),
+        direction_id.clamp(0, context.route_h.shape[2] - 1)]
+    route_h = route_h * route_valid.unsqueeze(-1)
+
+    slot_id = self.slot_id[cols]
+    slot_cell = self.cell_id[cols].clone()
+    population = self.combat_population[cols]
+    slot_cell = torch.where(population, context.pop_cell[rows], slot_cell)
+    slot_valid = (slot_id >= 0) & (slot_cell >= 0)
+    planet_slot_h = context.planet_slot_h[
+        rows,
+        slot_cell.clamp(0, context.planet_slot_h.shape[1] - 1),
+        slot_id.clamp(0, context.planet_slot_h.shape[2] - 1)]
+    planet_slot_h = planet_slot_h * slot_valid.unsqueeze(-1)
+
+    ship_id = self.ship_id[cols]
+    blueprint_valid = (ship_id >= 0) & (slot_id >= 0)
+    blueprint_h = context.blueprint_slot_h[
+        rows,
+        ship_id.clamp(0, context.blueprint_slot_h.shape[1] - 1),
+        slot_id.clamp(0, context.blueprint_slot_h.shape[2] - 1)]
+    blueprint_h = blueprint_h * blueprint_valid.unsqueeze(-1)
+    proposed_part_h = self.part_embed(
+        self.part_id[cols].clamp(0, obs_layout.SHIP_PART_COUNT))
+    proposed_part_h = proposed_part_h * (self.part_id[cols] >= 0).unsqueeze(-1)
+
+    return self.scorer(torch.cat([
+        context.fused[rows], factor_h, cell_h, unit_h, route_h,
+        planet_slot_h, blueprint_h, proposed_part_h], dim=-1)).squeeze(-1)
+
+  def forward(self, context):
+    cols = torch.arange(self.num_actions, device=context.fused.device)
+    chunks = []
+    for action_ids in cols.split(1024):
+      rows = torch.arange(context.fused.shape[0], device=cols.device)
+      rows = rows[:, None].expand(-1, len(action_ids)).reshape(-1)
+      action_ids = action_ids[None, :].expand(context.fused.shape[0], -1)
+      chunks.append(self.logits_for(context, rows, action_ids.reshape(-1)).reshape(
+          context.fused.shape[0], -1))
+    return torch.cat(chunks, dim=1)
+
+
 
 class EclipsePPOAgent(nn.Module):
   """MLP actor-critic for Eclipse's flat observation vector.
@@ -1171,13 +1324,20 @@ class EclipsePPOAgent(nn.Module):
           "trunk); it cannot run under --separate_critic.")
       self.cell_attn = CellAttentionCritic(
           width, hidden=width, activation=activation)
-    if factored_actions is None:
-      actor_head = layer_init(nn.Linear(width, num_actions), std=0.01)
-    else:
-      actor_head = FactoredActorHead(
+    self.candidate_actor = factored_actions is not None and encoder == "spatial"
+    if self.candidate_actor:
+      self.actor_head = CandidateActorHead(factored_actions, width,
+                                            self.shared.part_embed)
+      self.actor = self.actor_head
+    elif factored_actions is not None:
+      # Kept only for legacy flat experiments. It cannot consume V2 entities.
+      self.actor_head = FactoredActorHead(
           factored_actions.decode, factored_actions.num_rows, num_actions,
           width)
-    self.actor = nn.Sequential(self.shared, actor_head)
+      self.actor = nn.Sequential(self.shared, self.actor_head)
+    else:
+      self.actor_head = layer_init(nn.Linear(width, num_actions), std=0.01)
+      self.actor = nn.Sequential(self.shared, self.actor_head)
     # Auxiliary heads hang off the critic trunk (they are terminal-outcome
     # regressions, same job as the value head).
     self.aux_heads = nn.ModuleDict({
@@ -1226,6 +1386,8 @@ class EclipsePPOAgent(nn.Module):
     if self.critic_readout == "cell_attn":
       fused, h_cells = features
       return self.cell_attn.rank_logits(fused, h_cells)
+    if self.candidate_actor:
+      features = features.fused
     return self.critic[-1](features)
 
   def vp_components_from_features(self, features):
@@ -1300,6 +1462,8 @@ class EclipsePPOAgent(nn.Module):
     if self.critic_readout == "cell_attn":
       fused, h_cells = features
       return self.cell_attn.value(fused, h_cells)
+    if self.candidate_actor:
+      features = features.fused
     return self.rank_value(self.critic[-1](features))
 
   def value_bounds(self):
@@ -1334,15 +1498,29 @@ class EclipsePPOAgent(nn.Module):
         if n not in pred:
           pred[n] = self.aux_heads[n](fused)
       return pred
+    if self.candidate_actor:
+      features = features.fused
     return {name: head(features) for name, head in self.aux_heads.items()}
+
+  def actor_context(self, x):
+    """Policy features, retaining action-addressable entities when needed."""
+    if self.candidate_actor:
+      return self.shared.actor_context(x)
+    return self.shared(x)
+
+  def logits_for(self, features, rows, cols):
+    if self.candidate_actor:
+      return self.actor_head.logits_for(features, rows, cols)
+    return head_logits(self.actor_head, features, rows, cols)
 
   def dense_logits(self, x):
     """(B, num_actions) dense logits -- the eval/argmax entry point.
 
-    ``self.actor`` is a literal ``nn.Sequential(self.shared, actor_head)``
-    (ppo.py's ``_sparse_supported`` checks that shape); the shared trunk
-    produces a single feature vector consumed by the ``FactoredActorHead``.
+    Candidate scoring retains V2 entity rows under the spatial encoder; flat
+    actors keep the ordinary Linear path.
     """
+    if self.candidate_actor:
+      return self.actor_head(self.actor_context(x))
     return self.actor(x)
 
   def get_action_and_value(self, x, legal_actions_mask=None, action=None):
@@ -2117,6 +2295,7 @@ def _write_arch(roster_dir, num_actions, input_shape, aux_tasks):
       "activation": FLAGS.nn_activation,
       "separate_critic": FLAGS.separate_critic,
       "factored_actions": bool(FLAGS.factored_actions),
+      "actor_head": "candidate_mlp" if FLAGS.factored_actions else "linear",
       "aux_tasks": list(aux_tasks or ()),
       "num_actions": int(num_actions),
       "input_shape": list(input_shape),
@@ -2277,13 +2456,14 @@ def _argmax_over_legal(net, obs_np, legal_rows, legal_cols, idx, device):
   """
   with torch.no_grad():
     x = torch.from_numpy(obs_np[idx]).to(device)
-    features = net.shared(x)
+    features = net.actor_context(x) if hasattr(net, "actor_context") else net.shared(x)
     local = np.full(obs_np.shape[0], -1, dtype=np.int64)
     local[idx] = np.arange(len(idx))
     keep = local[legal_rows] >= 0
     rows = torch.from_numpy(local[legal_rows[keep]]).to(device)
     cols = torch.from_numpy(legal_cols[keep].astype(np.int64)).to(device)
-    logits = head_logits(net.actor[-1], features, rows, cols)
+    logits = net.logits_for(features, rows, cols) if hasattr(
+        net, "logits_for") else head_logits(net.actor[-1], features, rows, cols)
     maxima = torch.full((len(idx),), float("-inf"), device=device)
     maxima.scatter_reduce_(0, rows, logits, reduce="amax", include_self=False)
     is_max = logits == maxima[rows]

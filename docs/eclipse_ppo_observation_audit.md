@@ -19,12 +19,12 @@ Eclipse's strategic tradeoff is spending actions and influence discs to grow pro
 | ID | Area | Finding | Evidence / status |
 | --- | --- | --- | --- |
 | OBS-01 | Encoder inputs | Original global block was never consumed | Fixed: public global block now feeds the tail MLP |
-| OBS-02 | Unit identity | Attention and pooling discard registry row identity needed by action IDs | Swapping two rows changes the encoder output by only approximately 1.8e-7 |
-| OBS-03 | Movement | Six destination routes per unit are written but never read | Runtime perturbation: exactly zero encoder-output change |
-| OBS-04 | Planet slots | Exact slot type/occupancy rows are written but never read | Runtime perturbation: exactly zero encoder-output change |
+| OBS-02 | Unit identity | Attention and pooling discard registry row identity needed by action IDs | Fixed: candidate scorer gathers registry-indexed unit rows |
+| OBS-03 | Movement | Six destination routes per unit are written but never read | Fixed: candidate scorer gathers the selected route destination |
+| OBS-04 | Planet slots | Exact slot type/occupancy rows are written but never read | Fixed: candidate scorer gathers the addressed slot row |
 | OBS-05 | Blueprints | Part counts and occupied slots omitted the mapping from slot to part | Fixed: each blueprint slot now carries its part ID |
 | OBS-06 | Resources | Balances above 40 were clipped | Fixed: balances use the `uint8_t` range |
-| OBS-07 | Action head | Additive factors lack state-dependent interactions between arguments | Follows directly from the actor's scoring equation |
+| OBS-07 | Action head | Additive factors lack state-dependent interactions between arguments | Fixed: a shared nonlinear candidate scorer combines state, factors, and targets |
 | OBS-08 | Combat timing | Retreat start rounds were omitted | Fixed: keyed retreat records include the start round |
 | OBS-09 | Combat encoding | Reputation draw target count was encoded as a player identity | Fixed: normalized tile count |
 | OBS-10 | Empty units | Masked maximum returned -1e9 when no units were valid | Fixed: empty max pooling is neutral zero |
@@ -36,32 +36,34 @@ These statuses distinguish observed numerical failures, structural code findings
 
 ## Encoder and action losses
 
-### Ignored blocks: OBS-01, OBS-03, OBS-04
+### Previously ignored blocks: OBS-01, OBS-03, OBS-04
 
-[`SpatialEclipseEncoder._encode_impl`](../open_spiel/python/examples/ppo_eclipse.py) does not read these ranges from [`obs_layout.py`](../open_spiel/python/eclipse/obs_layout.py):
+The original global block feeds the tail MLP. The spatial candidate scorer now
+retains and gathers the V2 route and planet-slot rows from
+[`obs_layout.py`](../open_spiel/python/eclipse/obs_layout.py):
 
 | Block | Entries |
 | --- | ---: |
 | Original global block | 146 |
 | V2 unit routes | 768 |
 | V2 planet slots | 7,200 |
-| Total ignored | 8,114 of 37,596 (21.6%) |
+| Total previously ignored | 8,114 of 37,804 (21.5%) |
 
-The percentage includes padding and reserved entries; it is not a percentage of meaningful game information. Independently replacing each block with random values left the encoder output exactly unchanged in an eager CPU check on an opening observation, using width 16 and depth 1.
+The percentage includes padding and reserved entries; it is not a percentage of meaningful game information. Before the fix, independently replacing each block with random values left the encoder output exactly unchanged in an eager CPU check on an opening observation, using width 16 and depth 1.
 
 The original global block carries the round, phase, NPC difficulty and combat profiles, sector supply, bag sizes, available minor species, and other context. Some fields can be partly inferred elsewhere. The actual round cannot safely be replaced by board size or resource levels. Likewise, learned generic NPC owner embeddings do not expose the episode's selected NPC combat profiles.
 
-Planet aggregates and sector identities provide partial alternatives to exact slot rows, and ordinary routes can be derived from coordinates. However, the network has no direct consumption of the exact rows already supplied for these decisions.
+Planet aggregates and sector identities provide partial alternatives to exact slot rows, and ordinary routes can be derived from coordinates. The candidate scorer now consumes the exact rows for the action being scored.
 
 ### Registry identity: OBS-02
 
-Unit rows use shared processing, self-attention without registry-position embeddings, and masked mean/max pooling. Their row order is therefore discarded, up to numerical noise. Unit coordinates and ownership survive as features of the set; the mapping from registry index to unit does not.
+Unit rows use shared processing and self-attention before pooling. The candidate scorer retains the pre-pool row indexed by the action's unit ID.
 
-Actions such as `MOVE_UNIT_7_*` and `COMBAT_TARGET_UNIT_7` require that mapping. A global fleet summary can say that a damaged cruiser exists without telling the actor that it is unit 7. The factored actor receives only the fused vector, with no unit-feature lookup by action target.
+Actions such as `MOVE_UNIT_7_*` and `COMBAT_TARGET_UNIT_7` now gather that exact row, so a global fleet summary is supplemented by the action-addressable unit state.
 
 Unit coordinates and destination routes already exist in V2. Adding another engine-side unit-location table would duplicate data; the missing link is its network consumption.
 
-### Additive action factors: OBS-07
+### Previous additive action factors: OBS-07
 
 [`FactoredActorHead`](../open_spiel/python/examples/ppo_eclipse.py) sums embeddings selected by [`action_factors.py`](../open_spiel/python/eclipse/action_factors.py), then takes a dot product with the fused state vector. Movement scores have the form:
 
@@ -77,7 +79,7 @@ For two units and two directions, the difference of direction preferences is the
   = bias(u, E) - bias(u, NE) - bias(v, E) + bias(v, NE)
 ```
 
-When all four choices are legal, masking does not remove this restriction. The policy cannot freely adapt each unit's direction preference to its own changing surroundings. Similar restrictions affect build-type × cell and upgrade-slot × part combinations. More encoder width does not change this algebra.
+When all four choices are legal, masking does not remove this restriction. The old policy could not freely adapt each unit's direction preference to its own changing surroundings. Similar restrictions affected build-type × cell and upgrade-slot × part combinations. The spatial candidate MLP replaces this equation with a nonlinear score over the fused state, factor embedding, and addressed entity rows.
 
 The previous pointer experiment's null result is evidence about that experiment, not proof that these structural losses are harmless.
 
@@ -142,8 +144,8 @@ These are design references, not evidence of an Eclipse performance gain. Memory
 
 ## Recommended order and acceptance checks
 
-1. Preserve exact unit/slot identity through action selection, using existing position/route data and allowing state-dependent interactions between action arguments.
-2. Compare width and topology handling only after those correctness checks pass.
+1. Preserve exact unit/slot identity through action selection, using existing position/route data and allowing state-dependent interactions between action arguments. Fixed by the spatial candidate scorer.
+2. Compare width and topology handling only after the candidate scorer's correctness checks pass.
 
 At inspection time, `runs/roster/arch.json` specified spatial encoding, width 16, depth 1, and a factored actor. This is checkpoint metadata, not confirmation of the settings of any currently running process. Compare wider models under controlled training and wall-clock budgets; do not assume width is the primary defect.
 

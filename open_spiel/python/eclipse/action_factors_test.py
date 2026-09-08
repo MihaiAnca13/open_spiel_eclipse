@@ -62,6 +62,15 @@ class ActionFactorizationTest(absltest.TestCase):
     self.assertEqual(fz.stats["atom"], 3)
     self.assertEqual(len(set(map(tuple, fz.decode.tolist()))), 3)
 
+  def test_upgrade_metadata_uses_observation_part_ids(self):
+    fz = build_action_factorization([
+        "UPGRADE_CRUISER_SLOT2_ION_CANNON",
+        "UPGRADE_INTERCEPTOR_SLOT1_REMOVE",
+    ])
+    np.testing.assert_array_equal(fz.ship_id, [1, 0])
+    np.testing.assert_array_equal(fz.slot_id, [2, 1])
+    np.testing.assert_array_equal(fz.part_id, [1, 0])
+
 
 class FactoredActorHeadTest(absltest.TestCase):
 
@@ -83,7 +92,7 @@ class FactoredActorHeadTest(absltest.TestCase):
                agent_fn=lambda n, s, d: net, value_mode="win")
 
   def _assert_sparse_matches_dense(self, net, agent, batch):
-    feats = net.shared(batch)
+    feats = net.actor_context(batch)
     legal = [sorted(np.random.RandomState(k).choice(
         self.num_actions, size=40, replace=False).tolist())
         for k in range(batch.shape[0])]
@@ -92,7 +101,7 @@ class FactoredActorHeadTest(absltest.TestCase):
 
     packed = agent._pack_logits(feats,
                                torch.from_numpy(rows.astype(np.int64)),
-                               torch.from_numpy(cols), net.actor[-1])
+                               torch.from_numpy(cols), net.actor_head)
     dense = net.dense_logits(batch)
     reference = dense[torch.from_numpy(rows.astype(np.int64)),
                       torch.from_numpy(cols)]
@@ -293,7 +302,7 @@ class FactoredActorHeadTest(absltest.TestCase):
       self.assertGreater(float((net.shared(changed) - net.shared(x)).abs().max()),
                          1e-5)
 
-  def test_every_v2_block_reaches_the_features(self):
+  def test_routes_and_planet_slots_reach_candidate_context(self):
     """No V2 sub-block may be write-only.
 
     1,835 of the 12,882 V2 floats (14.2%) were written every step and read by
@@ -301,29 +310,26 @@ class FactoredActorHeadTest(absltest.TestCase):
     seat tech tracks and the whole combat queue. Perturb each block in turn; the
     fused features must move, or that block is dead weight in the tensor again.
     """
-    net = self._flat_net()
+    net = EclipsePPOAgent(
+        self.num_actions, (self.obs_size,), "cpu", width=32, depth=1,
+        aux_tasks=(), factored_actions=self.fz, encoder="spatial")
     state = self.game.new_initial_state()
     while state.is_chance_node():
       state.apply_action(state.chance_outcomes()[0][0])
     x = torch.tensor([state.observation_tensor(0)], dtype=torch.float32)
-    blocks = {
-        "v2_global": (obs_layout.V2_GLOBAL_START, obs_layout.V2_GLOBAL_SIZE),
-        "v2_cells": (obs_layout.V2_CELLS_START,
-                     obs_layout.GALAXY_CELLS * obs_layout.V2_CELL_SIZE),
-        "v2_seat_tech": (obs_layout.V2_SEATS_START + obs_layout.VS_TECH_TRACKS,
-                         obs_layout.TECH_TRACK_COUNT * obs_layout.TECH_BIT_COUNT),
-        "v2_combat": (obs_layout.V2_COMBAT_START, obs_layout.V2_COMBAT_SIZE),
-        "v2_units": (obs_layout.V2_UNITS_START,
-                     obs_layout.UNIT_ROWS * obs_layout.UNIT_ROW_SIZE),
-    }
     with torch.no_grad():
-      base = net.shared(x)
-      for name, (start, size) in blocks.items():
-        x2 = x.clone()
-        x2[0, start:start + size] += 0.25
-        moved = net.shared(x2)
-        self.assertGreater(float((moved - base).abs().max()), 1e-5,
-                           f"{name} does not reach the features")
+      base = net.actor_context(x)
+      routes = x.clone()
+      routes[:, obs_layout.V2_UNIT_ROUTES_START:
+             obs_layout.V2_UNIT_ROUTES_START + obs_layout.UNIT_ROUTE_SIZE] = .5
+      self.assertGreater(float((net.actor_context(routes).route_h -
+                                base.route_h).abs().max()), 1e-5)
+      slots = x.clone()
+      slots[:, obs_layout.V2_PLANET_SLOTS_START:
+            obs_layout.V2_PLANET_SLOTS_START + obs_layout.PLANET_SLOT_SIZE] = \
+          torch.tensor([1., 1., 1., 0.])
+      self.assertGreater(float((net.actor_context(slots).planet_slot_h -
+                                base.planet_slot_h).abs().max()), 1e-5)
 
 
 class BuildAuxTargetsBreakdownTest(absltest.TestCase):

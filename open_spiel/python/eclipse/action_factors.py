@@ -66,6 +66,27 @@ _PATTERNS = [
     ("infl_cell", re.compile(r"^COMBAT_INFLUENCE_TO_(-?\d+_-?\d+)$"), ("cell",)),
 ]
 
+# ``ShipPartId`` in games/eclipse/tech.h.  Action strings use the enum names,
+# while observations store its compact integer value (NONE == 0).
+_PART_IDS = {
+    name: i for i, name in enumerate((
+        "NONE", "ION_CANNON", "NUCLEAR_SOURCE", "NUCLEAR_DRIVE", "HULL",
+        "ELECTRON_COMPUTER", "PLASMA_CANNON", "PHASE_SHIELD",
+        "TACHYON_SOURCE", "GLUON_COMPUTER", "PLASMA_MISSILE",
+        "FUSION_SOURCE", "IMPROVED_HULL", "POSITRON_COMPUTER",
+        "GAUSS_SHIELD", "TACHYON_DRIVE", "ANTIMATTER_CANNON",
+        "FUSION_DRIVE", "ABSORPTION_SHIELD", "CONIFOLD_FIELD",
+        "FLUX_MISSILE", "SENTIENT_HULL", "SOLITON_CANNON",
+        "TRANSITION_DRIVE", "ZERO_POINT_SOURCE", "RIFT_CANNON",
+        "MUON_SOURCE", "RIFT_CONDUCTOR", "ANTIMATTER_MISSILE",
+        "AXION_COMPUTER", "CONFORMAL_DRIVE", "FLUX_SHIELD",
+        "HYPERGRID_SOURCE", "INVERSION_SHIELD", "ION_DISRUPTOR",
+        "ION_MISSILE", "ION_TURRET", "JUMP_DRIVE", "MORPH_SHIELD",
+        "NONLINEAR_DRIVE", "PLASMA_TURRET", "SHARD_HULL",
+        "SOLITON_CHARGER", "SOLITON_MISSILE"))}
+_SHIP_IDS = {name: i for i, name in enumerate(
+    ("INTERCEPTOR", "CRUISER", "DREADNOUGHT", "STARBASE"))}
+
 
 class ActionFactorization:
   """Decode table mapping each action id to its embedding rows.
@@ -82,10 +103,12 @@ class ActionFactorization:
       actor head look up the per-cell conv feature for a cell-targeting
       action; ``decode``'s cell slot is a row index into the shared factor
       table and is NOT usable as a spatial index.
+    ship_id, part_id: upgrade blueprint ship and proposed ``ShipPartId`` (NONE
+      for REMOVE), or -1 for unrelated actions.
   """
 
   def __init__(self, decode, num_rows, families, stats, cell_id, unit_id,
-               slot_id, seat_id, direction_id, family_id):
+               slot_id, seat_id, direction_id, family_id, ship_id, part_id):
     self.decode = decode
     self.num_rows = num_rows
     self.families = families
@@ -96,6 +119,8 @@ class ActionFactorization:
     self.seat_id = seat_id
     self.direction_id = direction_id
     self.family_id = family_id
+    self.ship_id = ship_id
+    self.part_id = part_id
 
   def summary(self):
     factored = sum(n for f, n in self.stats.items() if f != "atom")
@@ -129,6 +154,8 @@ def build_action_factorization(action_strings):
   slot_id = np.full(num_actions, -1, dtype=np.int64)
   seat_id = np.full(num_actions, -1, dtype=np.int64)
   direction_id = np.full(num_actions, -1, dtype=np.int64)
+  ship_id = np.full(num_actions, -1, dtype=np.int64)
+  part_id = np.full(num_actions, -1, dtype=np.int64)
   families = []
   stats = {}
   for action in range(num_actions):
@@ -156,10 +183,12 @@ def build_action_factorization(action_strings):
           cell_id[action] = obs_layout.hex_to_index(int(q), int(r))
         elif f == "unit":
           unit_id[action] = int(v)
+        elif f == "ship":
+          ship_id[action] = _SHIP_IDS[v]
+        elif f == "part":
+          part_id[action] = _PART_IDS["NONE" if v == "REMOVE" else v]
         elif f == "slot":
-          # Colony slots are keyed by (cell, slot); upgrade slots are not
-          # board entities and intentionally remain ungrounded.
-          if family == "colony":
+          if family in ("colony", "upgrade"):
             slot_id[action] = int(v)
         elif f == "dir":
           direction_id[action] = ("E", "NE", "NW", "W", "SW", "SE").index(v)
@@ -189,7 +218,8 @@ def build_action_factorization(action_strings):
   family_rows = {name: i for i, name in enumerate(sorted(set(families)))}
   family_id = np.asarray([family_rows[name] for name in families], dtype=np.int64)
   return ActionFactorization(decode, len(rows), families, stats, cell_id,
-                             unit_id, slot_id, seat_id, direction_id, family_id)
+                             unit_id, slot_id, seat_id, direction_id, family_id,
+                             ship_id, part_id)
 
 
 def factorization_from_game(game, player=0):
