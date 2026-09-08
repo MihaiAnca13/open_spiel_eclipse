@@ -26,7 +26,7 @@ mis-reshaping a tensor deep inside the encoder.
 Layout shape, seat-relative from the viewing player:
 
     A  global                        146
-    B  6 x player block (547)       3282   slot 0 is ALWAYS the viewer
+    B  6 x player block (579)       3474   slot 0 is ALWAYS the viewer
     C  galaxy 225 cells x 88       19800   cell-major, channel-minor
     D  tech market                    88
     E  combat                        940
@@ -34,7 +34,7 @@ Layout shape, seat-relative from the viewing player:
     G  action sub-states              367
     H  V2 keyed public entities     12882
                                   ------
-                                   37596
+                                   37788
 """
 
 import numpy as np
@@ -67,7 +67,7 @@ GALAXY_CELLS = GALAXY_DIM * GALAXY_DIM   # 225
 
 # ── block sizes ───────────────────────────────────────────────────────────
 GLOBAL_SIZE = 146
-PLAYER_SIZE = 547
+PLAYER_SIZE = 579
 CELL_CHANNELS = 88
 GALAXY_SIZE = GALAXY_CELLS * CELL_CHANNELS
 TECH_MARKET_SIZE = 88
@@ -193,18 +193,19 @@ P_TRADE_RATE = 66
 P_GRAVEYARD = 67                 # + 3
 P_TECH_BITS = 70                 # + TECH_BIT_COUNT
 P_BLUEPRINTS = 116               # + PLAYER_SHIP_TYPES * BLUEPRINT_SIZE
-P_PARTS_INV = 388                # + SHIP_PART_COUNT
-P_REP_TRACK = 432                # + REP_SLOTS * REP_SLOT_SIZE
-P_AMBASSADOR_HELD = 522
-P_TRAITOR = 524
-P_DISCOVERY_VP = 525
-P_MINOR_SPECIES = 526            # + MINOR_SPECIES_COUNT
-P_WARP_ELIGIBLE = 535
-P_ARTIFACT_CHUNKS = 536
-P_BUILD_COST = 537               # + BUILD_TYPE_COUNT
+P_PARTS_INV = 420                # + SHIP_PART_COUNT
+P_REP_TRACK = 464                # + REP_SLOTS * REP_SLOT_SIZE
+P_AMBASSADOR_HELD = 554
+P_TRAITOR = 556
+P_DISCOVERY_VP = 557
+P_MINOR_SPECIES = 558            # + MINOR_SPECIES_COUNT
+P_WARP_ELIGIBLE = 567
+P_ARTIFACT_CHUNKS = 568
+P_BUILD_COST = 569               # + BUILD_TYPE_COUNT
 
 SHIP_STATS_SIZE = 6 + 2 * DIE_COLOR_COUNT                       # 16
-BLUEPRINT_SIZE = SHIP_STATS_SIZE + SHIP_PART_COUNT + BLUEPRINT_SLOTS + 1   # 68
+BLUEPRINT_SLOT_PART_IDS = SHIP_STATS_SIZE + SHIP_PART_COUNT + BLUEPRINT_SLOTS
+BLUEPRINT_SIZE = BLUEPRINT_SLOT_PART_IDS + BLUEPRINT_SLOTS + 1   # 76
 REP_SLOT_SIZE = REP_SLOT_KIND_COUNT + 1 + REL_SEAT_WIDTH + REP_TILE_VALUE_COUNT + 1  # 18
 REP_SLOT_AMBASSADOR_FROM = REP_SLOT_KIND_COUNT + 1              # 4
 
@@ -307,7 +308,7 @@ def validate(game_or_size):
 
 def _self_check():
   """Internal consistency of the derived constants."""
-  assert PLAYER_SIZE == 547, PLAYER_SIZE
+  assert PLAYER_SIZE == 579, PLAYER_SIZE
   assert P_BLUEPRINTS == P_TECH_BITS + TECH_BIT_COUNT + 2 * TECH_TRACK_COUNT
   assert P_PARTS_INV == P_BLUEPRINTS + PLAYER_SHIP_TYPES * BLUEPRINT_SIZE
   assert P_REP_TRACK == P_PARTS_INV + SHIP_PART_COUNT + 1
@@ -316,7 +317,7 @@ def _self_check():
   assert C_WARP_DEST_DIR + HEX_DIRECTIONS == CELL_CHANNELS
   assert U_LEGAL_DIE_TARGET + 1 == UNIT_ROW_SIZE
   assert V2_COMBAT_START + V2_COMBAT_SIZE == TOTAL
-  assert TOTAL == 37596, TOTAL
+  assert TOTAL == 37788, TOTAL
   # The V2 sub-block offsets must tile their blocks exactly, or the encoder
   # reads one field while believing it reads another.
   assert VG_CURRENT_DISCOVERY + DISCOVERY_BIT_COUNT + 1 == V2_GLOBAL_SIZE

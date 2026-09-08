@@ -148,6 +148,16 @@ class ObsBufferDtypeTest(absltest.TestCase):
         f"fp16 storage; smallest magnitude present is "
         f"{self.obs[nonzero].abs().min().item():.3e}")
 
+  def test_blueprint_part_id_changes_encoder_features(self):
+    x = self.obs[:1].clone()
+    part_id = (obs_layout.PLAYERS_START + obs_layout.P_BLUEPRINTS +
+               obs_layout.BLUEPRINT_SLOT_PART_IDS)
+    x[:, part_id] = 0.0
+    none_features = self.encoder(x)
+    x[:, part_id] = 1.0 / obs_layout.SHIP_PART_COUNT
+    part_features = self.encoder(x)
+    self.assertFalse(torch.equal(none_features, part_features))
+
     rel = ((rt - self.obs).abs() / self.obs.abs().clamp(min=1e-12))[nonzero]
     self.assertLess(rel.max().item(), 1e-2)
 

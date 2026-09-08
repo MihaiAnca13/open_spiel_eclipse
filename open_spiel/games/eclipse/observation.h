@@ -160,6 +160,7 @@ constexpr int kBlueprintSize =
     kShipStatsSize
     + kShipPartCount        // count of each part mounted
     + kBlueprintSlots       // per-slot occupied
+    + kBlueprintSlots       // per-slot part id (NONE == 0)
     + 1;                    // capacity
 
 constexpr int kRepSlotSize =
@@ -273,12 +274,12 @@ constexpr int kPlayerTechBitsOffset = 70;
 constexpr int kPlayerBlueprintsOffset = kPlayerTechBitsOffset + kTechBitCount
                                         + 2 * kTechTrackCount;          // 116
 constexpr int kPlayerPartsInvOffset =
-    kPlayerBlueprintsOffset + kPlayerShipTypes * kBlueprintSize;        // 388
-constexpr int kPlayerRepTrackOffset = kPlayerPartsInvOffset + kShipPartCount + 1;  // 432
+    kPlayerBlueprintsOffset + kPlayerShipTypes * kBlueprintSize;        // 420
+constexpr int kPlayerRepTrackOffset = kPlayerPartsInvOffset + kShipPartCount + 1;  // 464
 // Within one reputation slot: the partner's seat-relative one-hot.
 constexpr int kRepSlotAmbassadorFromOffset = kRepSlotKindCount + 1;     // 4
 constexpr int kPlayerAmbassadorHeldOffset =
-    kPlayerRepTrackOffset + kRepSlots * kRepSlotSize;                   // 522
+    kPlayerRepTrackOffset + kRepSlots * kRepSlotSize;                   // 554
 constexpr int kPlayerTraitorOffset = kPlayerAmbassadorHeldOffset + 2;   // 524
 constexpr int kPlayerDiscoveryVpOffset = kPlayerAmbassadorHeldOffset + 3;
 constexpr int kPlayerMinorSpeciesOffset = kPlayerAmbassadorHeldOffset + 4;

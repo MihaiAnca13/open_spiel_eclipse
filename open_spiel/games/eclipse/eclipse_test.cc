@@ -1811,6 +1811,45 @@ void ObservationLayoutTest() {
     }
   }
 
+  // Blueprint slots retain their installed-part identity, not just the
+  // histogram and occupancy pattern used by the legacy representation.
+  Blueprint& blueprint = raw.players[0].blueprints[0];
+  blueprint.slots[0] = ShipPartId::ION_CANNON;
+  blueprint.slots[1] = ShipPartId::HULL;
+  std::vector<float> blueprint_before(n, 0.0f);
+  state->ObservationTensor(0, absl::MakeSpan(blueprint_before));
+  std::swap(blueprint.slots[0], blueprint.slots[1]);
+  std::vector<float> blueprint_after(n, 0.0f);
+  state->ObservationTensor(0, absl::MakeSpan(blueprint_after));
+  const int blueprint_parts = obs::PlayerBlockStart(0) +
+      obs::kPlayerBlueprintsOffset + obs::kShipStatsSize +
+      obs::kShipPartCount + obs::kBlueprintSlots;
+  SPIEL_CHECK_NE(blueprint_before[blueprint_parts],
+                 blueprint_after[blueprint_parts]);
+  SPIEL_CHECK_NE(blueprint_before[blueprint_parts + 1],
+                 blueprint_after[blueprint_parts + 1]);
+
+  const std::array<uint8_t Resources::*, 3> resources = {
+      &Resources::gold, &Resources::science, &Resources::materials};
+  const std::array<int, 3> resource_offsets = {
+      obs::kPlayerGoldOffset, obs::kPlayerScienceOffset,
+      obs::kPlayerMaterialsOffset};
+  for (int i = 0; i < 3; ++i) {
+    raw.players[0].resources.*resources[i] = 70;
+    std::vector<float> seventy(n, 0.0f);
+    state->ObservationTensor(0, absl::MakeSpan(seventy));
+    raw.players[0].resources.*resources[i] = 90;
+    std::vector<float> ninety(n, 0.0f);
+    state->ObservationTensor(0, absl::MakeSpan(ninety));
+    const int resource = obs::PlayerBlockStart(0) + resource_offsets[i];
+    SPIEL_CHECK_NE(seventy[resource], ninety[resource]);
+  }
+  raw.players[0].resources.gold = 255;
+  std::vector<float> gold_max(n, 0.0f);
+  state->ObservationTensor(0, absl::MakeSpan(gold_max));
+  SPIEL_CHECK_EQ(gold_max[obs::PlayerBlockStart(0) + obs::kPlayerGoldOffset],
+                 1.0f);
+
   // ── a face-down discovery tile's IDENTITY must not reach the tensor ──────
   // Find a sector that still carries an unclaimed tile, then check that
   // rewriting the tile's identity leaves the observation bit-identical.

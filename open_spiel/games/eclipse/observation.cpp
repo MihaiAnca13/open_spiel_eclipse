@@ -135,6 +135,11 @@ int WriteBlueprint(absl::Span<float> v, int base, const Blueprint& bp) {
     Flag(v, o + i, bp.slots[i] != ShipPartId::NONE);
   }
   o += kBlueprintSlots;
+  for (int i = 0; i < kBlueprintSlots; ++i) {
+    Frac(v, o + i, static_cast<float>(bp.slots[i]),
+         static_cast<float>(kShipPartCount));
+  }
+  o += kBlueprintSlots;
   Frac(v, o++, static_cast<float>(bp.capacity),
        static_cast<float>(kBlueprintSlots));
   SPIEL_CHECK_EQ(o, base + kBlueprintSize);
@@ -316,9 +321,9 @@ void WriteObservationTensor(const ::State& state, int player, int num_players,
          60.0f);
     Flag(values, o++, p.vp_at_elimination >= 0);
 
-    Frac(values, o++, static_cast<float>(p.resources.gold), 40.0f);
-    Frac(values, o++, static_cast<float>(p.resources.science), 40.0f);
-    Frac(values, o++, static_cast<float>(p.resources.materials), 40.0f);
+    Frac(values, o++, static_cast<float>(p.resources.gold), 255.0f);
+    Frac(values, o++, static_cast<float>(p.resources.science), 255.0f);
+    Frac(values, o++, static_cast<float>(p.resources.materials), 255.0f);
     // The raw track index (cubes remaining, 12 = empty of population) ...
     Frac(values, o++, static_cast<float>(p.resources.gold_prod), 12.0f);
     Frac(values, o++, static_cast<float>(p.resources.science_prod), 12.0f);

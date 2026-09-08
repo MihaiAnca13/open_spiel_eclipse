@@ -589,7 +589,7 @@ class SpatialEclipseEncoder(nn.Module):
     nn.init.normal_(self.sector_embed.weight, std=0.02)
     nn.init.normal_(self.rotation_embed.weight, std=0.02)
 
-    # ── Viewer self block: (547,) MLP ───────────────────────────────────────
+    # ── Viewer self block: (579,) MLP ───────────────────────────────────────
     self.self_mlp = self._mlp(
         obs_layout.PLAYER_SIZE, width, depth, act, norm)
 
@@ -614,6 +614,17 @@ class SpatialEclipseEncoder(nn.Module):
     self.seat_mlp = self._mlp(obs_layout.PLAYER_SIZE + obs_layout.V2_SEAT_SIZE,
                               width, depth, act, norm)
     self.rel_fc = layer_init(nn.Linear(2 * width, width))
+
+    # Blueprint part ids are categorical, not ordered magnitudes. The writer
+    # keeps them compact as normalized ids; decode them through one lookup.
+    self.part_embed = nn.Embedding(obs_layout.SHIP_PART_COUNT + 1, width)
+    self.blueprint_ship_embed = nn.Embedding(obs_layout.PLAYER_SHIP_TYPES,
+                                             width)
+    self.blueprint_slot_embed = nn.Embedding(obs_layout.BLUEPRINT_SLOTS,
+                                             width)
+    nn.init.normal_(self.part_embed.weight, std=0.02)
+    nn.init.normal_(self.blueprint_ship_embed.weight, std=0.02)
+    nn.init.normal_(self.blueprint_slot_embed.weight, std=0.02)
 
     # ── Keyed V2 entity rows (unit relational block).
     self.unit_mlp = self._mlp(obs_layout.UNIT_ROW_SIZE + width + c, width,
@@ -764,11 +775,31 @@ class SpatialEclipseEncoder(nn.Module):
               obs_layout.PLAYERS_START +
               obs_layout.SEAT_SLOTS * obs_layout.PLAYER_SIZE
               ].reshape(b, obs_layout.SEAT_SLOTS, obs_layout.PLAYER_SIZE)
+    blueprints = seats[:, :, obs_layout.P_BLUEPRINTS:
+                       obs_layout.P_BLUEPRINTS +
+                       obs_layout.PLAYER_SHIP_TYPES *
+                       obs_layout.BLUEPRINT_SIZE].reshape(
+                           b, obs_layout.SEAT_SLOTS,
+                           obs_layout.PLAYER_SHIP_TYPES,
+                           obs_layout.BLUEPRINT_SIZE)
+    part_ids = (blueprints[:, :, :, obs_layout.BLUEPRINT_SLOT_PART_IDS:
+                           obs_layout.BLUEPRINT_SLOT_PART_IDS +
+                           obs_layout.BLUEPRINT_SLOTS] *
+                obs_layout.SHIP_PART_COUNT).round().long().clamp(
+                    0, obs_layout.SHIP_PART_COUNT)
+    ship_ids = torch.arange(obs_layout.PLAYER_SHIP_TYPES, device=x.device)
+    slot_ids = torch.arange(obs_layout.BLUEPRINT_SLOTS, device=x.device)
+    blueprint_h = (self.part_embed(part_ids) +
+                   self.blueprint_ship_embed(ship_ids)[None, None, :, None] +
+                   self.blueprint_slot_embed(slot_ids)[None, None, None, :]
+                  ).mean(dim=(2, 3))
+    self_lat = self_lat + blueprint_h[:, 0]
     v2seats = x[:, obs_layout.V2_SEATS_START:
                 obs_layout.V2_SEATS_START +
                 obs_layout.SEAT_SLOTS * obs_layout.V2_SEAT_SIZE
                 ].reshape(b, obs_layout.SEAT_SLOTS, obs_layout.V2_SEAT_SIZE)
-    seat_h = self.seat_mlp(torch.cat([seats, v2seats], dim=-1))   # (B, 6, width)
+    seat_h = (self.seat_mlp(torch.cat([seats, v2seats], dim=-1)) +
+              blueprint_h)   # (B, 6, width)
     occ = seats[:, :, obs_layout.P_OCCUPIED] >= 0.5   # (B, 6)
     mask = occ.unsqueeze(-1)
     denom = occ.float().sum(dim=1, keepdim=True).clamp(min=1.0)

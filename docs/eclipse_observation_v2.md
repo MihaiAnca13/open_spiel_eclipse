@@ -12,17 +12,17 @@
 > (Section 7).
 
 `observation.h` is the tensor authority and `obs_layout.py` mirrors it. V2 is
-checkpoint-incompatible (`37,596` floats) and appends keyed public entities to
+checkpoint-incompatible (`37,788` floats) and appends keyed public entities to
 the V1 blocks. `obs_layout._self_check` pins the total and every sub-block
 offset, so a C++ change fails loudly in Python instead of mis-reshaping.
 
 | Public state | Encoding | Action consumer |
 | --- | --- | --- |
-| Units | 128 registry rows: owner (8-wide rel-seat one-hot), type, cell/coords, damage, arrival RECENCY, movement and die-target flags; six resolved routes | move and combat target pointers |
-| Planet slots | 225 x 8 exact rows: valid, type, occupied, orbital | colony and population-combat pointers |
-| Players | V1 relative blocks plus V2 absolute seat key and independent military/grid/nano bitmaps | diplomacy pointer |
-| Galaxy | V1 semantic channels plus sector-definition id and rotation | cell pointers |
-| Combat | ordered battle participant/arrival, destruction/killer, firing queue, dice, retreats, population target cell | combat decisions |
+| Units | 128 registry rows: owner (8-wide rel-seat one-hot), type, cell/coords, damage, arrival RECENCY, movement and die-target flags; six resolved routes | pooled unit context (routes are not yet consumed) |
+| Planet slots | 225 x 8 exact rows: valid, type, occupied, orbital | not yet consumed |
+| Players | V1 relative blocks with exact blueprint slot part IDs, plus V2 absolute seat key and independent military/grid/nano bitmaps | pooled player context |
+| Galaxy | V1 semantic channels plus sector-definition id and rotation | spatial encoder |
+| Combat | ordered battle participant/arrival, destruction/killer, firing queue, dice, retreats, population target cell | tail MLP |
 | Discoveries | current revealed identity and a 30-kind public ledger | reward-versus-VP decision and history |
 | Tech bag | exact 40-kind histogram | research evaluation |
 
@@ -39,9 +39,8 @@ Writing a field into the tensor does not mean the network sees it. As first
 committed, **1,835 of the 12,882 V2 floats (14.2%) were written every step and
 read by nothing** — the encoder never referenced `V2_GLOBAL_START` or
 `V2_CELLS_START` at all, and touched only 6 of 732 seat floats and 1 of 553
-combat floats. That included the tech-bag histogram, the discovery ledger and
-the entire keyed combat queue: precisely the features this block exists to
-expose. All of it is now consumed (`SpatialEclipseEncoder._encode_impl`).
+combat floats. The global, seat, cell-identity, and combat fields are now
+consumed; unit routes and planet-slot rows are still written but unconsumed.
 
 If you add a V2 field, grep the encoder for its offset constant before claiming
 the agent can use it.
@@ -54,9 +53,9 @@ Several V2 fields are normalised integer ids, not magnitudes: `sector_id`
 worse than V1, which one-hots the same planet types.
 
 They stay narrow in the tensor and are **decoded back to integers and embedded
-in Python** (`sector_embed`, `rotation_embed`, `planet_type_embed`). That is the
-OpenAI Five / AlphaStar treatment of a categorical, and it keeps the tensor at
-37,596 instead of widening it for one-hots.
+in Python** (`sector_embed`, `rotation_embed`, and the shared blueprint-part
+embedding). Planet-slot types remain unconsumed. This keeps the tensor at
+37,788 instead of widening it for one-hots.
 
 Cell ids (`U_CELL`, unit routes, `pop_attack` cell) are different: those are
 **pointer keys**, decoded to indices rather than learned as features. Note the
