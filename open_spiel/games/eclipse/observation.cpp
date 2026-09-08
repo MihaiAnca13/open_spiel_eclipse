@@ -159,6 +159,7 @@ int WritePendingReturns(absl::Span<float> v, int base,
 
 // ══════════════════════════════════════════════════════════════════════════
 void WriteObservationTensor(const ::State& state, int player, int num_players,
+                            bool reveal_reputation,
                             absl::Span<float> values) {
   SPIEL_CHECK_EQ(static_cast<int>(values.size()), kTotalSize);
   std::fill(values.begin(), values.end(), 0.0f);
@@ -215,25 +216,27 @@ void WriteObservationTensor(const ::State& state, int player, int num_players,
     Frac(values, o++, static_cast<float>(__builtin_popcount(state.sector_bag_inner)), 10.0f);
     Frac(values, o++, static_cast<float>(__builtin_popcount(state.sector_bag_middle)), 16.0f);
     Frac(values, o++, static_cast<float>(__builtin_popcount(state.sector_bag_outer)), 22.0f);
-    // Bag composition is deducible from public play (ring tile lists and every
-    // placement are public), so the masks themselves are fair to expose.
+    // The outer supply is a random setup subset; its identities stay hidden.
     Bits(values, o, state.sector_bag_inner, 10);   o += 10;
     Bits(values, o, state.sector_bag_middle, 16);  o += 16;
-    Bits(values, o, state.sector_bag_outer, 22);   o += 22;
+    o += 22;
 
-    // Bag SIZES only — never contents.
+    // Bag sizes are public; reputation values become public at scoring.
     Frac(values, o++, static_cast<float>(state.tech_bag.size()), 130.0f);
     Frac(values, o++, static_cast<float>(state.discovery_bag.size()), 40.0f);
     Frac(values, o++, static_cast<float>(state.reputation_tiles.size()), 40.0f);
-    int rep_remaining[4] = {0, 0, 0, 0};
-    for (const ReputationTiles t : state.reputation_tiles) {
-      const int idx = static_cast<int>(t);
-      if (idx >= 0 && idx < 4) ++rep_remaining[idx];
+    if (reveal_reputation) {
+      int rep_remaining[4] = {0, 0, 0, 0};
+      for (const ReputationTiles t : state.reputation_tiles) {
+        const int idx = static_cast<int>(t);
+        if (idx >= 0 && idx < 4) ++rep_remaining[idx];
+      }
+      for (int i = 0; i < 4; ++i) {
+        Frac(values, o + i, static_cast<float>(rep_remaining[i]),
+             static_cast<float>(REPUTATION_TILE_COUNTS[i]));
+      }
     }
-    for (int i = 0; i < 4; ++i) {
-      Frac(values, o++, static_cast<float>(rep_remaining[i]),
-           static_cast<float>(REPUTATION_TILE_COUNTS[i]));
-    }
+    o += 4;
 
     for (const uint8_t ms : state.minor_species_pool) {
       if (ms < kMinorSpeciesCount) values[o + ms] = 1.0f;
@@ -255,6 +258,8 @@ void WriteObservationTensor(const ::State& state, int player, int num_players,
     const int seat = SeatForSlot(slot, player, num_players);
     const ::Player& p = state.players[seat];
     const SpeciesData& sp = SPECIES_TABLE[static_cast<size_t>(p.species_id)];
+    const bool can_see_reputation =
+        seat == player || reveal_reputation;
 
     Flag(values, o++, true);                    // occupied
     Flag(values, o++, seat == player);          // is the viewer
@@ -287,10 +292,14 @@ void WriteObservationTensor(const ::State& state, int player, int num_players,
     const PlayerScoreBreakdown& sb = scores[seat];
     // An eliminated snapshot total can be negative (traitor -2); clamp it to
     // match the clamped vp_at_elimination column below and the returns path.
+    const int16_t visible_total_vp =
+        sb.total_vp - (can_see_reputation ? 0 : sb.reputation_vp);
     const int16_t live_total_vp =
-        p.eliminated ? std::max<int16_t>(sb.total_vp, 0) : sb.total_vp;
+        p.eliminated ? std::max<int16_t>(visible_total_vp, 0)
+                     : visible_total_vp;
     Frac(values, o++, static_cast<float>(live_total_vp), 60.0f);
-    Frac(values, o++, static_cast<float>(sb.reputation_vp), 30.0f);
+    Frac(values, o++,
+         static_cast<float>(can_see_reputation ? sb.reputation_vp : 0), 30.0f);
     Frac(values, o++, static_cast<float>(sb.ambassador_vp), 10.0f);
     Frac(values, o++, static_cast<float>(sb.sector_vp), 30.0f);
     Frac(values, o++, static_cast<float>(sb.monolith_vp), 20.0f);
@@ -299,7 +308,12 @@ void WriteObservationTensor(const ::State& state, int player, int num_players,
     Frac(values, o++, static_cast<float>(sb.traitor_vp), 4.0f);
     Frac(values, o++, static_cast<float>(sb.species_vp), 20.0f);
     Frac(values, o++, static_cast<float>(sb.minor_species_vp), 20.0f);
-    Frac(values, o++, static_cast<float>(std::max<int16_t>(p.vp_at_elimination, 0)), 60.0f);
+    const int16_t visible_elimination_vp =
+        can_see_reputation || !p.eliminated ? p.vp_at_elimination
+                                            : visible_total_vp;
+    Frac(values, o++,
+         static_cast<float>(std::max<int16_t>(visible_elimination_vp, 0)),
+         60.0f);
     Flag(values, o++, p.vp_at_elimination >= 0);
 
     Frac(values, o++, static_cast<float>(p.resources.gold), 40.0f);
@@ -383,7 +397,10 @@ void WriteObservationTensor(const ::State& state, int player, int num_players,
                  : kRelNone,
              kRelSeatWidth);
       so += kRelSeatWidth;
-      OneHot(values, so, static_cast<int>(slot_v.rep_value), kRepTileValueCount);
+      if (can_see_reputation) {
+        OneHot(values, so, static_cast<int>(slot_v.rep_value),
+               kRepTileValueCount);
+      }
       so += kRepTileValueCount;
       Flag(values, so++, slot_v.pending_track_choice);
       SPIEL_CHECK_EQ(so, e + kRepSlotSize);
@@ -669,9 +686,11 @@ void WriteObservationTensor(const ::State& state, int player, int num_players,
     o += kRetreatDestCap;
     Frac(values, o++, static_cast<float>(cs.retreat_destinations_size), kRetreatDestCap);
 
-    for (int i = 0; i < std::min<int>(cs.drawn_tiles_size, kRepDrawCap); ++i) {
-      OneHot(values, o + i * kRepTileValueCount,
-             static_cast<int>(cs.drawn_tiles[i]), kRepTileValueCount);
+    if (cs.tile_select_player == player || reveal_reputation) {
+      for (int i = 0; i < std::min<int>(cs.drawn_tiles_size, kRepDrawCap); ++i) {
+        OneHot(values, o + i * kRepTileValueCount,
+               static_cast<int>(cs.drawn_tiles[i]), kRepTileValueCount);
+      }
     }
     o += kRepDrawCap * kRepTileValueCount;
     Frac(values, o++, static_cast<float>(cs.drawn_tiles_size), kRepDrawCap);

@@ -1730,7 +1730,8 @@ void EclipseState::ObservationTensor(Player player, absl::Span<float> values) co
   // every observation -- ~3.5 us against a 13 us write, on the hottest path in
   // training.
   open_spiel::eclipse::obs::WriteObservationTensor(eclipse_state_, player,
-                                                  NumPlayers(), values);
+                                                  NumPlayers(), IsTerminal(),
+                                                  values);
 }
 
 void EclipseState::RestoreFromSnapshot(

@@ -1,19 +1,11 @@
 //
 // Observation tensor layout for Eclipse — the single source of truth.
 //
-// Every field of ::State is exposed here, with exactly one deliberate
-// exception: Sector::discovery_tile. That field holds the identity of a tile
-// that is still FACE DOWN (it is written at placement time in
-// explore.cpp:472-477 / setup.cpp:257-258 and only cleared to NONE when a
-// player claims it). Exposing it would let the agent read unclaimed discovery
-// tiles, which is both cheating and would make a trained agent unfair to play
-// against. Only `discovery_tile_present` is exposed.
-//
-// Things that look hidden but are legitimately deducible from public play ARE
-// exposed: the sector-ring bag bitmasks (the ring tile lists are public and
-// every placement is public) and the per-value remaining counts of the
-// reputation-tile bag. The `tech_bag` and `discovery_bag` *contents* remain
-// counts only.
+// Hidden information is omitted from each player's view: face-down discovery
+// identities, opponents' face-down reputation values and private draws, the
+// reputation-bag value histogram, and the randomly selected outer-sector
+// supply. Public counts and the inner/middle sector masks remain visible.
+// Reputation values become public in terminal scoring observations.
 //
 // Everything is written SEAT-RELATIVE from the viewing player's perspective:
 // player block 0 is always the viewer, blocks 1..5 are the other seats in
@@ -189,11 +181,11 @@ constexpr int kGlobalSize =
     + kNpcDifficultyCount * kNpcTypeCount   // difficulties as one-hots
     + kNpcTypeCount * 8     // NPC combat stats per type
     + 3                     // sector bag popcounts
-    + 10 + 16 + 22          // sector bag bitmasks (inner/middle/outer)
+    + 10 + 16 + 22          // sector bag masks (outer is hidden/zero)
     + 1                     // tech_bag size
     + 1                     // discovery_bag size
     + 1                     // reputation_tiles bag size
-    + 4                     // reputation bag remaining per value
+    + 4                     // reputation bag values (terminal only)
     + kMinorSpeciesCount    // minor_species_pool bitmap
     + kRelSeatWidth         // minor_species_pending_track
     + 1                     // next_arrival_order (normalised)
@@ -211,8 +203,8 @@ constexpr int kPlayerSize =
     + kMaxSeats             // turn-order position one-hot
     + 1                     // turn-order position known
     + (kMaxSeats + 1)       // pass-order position one-hot (0 = not passed)
-    + 1                     // live total VP
-    + 9                     // live VP by scoring category
+    + 1                     // visible live total VP
+    + 9                     // visible live VP by scoring category
     + 1                     // vp_at_elimination
     + 1                     // vp_at_elimination valid
     + 3                     // gold / science / materials
@@ -386,7 +378,7 @@ constexpr int kCombatSize =
     + kShipTypeCount + 1    // ship_order_queue counts + idx
     + kShipTypeCount        // active_ship_type one-hot
     + kRetreatDestCap + 1   // retreat_destinations + size
-    + kRepDrawCap * kRepTileValueCount + 1   // drawn_tiles + size
+    + kRepDrawCap * kRepTileValueCount + 1   // private drawn_tiles + public size
     + kRelSeatWidth         // tile_select_player
     + kRelSeatWidth         // rep_draw_target
     + kParticipantsCap      // reputation_drawn_mask
@@ -513,7 +505,9 @@ constexpr int V2PlanetSlotStart(int cell, int slot) {
 }
 
 // Writes the full observation for `player` into `values` (size kTotalSize).
+// `reveal_reputation` is true only for terminal scoring observations.
 void WriteObservationTensor(const ::State& state, int player, int num_players,
+                            bool reveal_reputation,
                             absl::Span<float> values);
 
 }  // namespace obs

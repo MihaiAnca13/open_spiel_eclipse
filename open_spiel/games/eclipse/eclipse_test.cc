@@ -1977,6 +1977,90 @@ void ObservationLayoutTest() {
   }
 }
 
+void ObservationPrivacyTest() {
+  std::shared_ptr<const Game> game = LoadEclipseGame(2, 7);
+  std::unique_ptr<State> state = game->NewInitialState();
+  state->ApplyAction(0);
+  EclipseState* eclipse_state = static_cast<EclipseState*>(state.get());
+  ::State& raw = const_cast<::State&>(eclipse_state->RawState());
+  const int observation_size = game->ObservationTensorShape()[0];
+
+  const auto observe = [&](Player viewer) {
+    std::vector<float> tensor(observation_size, 0.0f);
+    state->ObservationTensor(viewer, absl::MakeSpan(tensor));
+    return tensor;
+  };
+
+  raw.players[1].reputation_track.clear();
+  raw.players[1].reputation_track.push_back({
+      ReputationSlotKind::REP_ONLY, false, ReputationTiles::ONE, 255, false});
+  const std::vector<float> opponent_one = observe(0);
+  const std::vector<float> owner_one = observe(1);
+  raw.players[1].reputation_track[0].rep_value = ReputationTiles::FOUR;
+  const std::vector<float> opponent_four = observe(0);
+  const std::vector<float> owner_four = observe(1);
+  SPIEL_CHECK_TRUE(opponent_one == opponent_four);
+  SPIEL_CHECK_TRUE(owner_one != owner_four);
+  const int opponent_rep_value =
+      obs::PlayerBlockStart(1) + obs::kPlayerRepTrackOffset +
+      obs::kRepSlotKindCount + 1 + obs::kRelSeatWidth;
+  for (int i = 0; i < obs::kRepTileValueCount; ++i) {
+    SPIEL_CHECK_EQ(opponent_four[opponent_rep_value + i], 0.0f);
+  }
+
+  raw.players[1].eliminated = true;
+  raw.players[1].vp_at_elimination = 10;
+  raw.eliminated_score_breakdowns[1].total_vp = 10;
+  raw.eliminated_score_breakdowns[1].reputation_vp = 4;
+  const std::vector<float> eliminated = observe(0);
+  const int opponent_block = obs::PlayerBlockStart(1);
+  SPIEL_CHECK_FLOAT_EQ(
+      eliminated[opponent_block + obs::kPlayerVpTotalOffset], 6.0f / 60.0f);
+  SPIEL_CHECK_EQ(eliminated[opponent_block + obs::kPlayerVpBreakdownOffset],
+                 0.0f);
+  SPIEL_CHECK_FLOAT_EQ(
+      eliminated[opponent_block + obs::kPlayerVpAtElimOffset], 6.0f / 60.0f);
+  raw.players[1].eliminated = false;
+
+  raw.current_round = 9;
+  const std::vector<float> terminal_four = observe(0);
+  raw.players[1].reputation_track[0].rep_value = ReputationTiles::ONE;
+  const std::vector<float> terminal_one = observe(0);
+  SPIEL_CHECK_TRUE(terminal_one != terminal_four);
+  raw.current_round = 1;
+
+  raw.reputation_tiles.clear();
+  raw.reputation_tiles.push_back(ReputationTiles::ONE);
+  const std::vector<float> bag_one = observe(0);
+  raw.reputation_tiles[0] = ReputationTiles::FOUR;
+  const std::vector<float> bag_four = observe(0);
+  SPIEL_CHECK_TRUE(bag_one == bag_four);
+
+  raw.combat_state.tile_select_player = 1;
+  raw.combat_state.drawn_tiles_size = 1;
+  raw.combat_state.drawn_tiles[0] = ReputationTiles::ONE;
+  const std::vector<float> other_draw_one = observe(0);
+  const std::vector<float> own_draw_one = observe(1);
+  raw.combat_state.drawn_tiles[0] = ReputationTiles::FOUR;
+  const std::vector<float> other_draw_four = observe(0);
+  const std::vector<float> own_draw_four = observe(1);
+  SPIEL_CHECK_TRUE(other_draw_one == other_draw_four);
+  SPIEL_CHECK_TRUE(own_draw_one != own_draw_four);
+
+  raw.sector_bag_outer = 1u;
+  const std::vector<float> outer_first = observe(0);
+  raw.sector_bag_outer = 2u;
+  const std::vector<float> outer_second = observe(0);
+  SPIEL_CHECK_TRUE(outer_first == outer_second);
+  raw.sector_bag_outer = 3u;
+  SPIEL_CHECK_TRUE(outer_first != observe(0));
+
+  raw.sector_bag_inner = 1u;
+  const std::vector<float> inner_first = observe(0);
+  raw.sector_bag_inner = 2u;
+  SPIEL_CHECK_TRUE(inner_first != observe(0));
+}
+
 // Forces a two-player ship battle, then drives the whole combat phase through
 // the public API. Verifies that weapon dice are resolved as chance nodes
 // (PendingRandomEvent::combat_roll), that the phase terminates without hanging,
@@ -3423,6 +3507,7 @@ int main(int argc, char** argv) {
   RUN_TEST(RoundEightCleanupEndsGameTest);
   RUN_TEST(UpkeepObservationTensorTest);
   RUN_TEST(ObservationLayoutTest);
+  RUN_TEST(ObservationPrivacyTest);
   RUN_TEST(RevealDiscoveryLedgerTest);
   RUN_TEST(CombatDiceChanceFlowTest);
   RUN_TEST(TiedInitiativeOrderTest);

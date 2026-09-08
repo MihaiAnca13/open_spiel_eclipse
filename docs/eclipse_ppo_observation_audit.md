@@ -28,8 +28,8 @@ Eclipse's strategic tradeoff is spending actions and influence discs to grow pro
 | OBS-08 | Combat timing | Retreat start rounds are omitted | State/writer comparison; field controls retreat completion; targeted gameplay test still needed |
 | OBS-09 | Combat encoding | Reputation draw target count is encoded as a player identity | Type/consumer/writer mismatch |
 | OBS-10 | Empty units | Masked maximum returns -1e9 when no units are valid | Synthetic check: fused latent magnitude approximately 953 million |
-| VIS-01 | Reputation privacy | Opponents' face-down reputation values and exact reputation VP are exposed | Writer compared with rulebook; total VP also reveals the hidden contribution |
-| VIS-02 | Sector privacy | Exact randomly selected outer-sector supply is exposed | Setup randomly selects a subset; global writer exposes its bitmask |
+| VIS-01 | Reputation privacy | Opponents' face-down reputation values and exact reputation VP are exposed | Fixed: live observations hide retained values, private draws, derived scores, and the bag histogram; terminal scoring reveals them |
+| VIS-02 | Sector privacy | Exact randomly selected outer-sector supply is exposed | Fixed: observations retain its public count but zero the secret bitmask |
 | RULE-01 | Game model | Discarded sectors are returned when their stack is depleted | Fixed: per-ring discard piles preserve the setup-limited tile pool |
 
 These statuses distinguish observed numerical failures, structural code findings, and issues still needing targeted gameplay reproduction. The ledger is not proof that every other state field is sufficient.
@@ -115,15 +115,15 @@ The reference is the supplied [Second Dawn rulebook](../07-eclipse-second-dawn-f
 
 ### Reputation: VIS-01
 
-The rulebook places retained reputation tiles face down. The writer exposes every player's exact reputation values and exact reputation VP. Exact total VP is another disclosure channel for that hidden contribution.
+The rulebook places retained reputation tiles face down. The writer previously exposed every player's exact reputation values and exact reputation VP. Exact total VP was another disclosure channel for that hidden contribution.
 
-Exact remaining reputation-bag composition is also not generally public: opponents' secret retained values prevent exact public accounting. That histogram currently lives in the ignored global block. Any privacy correction must cover derived scores and bag information, not just individual tile fields. A player's own retained tiles and current private draw should remain available to that player.
+Live observations now expose retained reputation values and current draws only to their owner, and hide opponents' reputation VP from both the breakdown and derived total fields. Hidden occupied slots use an all-zero value one-hot, distinct from the explicit `NONE` value. The reputation-bag size remains public, while its per-value histogram is withheld until terminal scoring. Terminal observations reveal the exact values so existing final score-breakdown targets remain valid.
 
 ### Outer-sector supply: VIS-02
 
-[`setup.cpp`](../open_spiel/games/eclipse/systems/setup.cpp) randomly chooses the outer-sector subset. Public placements cannot identify which unseen tiles were initially included. The observation nonetheless writes the exact remaining bitmask.
+[`setup.cpp`](../open_spiel/games/eclipse/systems/setup.cpp) randomly chooses the outer-sector subset. Public placements cannot identify which unseen tiles were initially included. The observation previously wrote the exact remaining bitmask.
 
-This information is currently ignored by the spatial encoder but present in the raw tensor. Connecting the global block unchanged would activate that leak. Preserve public counts and public history while withholding the secret selected subset.
+The raw tensor now retains the public remaining count but leaves the outer-sector bitmask zero. Placed tiles remain available through the galaxy representation; inner- and middle-sector masks remain public. This preserves the tensor layout while preventing the secret setup subset from reaching a future global encoder.
 
 ### Discoveries and discards
 

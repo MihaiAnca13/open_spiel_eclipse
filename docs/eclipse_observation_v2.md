@@ -26,9 +26,12 @@ offset, so a C++ change fails loudly in Python instead of mis-reshaping.
 | Discoveries | current revealed identity and a 30-kind public ledger | reward-versus-VP decision and history |
 | Tech bag | exact 40-kind histogram | research evaluation |
 
-Deliberately hidden: face-down `Sector::discovery_tile`, discovery-bag
-composition/order, and RNG state. `RevealDiscovery` is the only reveal path;
-it updates the ledger once before Explore or Combat offers the decision.
+Deliberately hidden during play: face-down `Sector::discovery_tile`, opponents'
+reputation values and draws, the reputation-bag value histogram, the selected
+outer-sector supply, discovery-bag composition/order, and RNG state.
+`RevealDiscovery` is the only discovery reveal path; it updates the ledger once
+before Explore or Combat offers the decision. Reputation becomes public in
+terminal scoring observations.
 
 ## Written is not read
 
