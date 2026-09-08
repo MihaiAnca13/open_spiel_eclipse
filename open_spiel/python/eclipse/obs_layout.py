@@ -34,7 +34,7 @@ Layout shape, seat-relative from the viewing player:
     G  action sub-states              367
     H  V2 keyed public entities     12882
                                   ------
-                                   37788
+                                   37804
 """
 
 import numpy as np
@@ -89,7 +89,7 @@ V2_CELL_SIZE = 2
 V2_BATTLE_RECORD_SIZE = 3 + MAX_SEATS * 2
 V2_DESTROYED_RECORD_SIZE = 4
 V2_DIE_RECORD_SIZE = 2
-V2_RETREAT_RECORD_SIZE = 4
+V2_RETREAT_RECORD_SIZE = 5
 V2_COMBAT_SIZE = (8 * V2_BATTLE_RECORD_SIZE + 32 * V2_DESTROYED_RECORD_SIZE +
                   16 * SHIP_TYPE_COUNT + 64 * V2_DIE_RECORD_SIZE +
                   16 * V2_RETREAT_RECORD_SIZE + 1)
@@ -147,6 +147,7 @@ VCB_SHIP_ORDER = VCB_DESTROYED + DESTROYED_CAP * V2_DESTROYED_RECORD_SIZE
 VCB_DICE = VCB_SHIP_ORDER + INITIATIVE_CAP * SHIP_TYPE_COUNT
 VCB_RETREATING = VCB_DICE + DIE_CAP * V2_DIE_RECORD_SIZE
 VCB_POP_CELL = VCB_RETREATING + RETREATING_CAP * V2_RETREAT_RECORD_SIZE
+VCR_RETREAT_START_ROUND = 4
 
 # Offsets within a keyed unit row.
 U_VALID = 0
@@ -317,7 +318,7 @@ def _self_check():
   assert C_WARP_DEST_DIR + HEX_DIRECTIONS == CELL_CHANNELS
   assert U_LEGAL_DIE_TARGET + 1 == UNIT_ROW_SIZE
   assert V2_COMBAT_START + V2_COMBAT_SIZE == TOTAL
-  assert TOTAL == 37788, TOTAL
+  assert TOTAL == 37804, TOTAL
   # The V2 sub-block offsets must tile their blocks exactly, or the encoder
   # reads one field while believing it reads another.
   assert VG_CURRENT_DISCOVERY + DISCOVERY_BIT_COUNT + 1 == V2_GLOBAL_SIZE

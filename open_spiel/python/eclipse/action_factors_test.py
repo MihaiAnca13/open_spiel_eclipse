@@ -255,8 +255,8 @@ class FactoredActorHeadTest(absltest.TestCase):
       if p.grad is not None:
         self.assertTrue(torch.isfinite(p.grad).all(), name)
 
-  def test_unit_attention_is_nan_safe_with_no_valid_units(self):
-    """A sample with zero valid units must not poison the batch with NaN.
+  def test_unit_attention_is_neutral_with_no_valid_units(self):
+    """A sample with zero valid units must retain an ordinary latent scale.
 
     Masking every key of a query row makes MultiheadAttention emit NaN, which
     would silently destroy a whole minibatch's loss.
@@ -275,6 +275,23 @@ class FactoredActorHeadTest(absltest.TestCase):
         + obs_layout.UNIT_ROWS * obs_layout.UNIT_ROW_SIZE] = 0.0
       features = net.shared(x)
     self.assertTrue(torch.isfinite(features).all())
+    self.assertLess(float(features.abs().max()), 100.0)
+
+  def test_global_block_reaches_spatial_features(self):
+    torch.manual_seed(0)
+    net = EclipsePPOAgent(
+        self.num_actions, (self.obs_size,), "cpu", width=32, depth=1,
+        aux_tasks=(), factored_actions=self.fz, encoder="spatial")
+    state = self.game.new_initial_state()
+    while state.is_chance_node():
+      state.apply_action(state.chance_outcomes()[0][0])
+    x = torch.tensor([state.observation_tensor(0)], dtype=torch.float32)
+    with torch.no_grad():
+      changed = x.clone()
+      changed[:, obs_layout.GLOBAL_START:
+              obs_layout.GLOBAL_START + obs_layout.GLOBAL_SIZE] += 0.25
+      self.assertGreater(float((net.shared(changed) - net.shared(x)).abs().max()),
+                         1e-5)
 
   def test_every_v2_block_reaches_the_features(self):
     """No V2 sub-block may be write-only.

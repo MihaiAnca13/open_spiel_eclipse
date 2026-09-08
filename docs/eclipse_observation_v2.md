@@ -12,7 +12,7 @@
 > (Section 7).
 
 `observation.h` is the tensor authority and `obs_layout.py` mirrors it. V2 is
-checkpoint-incompatible (`37,788` floats) and appends keyed public entities to
+checkpoint-incompatible (`37,804` floats) and appends keyed public entities to
 the V1 blocks. `obs_layout._self_check` pins the total and every sub-block
 offset, so a C++ change fails loudly in Python instead of mis-reshaping.
 
@@ -22,7 +22,7 @@ offset, so a C++ change fails loudly in Python instead of mis-reshaping.
 | Planet slots | 225 x 8 exact rows: valid, type, occupied, orbital | not yet consumed |
 | Players | V1 relative blocks with exact blueprint slot part IDs, plus V2 absolute seat key and independent military/grid/nano bitmaps | pooled player context |
 | Galaxy | V1 semantic channels plus sector-definition id and rotation | spatial encoder |
-| Combat | ordered battle participant/arrival, destruction/killer, firing queue, dice, retreats, population target cell | tail MLP |
+| Combat | ordered battle participant/arrival, destruction/killer, firing queue, dice, retreat start rounds, population target cell | tail MLP |
 | Discoveries | current revealed identity and a 30-kind public ledger | reward-versus-VP decision and history |
 | Tech bag | exact 40-kind histogram | research evaluation |
 
@@ -41,6 +41,7 @@ read by nothing** — the encoder never referenced `V2_GLOBAL_START` or
 `V2_CELLS_START` at all, and touched only 6 of 732 seat floats and 1 of 553
 combat floats. The global, seat, cell-identity, and combat fields are now
 consumed; unit routes and planet-slot rows are still written but unconsumed.
+The original public global block is also consumed by the tail MLP.
 
 If you add a V2 field, grep the encoder for its offset constant before claiming
 the agent can use it.

@@ -1850,6 +1850,41 @@ void ObservationLayoutTest() {
   SPIEL_CHECK_EQ(gold_max[obs::PlayerBlockStart(0) + obs::kPlayerGoldOffset],
                  1.0f);
 
+  raw.combat_state.rep_draw_target = 0;
+  std::vector<float> draw_target_zero(n, 0.0f);
+  state->ObservationTensor(0, absl::MakeSpan(draw_target_zero));
+  raw.combat_state.rep_draw_target = 3;
+  std::vector<float> draw_target_three(n, 0.0f);
+  state->ObservationTensor(0, absl::MakeSpan(draw_target_three));
+  int draw_target_changes = 0;
+  for (int i = 0; i < n; ++i) {
+    if (draw_target_zero[i] == draw_target_three[i]) continue;
+    ++draw_target_changes;
+    SPIEL_CHECK_EQ(draw_target_zero[i], 0.0f);
+    SPIEL_CHECK_FLOAT_EQ(draw_target_three[i], 3.0f / obs::kRepDrawCap);
+  }
+  SPIEL_CHECK_EQ(draw_target_changes, 1);
+
+  raw.combat_state.retreating_group_count = 1;
+  raw.combat_state.retreating_players[0] = 0;
+  raw.combat_state.retreating_types[0] = ShipType::INTERCEPTOR;
+  raw.combat_state.retreating_destinations[0] = 0;
+  raw.combat_state.retreating_rounds[0] = 2;
+  std::vector<float> retreat_round_two(n, 0.0f);
+  state->ObservationTensor(0, absl::MakeSpan(retreat_round_two));
+  raw.combat_state.retreating_rounds[0] = 3;
+  std::vector<float> retreat_round_three(n, 0.0f);
+  state->ObservationTensor(0, absl::MakeSpan(retreat_round_three));
+  int retreat_round_changes = 0;
+  for (int i = 0; i < n; ++i) {
+    if (retreat_round_two[i] == retreat_round_three[i]) continue;
+    ++retreat_round_changes;
+    SPIEL_CHECK_FLOAT_EQ(retreat_round_two[i], 2.0f / 20.0f);
+    SPIEL_CHECK_FLOAT_EQ(retreat_round_three[i], 3.0f / 20.0f);
+  }
+  SPIEL_CHECK_EQ(retreat_round_changes, 1);
+  raw.combat_state.retreating_group_count = 0;
+
   // ── a face-down discovery tile's IDENTITY must not reach the tensor ──────
   // Find a sector that still carries an unclaimed tile, then check that
   // rewriting the tile's identity leaves the observation bit-identical.

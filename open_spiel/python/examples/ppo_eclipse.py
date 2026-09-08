@@ -593,7 +593,7 @@ class SpatialEclipseEncoder(nn.Module):
     self.self_mlp = self._mlp(
         obs_layout.PLAYER_SIZE, width, depth, act, norm)
 
-    # ── Tail blocks (tech market + combat + upkeep + action states) ─────────
+    # ── Tail blocks (global + tech market + combat + upkeep + action states) ─
     # V2 global (tech-bag histogram, revealed-discovery ledger, currently
     # revealed tile) and V2 combat (keyed battle/destroyed/initiative/dice/
     # retreat records) are appended here. They were 659 of the 1,835 V2 floats
@@ -602,7 +602,8 @@ class SpatialEclipseEncoder(nn.Module):
     # V1's combat block already carries the pooled forms and IS consumed, so
     # this adds the ordering/exactness for one wider Linear. Give them a
     # per-record branch if a gradient probe shows the tail is ignoring them.
-    tail_size = (obs_layout.TECH_MARKET_SIZE + obs_layout.COMBAT_SIZE
+    tail_size = (obs_layout.GLOBAL_SIZE + obs_layout.TECH_MARKET_SIZE
+                 + obs_layout.COMBAT_SIZE
                  + obs_layout.UPKEEP_SIZE + obs_layout.ACTION_STATES_SIZE
                  + obs_layout.V2_GLOBAL_SIZE + obs_layout.V2_COMBAT_SIZE)
     self.tail_mlp = self._mlp(tail_size, width, depth, act, norm)
@@ -754,6 +755,8 @@ class SpatialEclipseEncoder(nn.Module):
 
     # Tail blocks.
     tail = torch.cat([
+        x[:, obs_layout.GLOBAL_START:
+          obs_layout.GLOBAL_START + obs_layout.GLOBAL_SIZE],
         x[:, obs_layout.TECH_MARKET_START:
           obs_layout.TECH_MARKET_START + obs_layout.TECH_MARKET_SIZE],
         x[:, obs_layout.COMBAT_START:
@@ -856,8 +859,8 @@ class SpatialEclipseEncoder(nn.Module):
       mask = valid.unsqueeze(-1)
       denom = valid.float().sum(dim=1, keepdim=True).clamp(min=1.0)
       mean = (values * mask).sum(dim=1) / denom
-      maximum = torch.where(mask, values,
-                            torch.full_like(values, -1e9)).max(dim=1).values
+      maximum = torch.where(
+          mask, values, torch.zeros_like(values)).max(dim=1).values
       return mean, maximum
 
     unit_mean, unit_max = masked_mean_max(unit_h, unit_valid)

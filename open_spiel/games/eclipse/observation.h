@@ -116,7 +116,7 @@ constexpr int kV2CellSize = 2;  // sector definition id, rotation
 constexpr int kV2BattleRecordSize = 3 + kParticipantsCap * 2;
 constexpr int kV2DestroyedRecordSize = 4;
 constexpr int kV2DieRecordSize = 2;
-constexpr int kV2RetreatRecordSize = 4;
+constexpr int kV2RetreatRecordSize = 5;
 constexpr int kV2CombatSize =
     kBattleQueueCap * kV2BattleRecordSize +
     32 * kV2DestroyedRecordSize +
@@ -381,7 +381,7 @@ constexpr int kCombatSize =
     + kRetreatDestCap + 1   // retreat_destinations + size
     + kRepDrawCap * kRepTileValueCount + 1   // private drawn_tiles + public size
     + kRelSeatWidth         // tile_select_player
-    + kRelSeatWidth         // rep_draw_target
+    + 1 + (kRelSeatWidth - 1)  // rep_draw_target count + reserved padding
     + kParticipantsCap      // reputation_drawn_mask
     + kParticipantsCap      // reputation_retreat_penalty_mask
     + 1                     // reputation_earned

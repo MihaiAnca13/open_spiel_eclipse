@@ -18,16 +18,16 @@ Eclipse's strategic tradeoff is spending actions and influence discs to grow pro
 
 | ID | Area | Finding | Evidence / status |
 | --- | --- | --- | --- |
-| OBS-01 | Encoder inputs | Original global block is never consumed | Runtime perturbation: exactly zero encoder-output change |
+| OBS-01 | Encoder inputs | Original global block was never consumed | Fixed: public global block now feeds the tail MLP |
 | OBS-02 | Unit identity | Attention and pooling discard registry row identity needed by action IDs | Swapping two rows changes the encoder output by only approximately 1.8e-7 |
 | OBS-03 | Movement | Six destination routes per unit are written but never read | Runtime perturbation: exactly zero encoder-output change |
 | OBS-04 | Planet slots | Exact slot type/occupancy rows are written but never read | Runtime perturbation: exactly zero encoder-output change |
-| OBS-05 | Blueprints | Part counts and occupied slots omit the mapping from slot to part | Engine state-pair check: identical observations, common legal action, different successors |
-| OBS-06 | Resources | Balances above 40 are clipped | Engine state-pair checks: 70 and 90 produce identical full observations for each resource |
+| OBS-05 | Blueprints | Part counts and occupied slots omitted the mapping from slot to part | Fixed: each blueprint slot now carries its part ID |
+| OBS-06 | Resources | Balances above 40 were clipped | Fixed: balances use the `uint8_t` range |
 | OBS-07 | Action head | Additive factors lack state-dependent interactions between arguments | Follows directly from the actor's scoring equation |
-| OBS-08 | Combat timing | Retreat start rounds are omitted | State/writer comparison; field controls retreat completion; targeted gameplay test still needed |
-| OBS-09 | Combat encoding | Reputation draw target count is encoded as a player identity | Type/consumer/writer mismatch |
-| OBS-10 | Empty units | Masked maximum returns -1e9 when no units are valid | Synthetic check: fused latent magnitude approximately 953 million |
+| OBS-08 | Combat timing | Retreat start rounds were omitted | Fixed: keyed retreat records include the start round |
+| OBS-09 | Combat encoding | Reputation draw target count was encoded as a player identity | Fixed: normalized tile count |
+| OBS-10 | Empty units | Masked maximum returned -1e9 when no units were valid | Fixed: empty max pooling is neutral zero |
 | VIS-01 | Reputation privacy | Opponents' face-down reputation values and exact reputation VP are exposed | Fixed: live observations hide retained values, private draws, derived scores, and the bag histogram; terminal scoring reveals them |
 | VIS-02 | Sector privacy | Exact randomly selected outer-sector supply is exposed | Fixed: observations retain its public count but zero the secret bitmask |
 | RULE-01 | Game model | Discarded sectors are returned when their stack is depleted | Fixed: per-ring discard piles preserve the setup-limited tile pool |
@@ -85,7 +85,7 @@ The previous pointer experiment's null result is evidence about that experiment,
 
 ### Blueprint slot contents: OBS-05
 
-[`WriteBlueprint`](../open_spiel/games/eclipse/observation.cpp) emits derived statistics, a histogram of installed parts, occupied-slot flags, and capacity. It does not emit the part identity at each slot.
+[`WriteBlueprint`](../open_spiel/games/eclipse/observation.cpp) now emits each slot's compact part ID in addition to derived statistics, a histogram, and occupancy flags. The following collision was the pre-fix evidence.
 
 Controlled engine checks using deserialized states found:
 
@@ -97,7 +97,7 @@ Controlled engine checks using deserialized states found:
 
 ### Resource clipping: OBS-06
 
-The writer's `Frac` clamps to [-1, 1], and gold/science/materials use divisor 40. The engine stores larger balances and upkeep production does not impose a cap of 40.
+The writer's `Frac` clamps to [-1, 1]. Gold, science, and materials now use their `uint8_t` maximum (255); the following collision was the pre-fix evidence.
 
 In constructed state pairs, independently changing each resource from 70 to 90 left the complete observation identical. The extra gold cash-flow feature also saturated in these examples. These checks demonstrate aliasing; they do not measure how often those balances occur during training.
 
@@ -105,9 +105,9 @@ Use a representation that preserves the supported range. Audit other clamped fie
 
 ### Combat fields and empty-set handling: OBS-08–OBS-10
 
-- `CombatState::retreating_rounds` records when each group started retreating. `CompleteRetreatIfReady` in [`combat.cpp`](../open_spiel/games/eclipse/systems/combat.cpp) compares it with the current engagement round. No observation field exposes it. A targeted reachable-state test should establish whether other observable context always determines the relevant timing.
-- `CombatState::rep_draw_target` is the number of reputation tiles to draw. The writer passes it through `RelSeat`, encoding it as if it were a player ID.
-- Empty unit sets avoid fully masked attention, but subsequent masked max-pooling still returns -1e9 in every channel. A synthetic zero-unit-row check produced a fused magnitude around 953 million. Frequency in real rollouts was not measured; use a neutral result for an empty set.
+- `CombatState::retreating_rounds` now appears in each keyed retreat record, using the combat-round scale.
+- `CombatState::rep_draw_target` now appears as a normalized tile count, not a seat code.
+- Empty unit sets now use a zero max-pool result, matching their zero mean.
 
 ## Visibility and rule fidelity
 
@@ -142,10 +142,8 @@ These are design references, not evidence of an Eclipse performance gain. Memory
 
 ## Recommended order and acceptance checks
 
-1. Correct the public/private visibility contract, blueprint slot identity, and lossy resource representation.
-2. Connect missing public global inputs and correct empty-set/combat encoding errors.
-3. Preserve exact unit/slot identity through action selection, using existing position/route data and allowing state-dependent interactions between action arguments.
-4. Compare width and topology handling only after those correctness checks pass.
+1. Preserve exact unit/slot identity through action selection, using existing position/route data and allowing state-dependent interactions between action arguments.
+2. Compare width and topology handling only after those correctness checks pass.
 
 At inspection time, `runs/roster/arch.json` specified spatial encoding, width 16, depth 1, and a factored actor. This is checkpoint metadata, not confirmation of the settings of any currently running process. Compare wider models under controlled training and wall-clock budgets; do not assume width is the primary defect.
 

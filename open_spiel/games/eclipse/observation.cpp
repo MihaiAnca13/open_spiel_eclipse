@@ -701,7 +701,7 @@ void WriteObservationTensor(const ::State& state, int player, int num_players,
     Frac(values, o++, static_cast<float>(cs.drawn_tiles_size), kRepDrawCap);
     OneHot(values, o, RelSeat(cs.tile_select_player, player, num_players), kRelSeatWidth);
     o += kRelSeatWidth;
-    OneHot(values, o, RelSeat(cs.rep_draw_target, player, num_players), kRelSeatWidth);
+    Frac(values, o, static_cast<float>(cs.rep_draw_target), kRepDrawCap);
     o += kRelSeatWidth;
     for (int i = 0; i < kParticipantsCap; ++i) {
       Frac(values, o + i, static_cast<float>(cs.reputation_drawn_mask[i]), 4.0f);
@@ -1105,6 +1105,7 @@ void WriteObservationTensor(const ::State& state, int player, int num_players,
       Frac(values, e + 2, static_cast<float>(cs.retreating_types[i]), kShipTypeCount - 1);
       const HexCoord hc = state.galaxy.FindSectorCoord(cs.retreating_destinations[i]);
       Frac(values, e + 3, hc.q == -128 ? 0.0f : static_cast<float>(hex_to_index(hc.q, hc.r) + 1), kGalaxyCells);
+      Frac(values, e + 4, static_cast<float>(cs.retreating_rounds[i]), 20.0f);
     }
     o += kRetreatingCap * kV2RetreatRecordSize;
     const HexCoord pop_cell = state.galaxy.FindSectorCoord(cs.pop_attack_sector_id);
