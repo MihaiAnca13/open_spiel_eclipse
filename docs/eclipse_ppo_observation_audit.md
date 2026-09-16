@@ -1,184 +1,132 @@
-# Eclipse PPO observation and encoder audit
-
-Date: 2026-09-06. Scope: game state → observation tensor → spatial encoder → actor → PPO legal-action masking. This records an inspection and diagnostic checks, not implemented fixes or demonstrated win-rate improvements.
-
-## Summary
-
-The current policy loses useful information at three different stages:
-
-1. The observation omits or clips decision-relevant state.
-2. The spatial encoder ignores entire observation blocks and discards unit registry identity.
-3. The factored actor cannot express certain state-dependent interactions between action arguments.
-
-Increasing model width alone cannot fix these structural losses. The observation also leaks some information hidden by the board-game rules, so connecting every existing field without a visibility audit would be incorrect.
-
-Eclipse's strategic tradeoff is spending actions and influence discs to grow production, territory, technology, and military power before the eight-round deadline. Expansion increases upkeep; population changes production nonlinearly; upgrades affect every ship of a class; movement depends on wormholes, pinning, and warped connections. Combat needs exact damage, initiative, retreat timing, and reputation choices.
-
-## Findings ledger
-
-| ID | Area | Finding | Evidence / status |
-| --- | --- | --- | --- |
-| OBS-01 | Encoder inputs | Original global block was never consumed | Fixed: public global block now feeds the tail MLP |
-| OBS-02 | Unit identity | Attention and pooling discard registry row identity needed by action IDs | Fixed: candidate scorer gathers registry-indexed unit rows |
-| OBS-03 | Movement | Six destination routes per unit are written but never read | Fixed: candidate scorer gathers the selected route destination |
-| OBS-04 | Planet slots | Exact slot type/occupancy rows are written but never read | Fixed: candidate scorer gathers the addressed slot row |
-| OBS-05 | Blueprints | Part counts and occupied slots omitted the mapping from slot to part | Fixed: each blueprint slot now carries its part ID |
-| OBS-06 | Resources | Balances above 40 were clipped | Fixed: balances use the `uint8_t` range |
-| OBS-07 | Action head | Additive factors lack state-dependent interactions between arguments | Fixed: a shared nonlinear candidate scorer combines state, factors, and targets |
-| OBS-08 | Combat timing | Retreat start rounds were omitted | Fixed: keyed retreat records include the start round |
-| OBS-09 | Combat encoding | Reputation draw target count was encoded as a player identity | Fixed: normalized tile count |
-| OBS-10 | Empty units | Masked maximum returned -1e9 when no units were valid | Fixed: empty max pooling is neutral zero |
-| VIS-01 | Reputation privacy | Opponents' face-down reputation values and exact reputation VP are exposed | Fixed: live observations hide retained values, private draws, derived scores, and the bag histogram; terminal scoring reveals them |
-| VIS-02 | Sector privacy | Exact randomly selected outer-sector supply is exposed | Fixed: observations retain its public count but zero the secret bitmask |
-| RULE-01 | Game model | Discarded sectors are returned when their stack is depleted | Fixed: per-ring discard piles preserve the setup-limited tile pool |
-
-These statuses distinguish observed numerical failures, structural code findings, and issues still needing targeted gameplay reproduction. The ledger is not proof that every other state field is sufficient.
-
-## Encoder and action losses
-
-### Previously ignored blocks: OBS-01, OBS-03, OBS-04
-
-The original global block feeds the tail MLP. The spatial candidate scorer now
-retains and gathers the V2 route and planet-slot rows from
-[`obs_layout.py`](../open_spiel/python/eclipse/obs_layout.py):
-
-| Block | Entries |
-| --- | ---: |
-| Original global block | 146 |
-| V2 unit routes | 768 |
-| V2 planet slots | 7,200 |
-| Total previously ignored | 8,114 of 37,804 (21.5%) |
-
-The percentage includes padding and reserved entries; it is not a percentage of meaningful game information. Before the fix, independently replacing each block with random values left the encoder output exactly unchanged in an eager CPU check on an opening observation, using width 16 and depth 1.
-
-The original global block carries the round, phase, NPC difficulty and combat profiles, sector supply, bag sizes, available minor species, and other context. Some fields can be partly inferred elsewhere. The actual round cannot safely be replaced by board size or resource levels. Likewise, learned generic NPC owner embeddings do not expose the episode's selected NPC combat profiles.
-
-Planet aggregates and sector identities provide partial alternatives to exact slot rows, and ordinary routes can be derived from coordinates. The candidate scorer now consumes the exact rows for the action being scored.
-
-### Registry identity: OBS-02
-
-Unit rows use shared processing and self-attention before pooling. The candidate scorer retains the pre-pool row indexed by the action's unit ID.
-
-Actions such as `MOVE_UNIT_7_*` and `COMBAT_TARGET_UNIT_7` now gather that exact row, so a global fleet summary is supplemented by the action-addressable unit state.
-
-Unit coordinates and destination routes already exist in V2. Adding another engine-side unit-location table would duplicate data; the missing link is its network consumption.
-
-### Previous additive action factors: OBS-07
-
-[`FactoredActorHead`](../open_spiel/python/examples/ppo_eclipse.py) sums embeddings selected by [`action_factors.py`](../open_spiel/python/eclipse/action_factors.py), then takes a dot product with the fused state vector. Movement scores have the form:
-
-```text
-logit(s, u, d) = family(s) + unit(s, u) + direction(s, d) + bias(u, d)
-```
-
-For two units and two directions, the difference of direction preferences is therefore independent of state:
-
-```text
-[logit(s, u, E) - logit(s, u, NE)]
-  - [logit(s, v, E) - logit(s, v, NE)]
-  = bias(u, E) - bias(u, NE) - bias(v, E) + bias(v, NE)
-```
-
-When all four choices are legal, masking does not remove this restriction. The old policy could not freely adapt each unit's direction preference to its own changing surroundings. Similar restrictions affected build-type × cell and upgrade-slot × part combinations. The spatial candidate MLP replaces this equation with a nonlinear score over the fused state, factor embedding, and addressed entity rows.
-
-The previous pointer experiment's null result is evidence about that experiment, not proof that these structural losses are harmless.
-
-## Observation writer and edge cases
-
-### Blueprint slot contents: OBS-05
-
-[`WriteBlueprint`](../open_spiel/games/eclipse/observation.cpp) now emits each slot's compact part ID in addition to derived statistics, a histogram, and occupancy flags. The following collision was the pre-fix evidence.
-
-Controlled engine checks using deserialized states found:
-
-- Swapping an Ion Cannon and Hull on a cruiser leaves observations identical.
-- `UPGRADE_CRUISER_SLOT0_REMOVE` can be legal in both states.
-- Executing that common action produces different successor observations.
-
-[`can_upgrade` and `execute_upgrade`](../open_spiel/games/eclipse/systems/actions/upgrade.cpp) read the actual part in the addressed slot. That information belongs in the observation. The legal-action sets differed in the checked pair, so this is an observation collision, not a claim that the complete observation-plus-mask inputs were identical. Masks still do not directly provide the missing part identities to the encoder.
-
-### Resource clipping: OBS-06
-
-The writer's `Frac` clamps to [-1, 1]. Gold, science, and materials now use their `uint8_t` maximum (255); the following collision was the pre-fix evidence.
-
-In constructed state pairs, independently changing each resource from 70 to 90 left the complete observation identical. The extra gold cash-flow feature also saturated in these examples. These checks demonstrate aliasing; they do not measure how often those balances occur during training.
-
-Use a representation that preserves the supported range. Audit other clamped fields against actual engine bounds rather than assuming every divisor is a valid maximum.
-
-### Combat fields and empty-set handling: OBS-08–OBS-10
-
-- `CombatState::retreating_rounds` now appears in each keyed retreat record, using the combat-round scale.
-- `CombatState::rep_draw_target` now appears as a normalized tile count, not a seat code.
-- Empty unit sets now use a zero max-pool result, matching their zero mean.
-
-## Visibility and rule fidelity
-
-The reference is the supplied [Second Dawn rulebook](../07-eclipse-second-dawn-for-the-galaxy-rulebook.pdf).
-
-### Reputation: VIS-01
-
-The rulebook places retained reputation tiles face down. The writer previously exposed every player's exact reputation values and exact reputation VP. Exact total VP was another disclosure channel for that hidden contribution.
-
-Live observations now expose retained reputation values and current draws only to their owner, and hide opponents' reputation VP from both the breakdown and derived total fields. Hidden occupied slots use an all-zero value one-hot, distinct from the explicit `NONE` value. The reputation-bag size remains public, while its per-value histogram is withheld until terminal scoring. Terminal observations reveal the exact values so existing final score-breakdown targets remain valid.
-
-### Outer-sector supply: VIS-02
-
-[`setup.cpp`](../open_spiel/games/eclipse/systems/setup.cpp) randomly chooses the outer-sector subset. Public placements cannot identify which unseen tiles were initially included. The observation previously wrote the exact remaining bitmask.
-
-The raw tensor now retains the public remaining count but leaves the outer-sector bitmask zero. Placed tiles remain available through the galaxy representation; inner- and middle-sector masks remain public. This preserves the tensor layout while preventing the secret setup subset from reaching a future global encoder.
-
-### Discoveries and discards
-
-Face-down discovery identities are deliberately withheld; revealed discoveries have a ledger. This is the correct distinction between hidden outcomes and remembered public information.
-
-[`explore.cpp`](../open_spiel/games/eclipse/systems/actions/explore.cpp) now puts discarded sectors, including the Descendants of Draco's unchosen tile, in the corresponding faceup discard pile and reuses that pile when the live stack empties. Sector III refills only reuse tiles selected for the player-count-limited setup pool; excluded tiles cannot enter play. Because chance outcomes sample uniformly from a bitmask, refilling needs no hidden draw order. The PPO observation does not expose discard-pile contents.
-
-## Research and implementation comparisons
-
-- [OpenAI Five, Figures 17–18](https://cdn.openai.com/dota-2.pdf): pools entity features for global processing while retaining unit embeddings for attention-based target selection. The applicable lesson is to keep action-addressable entities alongside pooled summaries.
-- [AlphaStar paper](https://storage.googleapis.com/deepmind-media/research/alphastar/AlphaStar_unformatted.pdf): combines scalar, entity, and spatial streams with structured action heads and entity targeting. This supports explicit global inputs and preserving entity connections; it does not establish that Eclipse needs the entire architecture.
-- [DeepMind's AlphaStar implementation](https://github.com/google-deepmind/alphastar/blob/main/alphastar/architectures/standard/heads.py): reference for separate structured action-head components.
-- [Meta's Diplomacy implementation](https://github.com/facebookresearch/diplomacy_cicero/blob/main/fairdiplomacy/models/base_strategy_model/base_strategy_model.py#L1274): its optional relational output features gather candidate orders' source and destination board features. This is a relevant pattern for Eclipse movement scoring.
-
-These are design references, not evidence of an Eclipse performance gain. Memory may help retain legitimate public history, but cannot repair information discarded before the policy sees it or justify access to hidden future outcomes.
-
-## Recommended order and acceptance checks
-
-1. Preserve exact unit/slot identity through action selection, using existing position/route data and allowing state-dependent interactions between action arguments. Fixed by the spatial candidate scorer.
-2. Compare width and topology handling only after the candidate scorer's correctness checks pass.
-
-At inspection time, `runs/roster/arch.json` specified spatial encoding, width 16, depth 1, and a factored actor. This is checkpoint metadata, not confirmation of the settings of any currently running process. Compare wider models under controlled training and wall-clock budgets; do not assume width is the primary defect.
-
-Acceptance checks should cover:
-
-- Identical board/economy with different rounds retains distinct time context.
-- Supported resource balances remain distinguishable above 40.
-- Blueprint part swaps change slot representations; replacement consequences match the addressed part.
-- Reindexing units and corresponding actions permutes target scores consistently.
-- Different units can reverse their direction preferences independently as destinations change.
-- Colony/population choices access the correct slot; warped moves access the correct destination.
-- Retreat timing and reputation draw counts match their actual semantics.
-- Empty entity sets produce ordinary finite representations.
-- Changing opponents' hidden tiles or secret outer-sector selection does not leak into policy observations or derived score features.
-- Sparse training and dense evaluation score the same policy.
-
-Then evaluate seeded matches against fixed opponents and the existing ladder. Numerical sensitivity tests establish information access, not that the trained policy uses the information well.
-
-## Documentation and validation limits
-
-[`eclipse_observation_v2.md`](eclipse_observation_v2.md) claims all V2 information is consumed and describes a planet-type embedding absent from the current encoder. [`eclipse_rl_todo.md`](eclipse_rl_todo.md) contains historical pointer and unit-location plans. These notes need reconciliation with current code before implementation; they were not edited during this audit.
-
-Checks were small CPU diagnostics and constructed engine-state comparisons, not a full training run or exhaustive reachability audit. During inspection the shared build changed: the Python extension temporarily disappeared, then returned with bindings that allowed engine checks but failed trainer import because `pyspiel.PlayerId` was unavailable. Earlier encoder checks completed before that change. No build-system changes were made as part of this audit.
-
-## Bonus: shared part embeddings
-
-Store a part ID in each blueprint slot, then let the network look up a shared vector for that ID. Keep the vector attached to its player, ship class, and slot. Reusing the same lookup for an upgrade's proposed part connects installed parts with candidate actions.
-
-| Variation | Idea / tradeoff |
-| --- | --- |
-| Fixed perpendicular vectors | One-hot encoding is the simplest example. For 43 nonempty parts, exact orthogonality requires at least 43 dimensions; clear identities, but no built-in similarity. |
-| Small learned vectors | Start with an 8–16-dimensional lookup and an explicit empty-slot ID. Training can learn useful similarities between parts; orthogonality is unnecessary. |
-| Learned vectors plus part statistics | Add known energy, hull, movement, and weapon properties. Gives the network the effects directly instead of requiring it to learn every rule from IDs. |
-| Action-conditioned attention | Let an upgrade candidate consult the addressed slot and ship's other parts. Preserves replacement context, but adds machinery; test direct slot lookup and a small scorer first. |
-
-Suggested starting point: per-slot IDs, a shared learned lookup, and direct access to the current and proposed parts when scoring upgrades. IDs can reduce observation storage compared with repeated one-hot vectors; expanding them inside the model still costs computation, and adding missing slot IDs alone increases today's tensor size. Embeddings may improve sharing, but do not repair discarded slot identity, resource clipping, or ignored global inputs by themselves.
+# Eclipse PPO readiness: next work
+
+This is the remaining work before an expensive Eclipse PPO self-play run can
+produce credible evidence of a strong four-player policy. The target is one
+policy that can later occupy three opponent seats. UI and application work are
+out of scope.
+
+## Do not start the long run yet
+
+The present local training path cannot be trusted or launched as-is:
+
+- The selected `pyspiel` extension lacks `PlayerId`, required by
+  `rl_environment.py`, and reports an observation length of 37,788 while the
+  current Python layout expects 37,804. Rebuild and validate one coherent
+  native/Python artifact before any PPO test or training command.
+- PPO auxiliary targets survive reuse of rollout rows. A new unfinished
+  trajectory can train on final targets from the previous batch. Clear
+  `aux_targets` and `aux_mask` together with the other per-batch labels in
+  [`ppo.py`](../open_spiel/python/pytorch/ppo.py).
+- Reward shaping has incompatible implementations. The synchronous and async
+  paths scale the same VP potential differently; `telescope` produces zero;
+  and cross-viewer potential reads treat a player's hidden reputation as a
+  loss when another player becomes the viewer. Define one same-seat,
+  privacy-safe shaping transition, including terminal and rollout-boundary
+  behavior. Keep unshaped PPO as the control.
+- The default rank critic is bounded to `[-0.5, 1]`, but the default terminal
+  VP bonus can exceed `1`. The `cell_attn` alternative reports `(None, inf)`
+  and currently crashes PPO's bounds diagnostic. Pick a working value head
+  whose range matches every return that the selected reward design can emit.
+
+## Game rules that must be fixed or explicitly scoped out
+
+These are reachable mechanics or termination paths that change the game the
+agent would learn:
+
+- **Ancient Labs:** researching it must immediately draw and resolve a
+  Discovery Tile. Its effect is absent from
+  [`research.cpp`](../open_spiel/games/eclipse/systems/actions/research.cpp).
+- **Elimination:** a player with neither ships nor controlled sectors at the
+  end of combat must be eliminated. Only bankruptcy elimination is currently
+  implemented in [`eclipse.cc`](../open_spiel/games/eclipse/eclipse.cc).
+- **Soliton Missile:** the final ship part is excluded from
+  `PlaceablePartIds`, so an owned Soliton Missile can never be installed.
+  Fix the bounds in
+  [`upgrade.cpp`](../open_spiel/games/eclipse/systems/actions/upgrade.cpp).
+- **Diplomacy non-progress loop:** proposing and declining diplomacy does not
+  advance the turn. Players can repeat it until the generic 1,000-move cap
+  ends and scores an unfinished game. A safety cutoff must be a failure, not a
+  scored terminal result; resolve the action progression so normal games end
+  through round-eight cleanup.
+- **Special ship parts:** Jump Drive and Morph Shield have no behavioral
+  implementation beyond their table entries. Confirm their intended effects
+  against the source rules, implement them, or exclude them from training
+  configurations until they are correct.
+
+Add compact regression tests for each item, plus randomized full-game tests
+that assert every game reaches the normal round-eight ending below the safety
+cap.
+
+## Make credit assignment and optimization measurable
+
+Before tuning model size, prove the learning data is correct.
+
+1. Create deterministic, multi-batch trajectory tests with passing, early
+   elimination, and terminal closeout. Assert which action of each seat gets
+   the terminal target and that no stale action/log-probability is optimized.
+2. Test each shaping mode against exact expected rewards in both synchronous
+   and asynchronous collection. Assert identical results for identical game
+   transitions.
+3. Log the fraction of returns outside the critic range, terminal-target
+   variance, all-tied outcome rate, eliminations, normal-round endings, and
+   safety-cap endings. Abort a pilot on non-finite values, invalid legal-action
+   sets, or any safety-cap terminal.
+4. Decide the objective deliberately. The current rank-utility table rewards
+   guaranteed second place more than a sufficiently risky win strategy. If
+   first-place probability is the product objective, report it and select
+   policies by it; retain tie-aware utility and VP as diagnostic measures.
+
+## Make runs recoverable
+
+- Always write final network weights, optimizer state, counters, and exact
+  architecture metadata on ordinary completion as well as snapshot cadence.
+- Restore optimizer state only when it belongs to the exact resumed run and
+  checkpoint. An arbitrary `--resume` weight file must not silently receive
+  Adam moments and schedules from `roster_dir/train_state.pt`.
+- Have async workers report exceptions to the parent and make the parent fail
+  with context rather than block indefinitely on a semaphore.
+- Evict opponent modules that no longer appear in current league lineups;
+  roster pruning alone does not reclaim already loaded networks.
+
+## Evaluate the product scenario
+
+The recurring verdict must evaluate one candidate seat against three opponents,
+not the current two-candidate-seat versus two-bot arrangement. Every scheduled
+held-out scenario must complete; do not take merely the first environments to
+finish.
+
+For each candidate:
+
+- Rotate the candidate through all four seats.
+- Use one policy on the remaining three seats, then mixed historical roster
+  lineups to test exploitability and non-transitivity.
+- Fix and record setup and chance seeds. Report first-place rate, tie-aware
+  per-seat utility, VP, game length, eliminations, and bootstrap confidence
+  intervals.
+- Require the lower confidence bound of one-seat utility to exceed four-player
+  chance utility (`0.25`) against several held-out opponents.
+
+Use the existing
+[`ffa_metagame.py`](../open_spiel/python/eclipse/ffa_metagame.py) machinery for
+reproducible full four-policy profiles and AlphaRank. The existing 2v2 ladder is
+useful population telemetry, but cannot establish the one-versus-three claim.
+
+## Pilot acceptance gate
+
+Run several independent short seeds only after the preceding blockers are
+closed. Promote to a long run only when every seed shows:
+
+- the native build, PPO unit tests, engine regression tests, and one async
+  multi-worker update all pass;
+- finite losses and returns, correct checkpoint/resume behavior, and no worker
+  hang;
+- no safety-cap termination, with healthy round completion and no unexplained
+  collapse into universal bankruptcy;
+- stable improvement on the held-out one-seat-versus-three suite over a
+  documented baseline and older snapshots.
+
+Do not add a larger network, recurrence, search, or a more elaborate league
+until this pilot identifies a bottleneck they address. The existing structured
+encoder, candidate action head, roster, matcher, ladder, and FFA evaluator are
+enough to obtain a trustworthy baseline once the correctness work above is
+complete.
