@@ -66,24 +66,26 @@ _PATTERNS = [
     ("infl_cell", re.compile(r"^COMBAT_INFLUENCE_TO_(-?\d+_-?\d+)$"), ("cell",)),
 ]
 
-# ``ShipPartId`` in games/eclipse/tech.h.  Action strings use the enum names,
-# while observations store its compact integer value (NONE == 0).
+# ``ShipPartId`` in games/eclipse/tech.h.  Action strings embed each part's
+# display name from SHIP_PART_TABLE (e.g. "Ion Cannon"), not the enum name;
+# observations store the enum's compact integer value (NONE == 0). Order here
+# must match the ShipPartId/SHIP_PART_TABLE declaration order in tech.h.
 _PART_IDS = {
     name: i for i, name in enumerate((
-        "NONE", "ION_CANNON", "NUCLEAR_SOURCE", "NUCLEAR_DRIVE", "HULL",
-        "ELECTRON_COMPUTER", "PLASMA_CANNON", "PHASE_SHIELD",
-        "TACHYON_SOURCE", "GLUON_COMPUTER", "PLASMA_MISSILE",
-        "FUSION_SOURCE", "IMPROVED_HULL", "POSITRON_COMPUTER",
-        "GAUSS_SHIELD", "TACHYON_DRIVE", "ANTIMATTER_CANNON",
-        "FUSION_DRIVE", "ABSORPTION_SHIELD", "CONIFOLD_FIELD",
-        "FLUX_MISSILE", "SENTIENT_HULL", "SOLITON_CANNON",
-        "TRANSITION_DRIVE", "ZERO_POINT_SOURCE", "RIFT_CANNON",
-        "MUON_SOURCE", "RIFT_CONDUCTOR", "ANTIMATTER_MISSILE",
-        "AXION_COMPUTER", "CONFORMAL_DRIVE", "FLUX_SHIELD",
-        "HYPERGRID_SOURCE", "INVERSION_SHIELD", "ION_DISRUPTOR",
-        "ION_MISSILE", "ION_TURRET", "JUMP_DRIVE", "MORPH_SHIELD",
-        "NONLINEAR_DRIVE", "PLASMA_TURRET", "SHARD_HULL",
-        "SOLITON_CHARGER", "SOLITON_MISSILE"))}
+        "NONE", "Ion Cannon", "Nuclear Source", "Nuclear Drive", "Hull",
+        "Electron Computer", "Plasma Cannon", "Phase Shield",
+        "Tachyon Source", "Gluon Computer", "Plasma Missile",
+        "Fusion Source", "Improved Hull", "Positron Computer",
+        "Gauss Shield", "Tachyon Drive", "Antimatter Cannon",
+        "Fusion Drive", "Absorption Shield", "Conifold Field",
+        "Flux Missile", "Sentient Hull", "Soliton Cannon",
+        "Transition Drive", "Zero Point Source", "Rift Cannon",
+        "Muon Source", "Rift Conductor", "Antimatter Missile",
+        "Axion Computer", "Conformal Drive", "Flux Shield",
+        "Hypergrid Source", "Inversion Shield", "Ion Disruptor",
+        "Ion Missile", "Ion Turret", "Jump Drive", "Morph Shield",
+        "Nonlinear Drive", "Plasma Turret", "Shard Hull",
+        "Soliton Charger", "Soliton Missile"))}
 _SHIP_IDS = {name: i for i, name in enumerate(
     ("INTERCEPTOR", "CRUISER", "DREADNOUGHT", "STARBASE"))}
 
@@ -186,7 +188,10 @@ def build_action_factorization(action_strings):
         elif f == "ship":
           ship_id[action] = _SHIP_IDS[v]
         elif f == "part":
-          part_id[action] = _PART_IDS["NONE" if v == "REMOVE" else v]
+          # Dead ids beyond the 43 defined parts (UPGRADE_PART_COUNT=50 headroom)
+          # fall back to the engine's "PARTnn" placeholder text and are never
+          # legal; give them NONE's row rather than crashing.
+          part_id[action] = _PART_IDS.get("NONE" if v == "REMOVE" else v, 0)
         elif f == "slot":
           if family in ("colony", "upgrade"):
             slot_id[action] = int(v)

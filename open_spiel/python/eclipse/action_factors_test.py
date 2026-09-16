@@ -64,7 +64,7 @@ class ActionFactorizationTest(absltest.TestCase):
 
   def test_upgrade_metadata_uses_observation_part_ids(self):
     fz = build_action_factorization([
-        "UPGRADE_CRUISER_SLOT2_ION_CANNON",
+        "UPGRADE_CRUISER_SLOT2_Ion Cannon",
         "UPGRADE_INTERCEPTOR_SLOT1_REMOVE",
     ])
     np.testing.assert_array_equal(fz.ship_id, [1, 0])
@@ -257,7 +257,7 @@ class FactoredActorHeadTest(absltest.TestCase):
     while state.is_chance_node():
       state.apply_action(state.chance_outcomes()[0][0])
     x = torch.tensor([state.observation_tensor(0)], dtype=torch.float32)
-    logits = net.actor(x)
+    logits = net.dense_logits(x)
     self.assertTrue(torch.isfinite(logits).all())
     logits.sum().backward()
     for name, p in net.shared.named_parameters():
