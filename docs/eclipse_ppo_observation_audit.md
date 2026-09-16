@@ -7,55 +7,67 @@ out of scope.
 
 ## Do not start the long run yet
 
-The present local training path cannot be trusted or launched as-is:
+Resolved this pass, verified with a real (tiny) end-to-end training run —
+rollout collection, `learn()`, and a second update complete with finite
+losses under the default `--factored_actions --encoder=spatial
+--critic_readout=cell_attn` configuration, which previously could not get
+past startup:
 
-- The selected `pyspiel` extension lacks `PlayerId`, required by
-  `rl_environment.py`, and reports an observation length of 37,788 while the
-  current Python layout expects 37,804. Rebuild and validate one coherent
-  native/Python artifact before any PPO test or training command.
-- PPO auxiliary targets survive reuse of rollout rows. A new unfinished
-  trajectory can train on final targets from the previous batch. Clear
-  `aux_targets` and `aux_mask` together with the other per-batch labels in
-  [`ppo.py`](../open_spiel/python/pytorch/ppo.py).
-- Reward shaping has incompatible implementations. The synchronous and async
-  paths scale the same VP potential differently; `telescope` produces zero;
-  and cross-viewer potential reads treat a player's hidden reputation as a
-  loss when another player becomes the viewer. Define one same-seat,
-  privacy-safe shaping transition, including terminal and rollout-boundary
-  behavior. Keep unshaped PPO as the control.
-- The default rank critic is bounded to `[-0.5, 1]`, but the default terminal
-  VP bonus can exceed `1`. The `cell_attn` alternative reports `(None, inf)`
-  and currently crashes PPO's bounds diagnostic. Pick a working value head
-  whose range matches every return that the selected reward design can emit.
+- ~~The selected `pyspiel` extension lacks `PlayerId`~~. The `build/` tree now
+  builds `PlayerId` and reports the expected 37,804-length observation.
+- ~~PPO auxiliary targets survive reuse of rollout rows~~. `clear_batch` now
+  zeroes `aux_targets`/`aux_mask` alongside the other per-batch labels.
+- ~~Reward shaping has incompatible implementations~~. Collapsed to one
+  same-seat, privacy-safe potential (telescoped banked VP across each seat's
+  own consecutive decisions); `--phi=none` is the unshaped control.
+- ~~The default rank critic is bounded to `[-0.5, 1]`... `cell_attn` reports
+  `(None, inf)`~~. `cell_attn` is now the default readout and reports
+  `(-inf, inf)` (an intentionally unbounded linear head).
+
+Also found and fixed by actually running a full step+learn cycle for the
+first time (previously unreachable behind an action-factorization crash,
+below): `action_factors.py`'s part-name lookup didn't match the engine's
+action-string format; `CellAttentionCritic.key_norm` normalized over the
+wrong dimension, crashing any `--nn_width != 64`; `PPO._sparse_minibatch`
+assumed plain-tensor `features` when the candidate actor head passes a
+structured context; `head_logits()` silently returned a non-float32 dtype
+under autocast that broke the log-prob/entropy reductions built on top of it.
+
+Not yet re-run: a longer pilot to confirm these hold under real load (many
+envs, many updates, checkpoint/resume). Do that before anything longer.
 
 ## Game rules that must be fixed or explicitly scoped out
 
-These are reachable mechanics or termination paths that change the game the
-agent would learn:
+Four of five resolved this pass, each with a regression test exercised
+through the public State/Action API where practical:
 
-- **Ancient Labs:** researching it must immediately draw and resolve a
-  Discovery Tile. Its effect is absent from
-  [`research.cpp`](../open_spiel/games/eclipse/systems/actions/research.cpp).
-- **Elimination:** a player with neither ships nor controlled sectors at the
-  end of combat must be eliminated. Only bankruptcy elimination is currently
-  implemented in [`eclipse.cc`](../open_spiel/games/eclipse/eclipse.cc).
-- **Soliton Missile:** the final ship part is excluded from
-  `PlaceablePartIds`, so an owned Soliton Missile can never be installed.
-  Fix the bounds in
-  [`upgrade.cpp`](../open_spiel/games/eclipse/systems/actions/upgrade.cpp).
-- **Diplomacy non-progress loop:** proposing and declining diplomacy does not
-  advance the turn. Players can repeat it until the generic 1,000-move cap
-  ends and scores an unfinished game. A safety cutoff must be a failure, not a
-  scored terminal result; resolve the action progression so normal games end
-  through round-eight cleanup.
-- **Special ship parts:** Jump Drive and Morph Shield have no behavioral
-  implementation beyond their table entries. Confirm their intended effects
-  against the source rules, implement them, or exclude them from training
-  configurations until they are correct.
+- ~~**Ancient Labs**~~: researching it now draws and resolves one Discovery
+  Tile (rulebook p.10), reusing `apply_discovery_reward`. Tiles that read
+  "place ... in the Sector where found" (Monolith/Orbital/Cruiser/Warp
+  Portal) resolve against the first Sector the player Controls, falling back
+  to the tile's VP value if they control none.
+- ~~**Elimination**~~: a player left with no Ships and no Sectors under their
+  Control at the end of the Combat Phase is now eliminated too, independent
+  of the Upkeep bankruptcy path.
+- ~~**Soliton Missile**~~: `PlaceablePartIds`' loop bound was off by one,
+  silently excluding the last entry of `SHIP_PART_TABLE`.
+- ~~**Diplomacy non-progress loop**~~: a decline changed nothing else, so the
+  proposer could re-propose to the same partner forever without ever taking
+  a main Action. A decline now blocks re-proposing that exact pair until the
+  turn genuinely ends, bounding the cycle to at most `player_count^2`
+  declines.
+- **Special ship parts** (still open): Jump Drive and Morph Shield have no
+  behavioral implementation beyond their table entries. The rulebook PDF in
+  this repo doesn't cover Discovery ship parts, and the existing source
+  comments describing their intended effects (`//tp to adjacent sector
+  regardless of wormhole`, `//heals 1 per combat`) couldn't be verified
+  against a source trustworthy enough to implement blind. Confirm their
+  intended effects against an actual source, implement them, or exclude
+  them from training configurations until they are correct.
 
-Add compact regression tests for each item, plus randomized full-game tests
-that assert every game reaches the normal round-eight ending below the safety
-cap.
+Add randomized full-game tests that assert every game reaches the normal
+round-eight ending below the safety cap -- the four fixes above were each
+checked in isolation, not against a full random-policy playout.
 
 ## Make credit assignment and optimization measurable
 
