@@ -65,21 +65,14 @@ wave() {  # wave <label> <cells...>
 
 wave A \
   a_none_rank:1:none:rank \
-  a_banked_rank:1:banked:rank \
-  a_soft_rank:1:soft:rank \
-  a_learned_rank:1:learned:rank \
   a_telescope_rank:1:telescope:rank
 
 wave B \
   b_none_rank:2:none:rank \
-  b_banked_rank:2:banked:rank \
-  b_soft_rank:2:soft:rank \
-  b_learned_rank:2:learned:rank \
   b_telescope_rank:2:telescope:rank
 
 wave C \
   c_none_noaux:1:none:none \
-  c_learned_noaux:1:learned:none \
   c_telescope_noaux:1:telescope:none
 
 echo "=== B3 grid complete ==="

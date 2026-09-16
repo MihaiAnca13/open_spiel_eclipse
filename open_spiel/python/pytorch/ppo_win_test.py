@@ -348,11 +348,13 @@ class PPOWinValueTest(absltest.TestCase):
         time_step, reward, done, _ = envs.step(
             agent_output, reset_if_done=True)
         agent.post_step(reward, done)
-      agent.learn(time_step)
       # Back-filled targets/masks should have been written for some rows.
       if agent.num_aux and agent.aux_mask is not None:
         if bool(agent.aux_mask.sum().item()):
           got_targets = True
+      agent.learn(time_step)
+      self.assertEqual(float(agent.aux_targets.sum()), 0.0)
+      self.assertEqual(float(agent.aux_mask.sum()), 0.0)
     self.assertTrue(got_targets)
     self.assertEqual(agent.num_aux, 1)
     self.assertEqual(agent.aux_tasks, ["final_vp"])

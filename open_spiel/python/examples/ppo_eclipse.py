@@ -18,19 +18,9 @@ This is the Stage 0.5/1 training path (see docs/eclipse_rl_todo.md). A single
 shared network acts for whichever seat is to move in each of `num_envs` parallel
 games (the N-player self-play generalization of open_spiel.python.pytorch.ppo).
 
-Reward shaping (default on, --phi=soft) adds banked VP plus in-progress presence
-terms (colony ships, disks on sectors, orbitals/monoliths, ambassadors), read
-straight out of the observation. Shaping is skipped on the terminal transition,
-where the true payoff is used.
-
-`soft` is the Sprint-B3 grid's pick: highest VP in both seeds and the best mean
-utility against the stronger (Greedy) baseline. It is *not* policy-invariant, and
-that seems to be the point -- the invariant variant (--phi=telescope, which
-differences a potential across each seat's own consecutive decisions and so is the
-only one that truly telescopes against the per-own-decision gamma in the
-self-play GAE) measured mid-pack, because invariance by construction cannot
-supply inductive bias. See the --phi flag for the full grid and, importantly, for
-why 2 seeds resolve much less than the eval intervals suggest.
+Reward shaping defaults to banked VP differenced between each seat's own
+consecutive decisions. Shaping is skipped on terminal transitions, where the
+true payoff is used; ``--noshaping`` is the unshaped control.
 
 This addresses the sparse terminal reward problem without access to
 expert/human demonstration data.
@@ -243,48 +233,8 @@ flags.DEFINE_string(
 
 flags.DEFINE_bool("shaping", True,
                   "Potential-based shaping from the obs 'score' slot.")
-flags.DEFINE_enum("phi", "soft",
-                  ["banked", "soft", "none", "learned", "telescope"],
-                  "Potential definition. Adjudicated by the Sprint-B3 grid "
-                  "(5 shapings x 18 min, 2 seeds, judged on batched held-out "
-                  "evals). Read the caveat below before trusting any ranking.\n"
-                  "'soft' (default) = banked VP plus in-progress presence terms "
-                  "(colony ships, disks on sectors, orbitals/monoliths, "
-                  "ambassadors). Highest vp_all in *both* seeds (13.00, 9.09) "
-                  "and the best mean utility vs Greedy (0.503). Not "
-                  "policy-invariant -- it biases toward expansion -- which "
-                  "appears to be useful inductive bias here.\n"
-                  "'telescope' = banked-VP potential differenced across a seat's "
-                  "own consecutive decisions. The only variant that actually "
-                  "telescopes against the per-own-decision gamma in the self-play "
-                  "GAE, so the only policy-invariant one. It was briefly the "
-                  "default on that theoretical basis, but invariance means it "
-                  "cannot supply inductive bias, and it measured mid-pack with "
-                  "high variance (Greedy 0.279 / 0.543 across seeds).\n"
-                  "'banked' = current VP if the game ended now, differenced "
-                  "across env steps (does not telescope). Mid-pack but by far the "
-                  "most seed-stable (0.430 / 0.434), which makes it the right "
-                  "control for architecture A/Bs.\n"
-                  "'learned' = the network's own win-value at the *next* acting "
-                  "seat's state minus the mover's own -- two different players' "
-                  "values, so not a potential difference at all. REFUTED: worst "
-                  "vs Greedy and lowest vp_all in all 3 runs it appeared in, "
-                  "while having the *highest* survival, i.e. it learns not to die "
-                  "without learning to score. It was the pre-Sprint-A default, "
-                  "chosen on a metric that could not see VP.\n"
-                  "'none' disables shaping. Mid-pack.\n"
-                  "CAVEAT: within-run eval intervals are ~+-0.06 but run-to-run "
-                  "variance is +-0.17..0.34, so 2 seeds separate only 'learned is "
-                  "worst' and 'soft scores most'. Resolving the rest needs ~8-10 "
-                  "seeds per cell.")
-flags.DEFINE_float("phi_w_colony", 0.5,
-                   "Soft-Phi weight per colony ship (in VP-equivalent units).")
-flags.DEFINE_float("phi_w_disk", 1.0,
-                   "Soft-Phi weight per influence disk committed to sectors.")
-flags.DEFINE_float("phi_w_structure", 1.0,
-                   "Soft-Phi weight per orbital/monolith built.")
-flags.DEFINE_float("phi_w_ambassador", 1.0,
-                   "Soft-Phi weight per ambassador tile held.")
+flags.DEFINE_enum("phi", "telescope", ["none", "telescope"],
+                  "Use same-seat, banked-VP potential shaping or disable it.")
 flags.DEFINE_float(
     "gamma", 0.998,
     "Discount factor (used for potential-based shaping too). Raised from 0.99 "
@@ -376,8 +326,8 @@ flags.DEFINE_enum("nn_activation", "tanh", ["tanh", "gelu"],
                   "Hidden activation. Tanh saturates; gelu is the C1 default "
                   "for the wider trunk.")
 flags.DEFINE_enum(
-    "critic_readout", "rank", ["rank", "cell_attn"],
-    "Critic readout. 'rank' (default) reproduces the historical behaviour "
+    "critic_readout", "cell_attn", ["rank", "cell_attn"],
+    "Critic readout. 'rank' reproduces the historical behaviour "
     "exactly: an expected-rank-utility value HARD-bounded to [-0.5, 1] from 4 "
     "rank logits off the shared trunk. 'cell_attn' is the Stage 1 architectural "
     "core: ONE value feature built from the fused state plus ONE state-"
@@ -997,7 +947,9 @@ class CellAttentionCritic(nn.Module):
     # normalised BEFORE the q/k/v projection, following the modern
     # pre-LayerNorm transformer pattern rather than the older post-norm one.
     self.query_norm = nn.LayerNorm(width)
-    self.key_norm = nn.LayerNorm(hidden)
+    # Normalizes `cells` pre-projection, so it matches the cell channel dim
+    # (64), not `hidden` -- k_proj/v_proj are what maps 64 -> hidden.
+    self.key_norm = nn.LayerNorm(SpatialEclipseEncoder.CELL_FEATURE_CHANNELS)
 
     # Single-query cross-attention. key/value go from each cell's channel
     # dimension (64) up to `hidden`. num_heads=1: ONE query vector.
@@ -1480,7 +1432,7 @@ class EclipsePPOAgent(nn.Module):
     (the head is a plain linear, no activation cap).
     """
     if self.critic_readout == "cell_attn":
-      return (None, float("inf"))
+      return (float("-inf"), float("inf"))
     return min(self.RANK_UTILITY), max(self.RANK_UTILITY)
 
   def get_aux(self, features):
@@ -2054,89 +2006,11 @@ class _GreedyPickV2:
         bstop if bstop in builds else None)
 
 
-def phi_from_obs_slot(obs_full, slot):
-  """Banked-VP potential read from a score slot of a full observation."""
-  return float(obs_full[slot]) * SCORE_DIVISOR
-
-
-# Lazy caches: the phi functions run once per (env, observed state) in the hot
-# loop; absl FLAGS lookups (2.5M+ calls in profiling) are replaced by plain
-# locals resolved after flag parsing.
-_PHI_WEIGHTS = None
-_PHI_VARS = None
-
-
-def _phi_cached():
-  """Returns (mode, weights) resolved once from FLAGS."""
-  global _PHI_WEIGHTS, _PHI_VARS
-  if _PHI_VARS is None:
-    _PHI_WEIGHTS = (FLAGS.phi_w_colony, FLAGS.phi_w_disk,
-                    FLAGS.phi_w_structure, FLAGS.phi_w_ambassador)
-    _PHI_VARS = (FLAGS.phi, FLAGS.gamma)
-  return _PHI_VARS[0], _PHI_WEIGHTS, _PHI_VARS[1]
-
-
-# Denominators the C++ writer used for each field, so the reads below recover
-# real units rather than normalised ones.
-_PHI_SCALES = (
-    (obs_layout.P_COLONY_TOTAL, 12.0),
-    (obs_layout.P_DISKS_ON_SECTORS, 16.0),
-    (obs_layout.P_ORBITALS, 10.0),
-    (obs_layout.P_MONOLITHS, 6.0),
-    (obs_layout.P_AMBASSADOR_HELD, 5.0),
-)
-
-
-def phi_soft_block(obs, base):
-  """Soft potential for the seat whose block starts at ``base``.
-
-  Self and opponent now share one identical block schema, so this replaces the
-  old ``phi_soft_self``/``phi_soft_opponent`` pair -- which had to duplicate the
-  same formula against two different sets of offsets.
-  """
-  _, (w_colony, w_disk, w_struct, w_amb), _ = _phi_cached()
-  vp = float(obs[base + obs_layout.P_VP_TOTAL]) * SCORE_DIVISOR
-  colony = float(obs[base + obs_layout.P_COLONY_TOTAL]) * 12.0
-  disks = float(obs[base + obs_layout.P_DISKS_ON_SECTORS]) * 16.0
-  orbitals = float(obs[base + obs_layout.P_ORBITALS]) * 10.0
-  monoliths = float(obs[base + obs_layout.P_MONOLITHS]) * 6.0
-  amb = float(obs[base + obs_layout.P_AMBASSADOR_HELD]) * 5.0
-  return vp + (w_colony * colony + w_disk * disks +
-               w_struct * (orbitals + monoliths) +
-               w_amb * amb)
-
-
 def potential_self(obs, win_squash=False):
-  """Potential of the acting seat from its own observation.
-
-  Returns VP units for banked/soft; with ``win_squash`` those are mapped onto
-  the rank-utility scale (so shaped rewards stay comparable to terminal
-  rank-utility targets). 'learned' is handled separately by the caller (it
-  needs the network).
-  """
-  mode, _, _ = _phi_cached()
-  # The viewer is always block slot 0 now.
-  return potential_block(obs, obs_layout.player_block_start(0), win_squash)
-
-
-def potential_block(obs, base, win_squash=False):
-  """Potential of the seat whose block starts at ``base``.
-
-  VP units for banked/soft; ``win_squash`` maps onto the rank-utility scale.
-  """
-  mode, _, _ = _phi_cached()
-  if mode == "banked":
-    v = float(obs[base + obs_layout.P_VP_TOTAL]) * SCORE_DIVISOR
-  elif mode == "soft":
-    v = phi_soft_block(obs, base)
-  else:
-    v = 0.0
-  return _squash_win(v) if (win_squash and mode in ("banked", "soft")) else v
-
-
-def potential_opponent(obs_viewer, block, win_squash=False):
-  """Backwards-compatible alias -- ``block`` is now a full block start index."""
-  return potential_block(obs_viewer, block, win_squash)
+  """Banked-VP potential of the acting seat from its own observation."""
+  value = float(obs[obs_layout.player_block_start(0) +
+                    obs_layout.P_VP_TOTAL]) * SCORE_DIVISOR
+  return _squash_win(value) if win_squash else value
 
 
 def potential_self_vec(obs_batch, win_squash=False):
@@ -2144,51 +2018,9 @@ def potential_self_vec(obs_batch, win_squash=False):
 
   Column reads only, no per-env Python loop (hot shaping path).
   """
-  mode, (w_col, w_disk, w_struct, w_amb), _ = _phi_cached()
-  # The viewer is always block slot 0.
-  return potential_block_vec(
-      obs_batch,
-      np.full(obs_batch.shape[0], obs_layout.player_block_start(0),
-              dtype=np.int64),
-      win_squash)
-
-
-def potential_block_vec(obs_batch, blocks, win_squash=False):
-  """Vectorized potential; ``blocks`` is (num_envs,) block-start index per row.
-
-  Self and opponent share one block schema, so a single formula now serves both
-  -- the two vectorized variants used to duplicate it against different offsets.
-  """
-  n = obs_batch.shape[0]
-  ar = np.arange(n)
-  mode, (w_col, w_disk, w_struct, w_amb), _ = _phi_cached()
-  blocks = np.asarray(blocks, dtype=np.int64)
-  if mode == "banked":
-    v = obs_batch[ar, blocks + obs_layout.P_VP_TOTAL] * SCORE_DIVISOR
-  elif mode == "soft":
-    v = (obs_batch[ar, blocks + obs_layout.P_VP_TOTAL] * SCORE_DIVISOR
-         + w_col * obs_batch[ar, blocks + obs_layout.P_COLONY_TOTAL] * 12.0
-         + w_disk * obs_batch[ar, blocks + obs_layout.P_DISKS_ON_SECTORS] * 16.0
-         + w_struct * (obs_batch[ar, blocks + obs_layout.P_ORBITALS] * 10.0
-                       + obs_batch[ar, blocks + obs_layout.P_MONOLITHS] * 6.0)
-         + w_amb * obs_batch[ar, blocks + obs_layout.P_AMBASSADOR_HELD] * 5.0)
-  else:
-    v = np.zeros(n, dtype=np.float32)
-  if win_squash and mode in ("banked", "soft"):
-    return np.clip(v / SCORE_DIVISOR, -0.5, 1.0)
-  return v
-
-
-def potential_opponent_vec(obs_batch, blocks, win_squash=False):
-  """Backwards-compatible alias for ``potential_block_vec``."""
-  return potential_block_vec(obs_batch, blocks, win_squash)
-
-
-def _phi_wins(agent, obs_np, device):
-  """Win-value (expected rank-utility) of the mover for each row's own obs."""
-  with torch.no_grad():
-    x = torch.from_numpy(np.asarray(obs_np, dtype=np.float32)).to(device)
-    return agent.get_value(x).cpu().numpy()
+  values = obs_batch[:, obs_layout.player_block_start(0) +
+                     obs_layout.P_VP_TOTAL] * SCORE_DIVISOR
+  return np.clip(values / SCORE_DIVISOR, -0.5, 1.0) if win_squash else values
 
 
 # ── League (population self-play) helpers ───────────────────────────────────
@@ -3236,16 +3068,7 @@ def main(_):
 
   # Shaping configuration resolved once per run.
   win_squash = FLAGS.value_mode == "win"
-  phi_learned = FLAGS.phi == "learned"
-  # 'telescope' is handled inside PPO (post_step(phi=...)): the delta spans a
-  # seat's own consecutive decisions, so it cannot be computed from a single
-  # env step here.
-  phi_telescope = FLAGS.phi == "telescope"
-  if phi_learned and not win_squash:
-    raise ValueError("--phi=learned requires --value_mode=win (the learned "
-                     "potential is the network's win value).")
-  phi_mode = FLAGS.phi
-  if FLAGS.shaping and phi_telescope:
+  if FLAGS.shaping and FLAGS.phi == "telescope":
     _emit("shaping: telescope phi (banked VP, differenced across each seat's "
           "own consecutive decisions)")
 
@@ -3308,10 +3131,7 @@ def main(_):
           envs.start_step_np(acts, reset_if_done=True)
         obs_batch = agent.last_obs_batch
         diag.observe(obs_batch, agent.last_seats)
-        if FLAGS.shaping and phi_learned:
-          phi_prev = _phi_wins(agent, obs_batch, device)
-        else:
-          phi_prev = potential_self_vec(obs_batch, win_squash)
+        phi_prev = potential_self_vec(obs_batch, win_squash)
         if _overlap:
           # MUST precede post_step_np: terminal attribution resolves the seat's
           # last decision, which is exactly what this records.
@@ -3325,32 +3145,11 @@ def main(_):
         step_arrays = (envs.finish_step_np() if _overlap
                        else envs.step_np(acts, reset_if_done=True))
         t2 = time.perf_counter() if _tm is not None else None
-        shaped = np.zeros(FLAGS.num_envs, dtype=np.float32)
-        if FLAGS.shaping and phi_mode not in ("none", "telescope"):
-          seats = np.asarray(agent.last_seats)
-          new_seats = step_arrays.seats.astype(np.int64)
-          not_done = ~step_arrays.dones
-          if phi_learned:
-            # Learned potential: win-value of whoever is to act next. Computed
-            # from each row's own observation at s' (same-scale as the mover's
-            # own obs at s), so the telescope is an approximation.
-            phi_next = _phi_wins(agent, step_arrays.obs, device)
-            shaped[not_done] = FLAGS.gamma * phi_next[not_done] - phi_prev[not_done]
-          else:
-            # phi(s') for the seat that just acted, read out of whichever seat
-            # is now to move. Every seat has an identical block and the tensor
-            # is canonicalised to the viewer, so this is one wrapping
-            # subtraction -- the old self-vs-opponent branch (and its two
-            # different offset layouts) is gone.
-            blocks = (obs_layout.PLAYERS_START
-                      + ((seats - new_seats) % num_players)
-                      * obs_layout.PLAYER_SIZE)
-            phi_next = potential_block_vec(step_arrays.obs, blocks, win_squash)
-            shaped[not_done] = FLAGS.gamma * phi_next[not_done] - phi_prev[not_done]
         t2b = time.perf_counter() if _tm is not None else None
         agent.post_step_np(
-            step_arrays.rewards, step_arrays.dones, shaped_reward=shaped,
-            phi=(phi_prev if (FLAGS.shaping and phi_telescope) else None),
+            step_arrays.rewards, step_arrays.dones,
+            phi=(phi_prev if (FLAGS.shaping and FLAGS.phi == "telescope")
+                 else None),
             terminal_aux=step_arrays.terminal_obs)
         # After post_step: terminal closeout for the finished episode must see
         # the lineup that generated it, not the one sampled for the next.
@@ -3473,49 +3272,17 @@ def main(_):
         # second GPU->CPU round trip).
         obs_batch = agent.last_obs_batch
         diag.observe(obs_batch, agent.last_seats)
-        if FLAGS.shaping and phi_learned:
-          phi_prev = _phi_wins(agent, obs_batch, device)
-        else:
-          phi_prev = np.fromiter(
-              (potential_self(obs_batch[i], win_squash)
-               for i in range(FLAGS.num_envs)),
-              dtype=np.float32, count=FLAGS.num_envs)
+        phi_prev = potential_self_vec(obs_batch, win_squash)
 
         terminal_steps, reward, done, _ = envs.step(
             agent_output, reset_if_done=False, players="current")
         terminal_aux = _terminal_breakdown_from_steps(
             terminal_steps, num_players)
         time_step = envs.reset(envs_to_reset=done, players="current")
-        shaped = np.zeros(FLAGS.num_envs, dtype=np.float32)
-        if FLAGS.shaping and phi_mode not in ("none", "telescope"):
-          seats = agent.last_seats
-          if phi_learned:
-            new_obs = np.stack([
-                ts.observations["info_state"][ts.observations["current_player"]]
-                for ts in time_step
-            ], axis=0)
-            phi_next = _phi_wins(agent, new_obs, device)
-            for i in range(FLAGS.num_envs):
-              if done[i]:
-                continue
-              shaped[i] = FLAGS.gamma * phi_next[i] - phi_prev[i]
-          else:
-            for i, ts in enumerate(time_step):
-              if done[i]:
-                continue
-              viewer = ts.observations["current_player"]
-              seat = seats[i]
-              obs_viewer = ts.observations["info_state"][viewer]
-              # One identical block per seat, canonicalised to the viewer, so
-              # the same-seat and different-seat cases are the same read.
-              base = obs_layout.player_block_start(
-                  obs_layout.slot_for_seat(seat, viewer, num_players))
-              phi_next = potential_block(obs_viewer, base, win_squash)
-              shaped[i] = FLAGS.gamma * phi_next - phi_prev[i]
-
         agent.post_step(
-            reward, done, shaped_reward=shaped.tolist(),
-            phi=(phi_prev if (FLAGS.shaping and phi_telescope) else None),
+            reward, done,
+            phi=(phi_prev if (FLAGS.shaping and FLAGS.phi == "telescope")
+                 else None),
             terminal_aux=terminal_aux)
         # See the async loop: refresh only after terminal bookkeeping.
         if FLAGS.league:

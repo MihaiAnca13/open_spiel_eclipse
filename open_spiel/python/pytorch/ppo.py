@@ -270,20 +270,31 @@ def legal_actions_to_mask(legal_actions_list, num_actions, device="cpu"):
 
 
 def head_logits(head, features, rows, cols):
-  """(M,) logits for the (rows[i], cols[i]) pairs, for any actor head type.
+  """(M,) float32 logits for the (rows[i], cols[i]) pairs, for any actor head type.
 
   An action's logit factors as ``features[row] . weight[col] + bias[col]``, and
   the weight row for ``col`` comes from the head's ``rows_for`` (for a
   ``FactoredActorHead``) or directly from ``head.weight[col]`` (for a plain
   ``nn.Linear``). ``cells`` formerly threaded a spatial pointer term into the
   head; that mechanism was removed.
+
+  Always float32: under autocast a candidate head scores in bf16/fp16, but
+  every caller here does log-prob/entropy reductions (scatter, exp, log) that
+  autocast itself promotes back to fp32 -- pinning the dtype at the source
+  keeps the two in sync instead of chasing the promotion downstream.
   """
   logits_for = getattr(head, "logits_for", None)
   if logits_for is not None:
-    return logits_for(features, rows, cols)
+    return logits_for(features, rows, cols).float()
   rows_for = getattr(head, "rows_for", None)
   w = rows_for(cols) if rows_for is not None else head.weight[cols]
-  return (features[rows] * w).sum(-1) + head.bias[cols]
+  return ((features[rows] * w).sum(-1) + head.bias[cols]).float()
+
+
+def _features_batch_size(features):
+  """Batch size of ``features``, a plain (B, H) tensor or a structured
+  per-head context namedtuple (e.g. a candidate actor's spatial context)."""
+  return getattr(features, "fused", features).shape[0]
 
 
 class _ObsRows:
@@ -1584,14 +1595,14 @@ class PPO(nn.Module):
     """
     M = rows.shape[0]
     if M == 0:
-      b = features.shape[0]
+      b = _features_batch_size(features)
       return (torch.zeros(b, device=self.device),
               torch.zeros(b, device=self.device))
     rows_gpu = torch.from_numpy(rows).to(self.device)
     cols_gpu = torch.from_numpy(cols).to(self.device)
-    logits_e = head_logits(head, features, rows_gpu, cols_gpu)  # (M,)
+    logits_e = head_logits(head, features, rows_gpu, cols_gpu)  # (M,), float32
     # segment reductions per block (entries of a sample are contiguous)
-    b_mb = features.shape[0]
+    b_mb = _features_batch_size(features)
     m = torch.full((b_mb,), float("-inf"), device=self.device)
     m.scatter_reduce_(0, rows_gpu, logits_e, reduce="amax", include_self=False)
     e = (logits_e - m[rows_gpu]).exp()
@@ -1717,7 +1728,7 @@ class PPO(nn.Module):
   def _log_prob_chosen(self, features, chosen, lse, head):
     """(B,) log_prob of ``chosen`` under the masked distribution with known
     per-row logsumexp ``lse``."""
-    own_rows = torch.arange(features.shape[0], device=self.device)
+    own_rows = torch.arange(_features_batch_size(features), device=self.device)
     logit_a = head_logits(head, features, own_rows, chosen)
     return logit_a - lse
 
@@ -2296,6 +2307,9 @@ class PPO(nn.Module):
     for pending in self._pending_phi:
       pending.clear()
     self.rank_label_mask.zero_()
+    if self.num_aux:
+      self.aux_targets.zero_()
+      self.aux_mask.zero_()
 
   def anneal_rank_vp_beta(self, update, num_total_updates, beta_to=0.0):
     """Linearly moves the VP escape bonus from its initial slope to ``beta_to``.

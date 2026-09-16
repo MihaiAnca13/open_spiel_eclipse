@@ -222,7 +222,7 @@ class CellAttentionCriticTest(absltest.TestCase):
 
     # 3) mode-aware value_bounds.
     self.assertEqual(net_r.value_bounds(), (-0.5, 1.0))
-    self.assertEqual(net_c.value_bounds(), (None, float("inf")))
+    self.assertEqual(net_c.value_bounds(), (float("-inf"), float("inf")))
 
   def test_value_from_actor_features_flag(self):
     """Semantics: cell_attn cannot value from actor features (needs h_cells)."""
