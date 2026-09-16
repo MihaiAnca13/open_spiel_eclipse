@@ -497,6 +497,12 @@ void DrawOneReputationTile(::State& state, ReputationTiles value);
 void AddRetreatingGroup(::State& state, uint8_t player_id, ShipType type,
                         uint16_t destination_sector_id);
 void FlushDestroyedShips(::State& state);
+
+// Morph Shield (Discovery ship part): after each Combat Round is resolved,
+// every still-alive ship of either side in the current engagement (active
+// Sector, current attacker/defender pair) carrying one heals 1 damage,
+// unconditionally.
+void HealMorphShieldsAfterRound(::State& state);
 void RebuildInitiativeTimeline(::State& state);
 // Advance the combat state machine one deterministic step (no randomness;
 // dice and tile draws are resolved via chance nodes).

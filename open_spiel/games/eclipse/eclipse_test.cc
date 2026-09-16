@@ -1495,6 +1495,57 @@ void MoveFullActionTest() {
   SPIEL_CHECK_EQ(state->CurrentPlayer(), 1);
 }
 
+// Jump Drive (Discovery ship part): every Move, may enter an adjacent Sector
+// regardless of Wormhole Connections.
+void MoveJumpDriveBypassesWormholeRequirementTest() {
+  std::shared_ptr<const Game> game = LoadEclipseGame(2, 7);
+  std::unique_ptr<State> state = game->NewInitialState();
+  state->ApplyAction(0);  // resolve setup
+
+  EclipseState* eclipse_state = static_cast<EclipseState*>(state.get());
+  ::State& raw = const_cast<::State&>(eclipse_state->RawState());
+  raw.current_player = 0;
+  raw.players[0].has_passed = false;
+
+  // Center (sector 1, at (0,0)) has wormholes on all 6 edges. Place CASTOR
+  // (sector 101, wormholes_mask 0b011111 -- missing edge 5) at direction 2
+  // (Northwest, offset (0,-1)): opposite_edge = (2+3)%6 = 5, CASTOR's missing
+  // edge, so the default (my_edge && their_edge) connection check fails.
+  raw.unit_registry.clear();
+  raw.unit_registry.push_back(Unit{0, ShipType::INTERCEPTOR, 1, 0});
+  raw.galaxy.at(0, -1) = Sector{
+      .sector_id = 101,
+      .owner_id = 255,
+      .coords = {0, -1},
+      .rotation = 0,
+      .points = 2,
+      .occupied_slots_mask = 0,
+      .discovery_tile_present = false,
+      .orbital_built = false,
+      .monolith_built = false,
+  };
+
+  // Set up choose_move directly -- begin_move()/the "MOVE" action itself
+  // requires an already-legal move to exist anywhere, which is exactly what
+  // direction 2 deliberately isn't; can_move_step/execute_move_step are what
+  // this test exercises, not the main-action entry point.
+  raw.move_state = MoveState{};
+  raw.move_state.player_id = 0;
+  raw.move_state.phase = MoveState::Phase::choose_move;
+  raw.move_state.activations_remaining = 1;
+
+  SPIEL_CHECK_FALSE(can_move_step(raw, 0, 0, 2));
+
+  // Install Jump Drive on the interceptor's blueprint.
+  Blueprint& bp = raw.players[0].blueprints[static_cast<size_t>(ShipType::INTERCEPTOR)];
+  bp.capacity = 1;
+  bp.slots[0] = ShipPartId::JUMP_DRIVE;
+
+  SPIEL_CHECK_TRUE(can_move_step(raw, 0, 0, 2));
+  SPIEL_CHECK_TRUE(execute_move_step(raw, 0, 0, 2));
+  SPIEL_CHECK_EQ(raw.unit_registry[0].sector_id, 101);
+}
+
 void ReactionTurnAndBonusActionTest() {
   auto game = LoadEclipseGame(2, 7);
   std::unique_ptr<State> state = game->NewInitialState();
@@ -2621,6 +2672,76 @@ void TiedInitiativeMidRoundDeathTest() {
   }
   SPIEL_CHECK_LT(steps, kMaxSteps);
   SPIEL_CHECK_GT(combat_rolls, 0);
+}
+
+// Morph Shield (Discovery ship part): after each Combat Round is resolved, a
+// still-alive ship of either side in the current engagement carrying one
+// heals 1 damage, unconditionally.
+void CombatMorphShieldHealsAfterEachRoundTest() {
+  ::State s;
+  for (uint8_t i = 0; i < 3; ++i) {
+    ::Player p{};
+    p.id = i;
+    p.species_id = Species::TERRAN_FACTIONS;
+    s.players.push_back(p);
+  }
+  s.combat_state.active_sector_id = 500;
+  s.combat_state.current_attacker_id = 0;
+  s.combat_state.current_defender_id = 1;
+
+  // Player 0's ship carries a Morph Shield and has taken damage: heals 1.
+  Blueprint& bp0 = s.players[0].blueprints[static_cast<size_t>(ShipType::INTERCEPTOR)];
+  bp0.capacity = 1;
+  bp0.slots[0] = ShipPartId::MORPH_SHIELD;
+  Unit shielded{};
+  shielded.player_id = 0;
+  shielded.type = ShipType::INTERCEPTOR;
+  shielded.sector_id = 500;
+  shielded.damage = 3;
+  s.unit_registry.push_back(shielded);
+
+  // Player 1's ship (the other side of the same pair) has no Morph Shield:
+  // unaffected.
+  Unit unshielded{};
+  unshielded.player_id = 1;
+  unshielded.type = ShipType::INTERCEPTOR;
+  unshielded.sector_id = 500;
+  unshielded.damage = 2;
+  s.unit_registry.push_back(unshielded);
+
+  // Player 2's ship carries a Morph Shield and is in the same Sector, but
+  // isn't part of the current attacker/defender pair (hasn't had a Combat
+  // Round yet): unaffected.
+  Blueprint& bp2 = s.players[2].blueprints[static_cast<size_t>(ShipType::INTERCEPTOR)];
+  bp2.capacity = 1;
+  bp2.slots[0] = ShipPartId::MORPH_SHIELD;
+  Unit bystander{};
+  bystander.player_id = 2;
+  bystander.type = ShipType::INTERCEPTOR;
+  bystander.sector_id = 500;
+  bystander.damage = 1;
+  s.unit_registry.push_back(bystander);
+
+  // A destroyed player-0 ship (graveyard sector) carrying a Morph Shield:
+  // dead, not "still-alive" -- unaffected.
+  Unit dead{};
+  dead.player_id = 0;
+  dead.type = ShipType::INTERCEPTOR;
+  dead.sector_id = kGraveyardSectorId;
+  dead.damage = 5;
+  s.unit_registry.push_back(dead);
+
+  HealMorphShieldsAfterRound(s);
+
+  SPIEL_CHECK_EQ(s.unit_registry[0].damage, 2);  // shielded, in the pair: healed
+  SPIEL_CHECK_EQ(s.unit_registry[1].damage, 2);  // no Morph Shield: unchanged
+  SPIEL_CHECK_EQ(s.unit_registry[2].damage, 1);  // not in the pair: unchanged
+  SPIEL_CHECK_EQ(s.unit_registry[3].damage, 5);  // dead: unchanged
+
+  // Unconditional, but never underflows a fully-healed ship.
+  s.unit_registry[0].damage = 0;
+  HealMorphShieldsAfterRound(s);
+  SPIEL_CHECK_EQ(s.unit_registry[0].damage, 0);
 }
 
 // Rulebook (PLAYER ELIMINATION): a player with no Ships and no Sectors under
@@ -3785,6 +3906,7 @@ int main(int argc, char** argv) {
   RUN_TEST(UpgradeDiscoveryPartsTest);
   RUN_TEST(UpgradePlaceablePartIdsIncludesLastPartTest);
   RUN_TEST(MoveFullActionTest);
+  RUN_TEST(MoveJumpDriveBypassesWormholeRequirementTest);
   RUN_TEST(ReactionTurnAndBonusActionTest);
   RUN_TEST(StrictMainActionFilteringTest);
   RUN_TEST(UpkeepRoundFlowTest);
@@ -3797,6 +3919,7 @@ int main(int argc, char** argv) {
   RUN_TEST(ObservationPrivacyTest);
   RUN_TEST(RevealDiscoveryLedgerTest);
   RUN_TEST(CombatDiceChanceFlowTest);
+  RUN_TEST(CombatMorphShieldHealsAfterEachRoundTest);
   RUN_TEST(TiedInitiativeOrderTest);
   RUN_TEST(TiedInitiativeMissileEdgeTest);
   RUN_TEST(TiedInitiativeMidRoundDeathTest);

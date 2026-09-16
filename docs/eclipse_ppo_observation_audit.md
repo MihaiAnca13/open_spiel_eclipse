@@ -38,8 +38,8 @@ envs, many updates, checkpoint/resume). Do that before anything longer.
 
 ## Game rules that must be fixed or explicitly scoped out
 
-Four of five resolved this pass, each with a regression test exercised
-through the public State/Action API where practical:
+All five resolved this pass, each with a regression test exercised through
+the public State/Action API where practical:
 
 - ~~**Ancient Labs**~~: researching it now draws and resolves one Discovery
   Tile (rulebook p.10), reusing `apply_discovery_reward`. Tiles that read
@@ -56,14 +56,14 @@ through the public State/Action API where practical:
   a main Action. A decline now blocks re-proposing that exact pair until the
   turn genuinely ends, bounding the cycle to at most `player_count^2`
   declines.
-- **Special ship parts** (still open): Jump Drive and Morph Shield have no
-  behavioral implementation beyond their table entries. The rulebook PDF in
-  this repo doesn't cover Discovery ship parts, and the existing source
-  comments describing their intended effects (`//tp to adjacent sector
-  regardless of wormhole`, `//heals 1 per combat`) couldn't be verified
-  against a source trustworthy enough to implement blind. Confirm their
-  intended effects against an actual source, implement them, or exclude
-  them from training configurations until they are correct.
+- ~~**Special ship parts**~~: Jump Drive and Morph Shield had no behavioral
+  implementation beyond their table entries. Confirmed against the source
+  (not the rulebook PDF, which doesn't cover Discovery ship parts) and
+  implemented: Jump Drive lets a ship enter an adjacent Sector on every Move
+  regardless of Wormhole Connections, still subject to every other Move rule
+  (pinning, an actual Sector must be there); Morph Shield heals 1 damage,
+  unconditionally, on every still-alive ship in the current engagement after
+  each Combat Round resolves.
 
 Add randomized full-game tests that assert every game reaches the normal
 round-eight ending below the safety cap -- the four fixes above were each

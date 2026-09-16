@@ -178,6 +178,21 @@ namespace open_spiel::eclipse
             }
         }
 
+        // Jump Drive (Discovery ship part): every Move, this ship may enter an
+        // adjacent Sector regardless of Wormhole Connections -- still subject
+        // to every other Move rule (pinning, an actual Sector must be there).
+        bool unit_has_jump_drive(const ::State& state, const Unit& unit)
+        {
+            if (unit.player_id >= state.players.size()) return false;
+            const Blueprint& bp =
+                state.players[unit.player_id].blueprints[static_cast<size_t>(unit.type)];
+            for (uint8_t i = 0; i < bp.capacity; ++i)
+            {
+                if (bp.slots[i] == ShipPartId::JUMP_DRIVE) return true;
+            }
+            return false;
+        }
+
 
         bool can_start_or_continue(const ::MoveState& ms, uint8_t unit_idx)
         {
@@ -187,7 +202,8 @@ namespace open_spiel::eclipse
 
         bool has_wormhole_connection(const ::State& state, const MoveBoardCache& cache,
                                      uint8_t from_cell, uint8_t direction,
-                                     uint8_t& to_cell, bool wormhole_generator)
+                                     uint8_t& to_cell, bool wormhole_generator,
+                                     bool ignore_wormhole = false)
         {
             if (from_cell >= GALAXY_CELL_COUNT) return false;
             const HexCoord from = index_to_hex(from_cell);
@@ -202,6 +218,8 @@ namespace open_spiel::eclipse
             {
                 return false;
             }
+
+            if (ignore_wormhole) return true;
 
             const bool my_edge = has_edge(cache.rotated_wormholes[from_cell], direction);
             const bool their_edge = has_edge(cache.rotated_wormholes[to_cell], opposite_edge);
@@ -275,7 +293,8 @@ namespace open_spiel::eclipse
                 state.players[player_id].has_tech(TechBit::WORMHOLE_GENERATOR);
             uint8_t to_cell = INVALID_CELL;
             if (!has_wormhole_connection(state, cache, ctx.source_cell,
-                                         direction, to_cell, wormhole_generator))
+                                         direction, to_cell, wormhole_generator,
+                                         unit_has_jump_drive(state, *ctx.unit)))
             {
                 return false;
             }
@@ -331,11 +350,13 @@ namespace open_spiel::eclipse
                     continue;
                 }
 
+                const bool jump_drive = unit_has_jump_drive(state, unit);
                 for (uint8_t d = 0; d < 6; ++d)
                 {
                     uint8_t to_cell = INVALID_CELL;
                     if (has_wormhole_connection(state, cache, source_cell,
-                                                d, to_cell, wormhole_generator))
+                                                d, to_cell, wormhole_generator,
+                                                jump_drive))
                     {
                         return true;
                     }
@@ -471,11 +492,13 @@ namespace open_spiel::eclipse
                 continue;
             }
 
+            const bool jump_drive = unit_has_jump_drive(state, unit);
             for (uint8_t d = 0; d < 6; ++d)
             {
                 uint8_t to_cell = INVALID_CELL;
                 if (has_wormhole_connection(state, cache, source_cell,
-                                            d, to_cell, wormhole_generator))
+                                            d, to_cell, wormhole_generator,
+                                            jump_drive))
                 {
                     options.push_back(MoveStepOption{unit_idx, d});
                 }

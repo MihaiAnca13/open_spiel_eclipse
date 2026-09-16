@@ -207,6 +207,37 @@ void ApplyDamageToUnit(::State& state, Unit& unit, int damage,
     }
 }
 
+bool UnitHasMorphShield(const ::State& state, const Unit& unit) {
+    if (unit.player_id >= state.players.size()) return false;
+    const Blueprint& bp =
+        state.players[unit.player_id].blueprints[static_cast<size_t>(unit.type)];
+    for (uint8_t i = 0; i < bp.capacity; ++i) {
+        if (bp.slots[i] == ShipPartId::MORPH_SHIELD) return true;
+    }
+    return false;
+}
+
+// Morph Shield (Discovery ship part): after each Combat Round is resolved,
+// every still-alive ship of either side in the current engagement carrying
+// one heals 1 damage, unconditionally. Scoped to the current attacker/
+// defender pair, not the whole Sector -- a third player's ships still
+// waiting their own pairing haven't had a Combat Round yet. Destroyed ships
+// are already moved to the graveyard sector by ApplyDamageToUnit as damage
+// lands, so a plain sector/owner scan already excludes them.
+void HealMorphShieldsAfterRound(::State& state) {
+    const CombatState& cs = state.combat_state;
+    for (Unit& unit : state.unit_registry) {
+        if (unit.sector_id != cs.active_sector_id) continue;
+        if (unit.player_id != cs.current_attacker_id &&
+            unit.player_id != cs.current_defender_id) {
+            continue;
+        }
+        if (unit.damage == 0) continue;
+        if (!UnitHasMorphShield(state, unit)) continue;
+        --unit.damage;
+    }
+}
+
 // Apply the Rift Cannon's self-damage to one of the firing group's own ships in
 // the active sector. Called once per rolled die, independent of targeting.
 void ApplyRiftSelfDamage(::State& state, uint8_t attacker_id,
@@ -1048,6 +1079,7 @@ bool StepCombat(::State& state) {
         }
         case CombatState::Phase::choose_engagement_action: {
             if (!AdvanceToNextAliveGroup(state)) {
+                HealMorphShieldsAfterRound(state);
                 if (CountCurrentPairParticipantsWithShips(state) > 1 &&
                     cs.engagement_round < kMaxEngagementRounds) {
                     ++cs.engagement_round;
