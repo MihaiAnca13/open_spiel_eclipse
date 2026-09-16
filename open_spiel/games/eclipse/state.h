@@ -276,6 +276,14 @@ struct State {
     // does not advance the turn until it returns to inactive.
     DiplomacyState diplomacy_state;
 
+    // Bit (proposer * MAX_PLAYERS + partner) is set once that ordered pair's
+    // proposal has been declined during the proposer's current Action. A
+    // decline resets diplomacy_state to inactive and changes nothing else, so
+    // without this the proposer could re-propose to the same partner forever
+    // without ever taking a main Action -- AdvanceTurn (the only thing a
+    // decline never reaches) clears it.
+    uint64_t diplomacy_declined_this_turn_mask = 0;
+
     // The 4 Minor Species tiles selected at setup (indices into MINOR_SPECIES_TABLE).
     // When a tile is formed with, it is removed from this pool.
     FixedVector<uint8_t, MINOR_SPECIES_COUNT> minor_species_pool;
@@ -412,6 +420,7 @@ inline void to_json(nlohmann::json& j, const State& s) {
         {"upkeep_state", s.upkeep_state},
         {"combat_state", s.combat_state},
         {"diplomacy_state", s.diplomacy_state},
+        {"diplomacy_declined_this_turn_mask", s.diplomacy_declined_this_turn_mask},
         {"minor_species_pool", s.minor_species_pool},
         {"minor_species_pending_track", s.minor_species_pending_track},
         {"next_arrival_order", s.next_arrival_order},
@@ -544,6 +553,13 @@ inline void from_json(const nlohmann::json& j, State& s) {
         j.at("diplomacy_state").get_to(s.diplomacy_state);
     } else {
         s.diplomacy_state = DiplomacyState{};
+    }
+
+    if (j.contains("diplomacy_declined_this_turn_mask")) {
+        j.at("diplomacy_declined_this_turn_mask")
+            .get_to(s.diplomacy_declined_this_turn_mask);
+    } else {
+        s.diplomacy_declined_this_turn_mask = 0;
     }
 
     if (j.contains("minor_species_pool")) {

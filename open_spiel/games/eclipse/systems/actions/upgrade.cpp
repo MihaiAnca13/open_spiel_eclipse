@@ -155,7 +155,7 @@ namespace open_spiel::eclipse
         if (player_id >= state.players.size()) return out;
         const ::Player& player = state.players[player_id];
         constexpr size_t total_parts = sizeof(SHIP_PART_TABLE) / sizeof(SHIP_PART_TABLE[0]);
-        for (size_t i = 1; i < total_parts; ++i) {
+        for (size_t i = 1; i <= total_parts; ++i) {
             const ShipPart& part = SHIP_PART_TABLE[i - 1];
             const ShipPartId pid = static_cast<ShipPartId>(i);
             if (!part.is_discovery) {

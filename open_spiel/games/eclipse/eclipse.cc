@@ -543,6 +543,37 @@ void RemovePlayerFromBoard(::State& state, uint8_t player_id) {
   state.unit_registry = filtered_units;
 }
 
+// Rulebook (PLAYER ELIMINATION): "Eliminated players count their score."
+// Captures the score *before* flagging elimination and stripping the
+// player's components -- RemovePlayerFromBoard zeroes board-derived VP, so
+// this snapshot is what every future score read returns for this player.
+void EliminatePlayer(::State& state, uint8_t player_id) {
+  ::Player& player = state.players[player_id];
+  state.eliminated_score_breakdowns[player_id] =
+      compute_player_score(state, player_id);
+  player.vp_at_elimination =
+      state.eliminated_score_breakdowns[player_id].total_vp;
+  player.eliminated = true;
+  player.has_passed = true;
+  RemovePlayerFromBoard(state, player_id);
+}
+
+// Rulebook (PLAYER ELIMINATION): "A player with no Ships and no Sectors
+// under their Control is eliminated" -- checked at the end of the Combat
+// Phase, once every contested Sector's battle has resolved (bankruptcy is
+// the other elimination path, checked separately during Upkeep).
+bool PlayerHasShipsOrSectors(const ::State& state, uint8_t player_id) {
+  for (const Unit& unit : state.unit_registry) {
+    if (unit.player_id == player_id) return true;
+  }
+  for (int q = -GALAXY_RADIUS; q <= GALAXY_RADIUS; ++q) {
+    for (int r = -GALAXY_RADIUS; r <= GALAXY_RADIUS; ++r) {
+      if (state.galaxy.at(q, r).owner_id == player_id) return true;
+    }
+  }
+  return false;
+}
+
 void QueueCleanupGraveyardReturns(::State& state, uint8_t player_id) {
   state.upkeep_state.pending_returns.clear();
   if (player_id >= state.players.size()) return;
@@ -2211,17 +2242,7 @@ void EclipseState::AdvanceUpkeepState() {
         return;
       }
 
-      // Capture the score *before* flagging elimination and stripping the
-      // player's components. Future score reads restore this snapshot because
-      // RemovePlayerFromBoard zeroes the board-derived VP.
-      // Rulebook (PLAYER ELIMINATION): "Eliminated players count their score."
-      eclipse_state_.eliminated_score_breakdowns[player_id] =
-          compute_player_score(eclipse_state_, player_id);
-      player.vp_at_elimination =
-          eclipse_state_.eliminated_score_breakdowns[player_id].total_vp;
-      player.eliminated = true;
-      player.has_passed = true;
-      RemovePlayerFromBoard(eclipse_state_, player_id);
+      EliminatePlayer(eclipse_state_, player_id);
     }
 
     const uint8_t next_player =
@@ -2342,6 +2363,22 @@ void EclipseState::DriveCombat() {
 }
 
 void EclipseState::FinishCombat() {
+  // Rulebook (PLAYER ELIMINATION): a player left with no Ships and no
+  // Sectors under their Control at the end of the Combat Phase is
+  // eliminated, independent of the (separately checked) Upkeep bankruptcy
+  // path. Checked once every contested Sector's battle has resolved, before
+  // damage is repaired below (repair doesn't restore lost ships/Sectors, so
+  // ordering doesn't matter, but this reads more naturally as the actual
+  // end-of-combat state).
+  for (uint8_t player_id = 0; player_id < eclipse_state_.players.size();
+       ++player_id) {
+    ::Player& player = eclipse_state_.players[player_id];
+    if (!player.eliminated &&
+        !PlayerHasShipsOrSectors(eclipse_state_, player_id)) {
+      EliminatePlayer(eclipse_state_, player_id);
+    }
+  }
+
   // Repair: zero all unit damage, reset combat state, set phase to UPKEEP.
   for (Unit& u : const_cast<FixedVector<Unit, 128>&>(eclipse_state_.unit_registry)) {
     u.damage = 0;
@@ -3056,6 +3093,11 @@ void EclipseState::AdvanceTurn() {
   for (const ::Player& p : eclipse_state_.players) {
     if (p.pending_artifact_key_chunks > 0) return;
   }
+
+  // The turn is genuinely ending below (a real main Action completed or the
+  // player passed) -- declined Diplomacy proposals no longer need to stay
+  // blocked past this point.
+  eclipse_state_.diplomacy_declined_this_turn_mask = 0;
 
   const uint8_t current_player = eclipse_state_.current_player;
 

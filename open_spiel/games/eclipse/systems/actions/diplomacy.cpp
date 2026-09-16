@@ -202,6 +202,11 @@ namespace open_spiel::eclipse
         if (!has_diplomacy_wormhole_connection(state, proposer, partner)) return false;
         // Fix #5: scan ALL sectors for co-located ships (rulebook p.14).
         if (sector_has_co_located_players(state, proposer, partner)) return false;
+        // A decline changes nothing else, so without this the proposer could
+        // re-propose to the same partner forever without ever taking a main
+        // Action; see diplomacy_declined_this_turn_mask (state.h).
+        const uint64_t bit = uint64_t{1} << (proposer * MAX_PLAYERS + partner);
+        if ((state.diplomacy_declined_this_turn_mask & bit) != 0) return false;
         return true;
     }
 
@@ -243,6 +248,11 @@ namespace open_spiel::eclipse
     }
 
     void execute_diplomacy_decline(::State& state) {
+        const DiplomacyState& ds = state.diplomacy_state;
+        if (ds.player_id < MAX_PLAYERS && ds.partner_id < MAX_PLAYERS) {
+            state.diplomacy_declined_this_turn_mask |=
+                uint64_t{1} << (ds.player_id * MAX_PLAYERS + ds.partner_id);
+        }
         state.diplomacy_state = DiplomacyState{};
     }
 

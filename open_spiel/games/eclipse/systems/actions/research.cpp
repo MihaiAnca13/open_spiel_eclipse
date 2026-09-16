@@ -10,9 +10,58 @@
 #include "../../minor_species.h"
 #include "../../galaxy.h"
 #include "../../sectors.h"
+#include "explore.h"
 
 
 namespace open_spiel::eclipse {
+
+namespace {
+
+// Ancient Labs (Rare Tech, rulebook p.10): "Immediately draw and resolve one
+// Discovery Tile." Reused via apply_discovery_reward, the same resolution
+// Explore/Combat use for a non-interactive award. Some tiles (Monolith,
+// Orbital, Cruiser, Warp Portal) read "place ... in the Sector where found",
+// which a Research-triggered draw has no such Sector for.
+// ponytail: resolve those against the first Sector the player Controls in
+// board scan order, rather than adding a full choice-of-Sector decision node
+// -- the rulebook doesn't disambiguate a Research-triggered draw, and this
+// matches the existing "no eligible target -> kept for VP" fallback below.
+bool ResolveAncientLabsDiscovery(::State& state, uint8_t player_id) {
+    if (player_id >= state.players.size()) return false;
+    ::Sector scratch{};  // no board Sector context; forces a bag draw
+    DiscoveryBit drawn = RevealDiscovery(state, scratch);
+    state.current_revealed_discovery = DiscoveryBit::NONE;  // resolved below, not left pending
+    if (drawn == DiscoveryBit::NONE) return false;  // bag empty
+
+    const bool sector_tied =
+        drawn == DiscoveryBit::ANCIENT_MONOLITH ||
+        drawn == DiscoveryBit::ANCIENT_ORBITAL ||
+        drawn == DiscoveryBit::ANCIENT_CRUISER ||
+        drawn == DiscoveryBit::WARP_PORTAL;
+
+    ::Sector* target = &scratch;
+    if (sector_tied) {
+        target = nullptr;
+        for (int q = -GALAXY_RADIUS; q <= GALAXY_RADIUS && target == nullptr; ++q) {
+            for (int r = -GALAXY_RADIUS; r <= GALAXY_RADIUS; ++r) {
+                if (!in_galaxy_bounds(q, r)) continue;
+                ::Sector& s = state.galaxy.at(q, r);
+                if (s.owner_id == player_id) { target = &s; break; }
+            }
+        }
+    }
+
+    if (target != nullptr && apply_discovery_reward(state, player_id, *target, drawn)) {
+        return true;
+    }
+    // No Sector the player Controls (sector-tied tiles only), or the reward
+    // didn't apply (e.g. that Sector already has a Monolith) -- kept for its
+    // 2 VP value, mirroring resolve_explore_discovery's own fallback.
+    state.players[player_id].discovery_vp_tiles_kept++;
+    return true;
+}
+
+}  // namespace
 
 uint8_t get_track_tile_count(const ::Player& player, TechCategory category) {
     uint64_t mask;
@@ -98,6 +147,12 @@ bool research_tech(::State& state, uint8_t player_id, const TechDefinition& tech
     // a Warp Portal Tile that may be placed on any Controlled Sector.
     if (tech_def.bit == TechBit::WARP_PORTAL) {
         player.warp_portal_eligible = true;
+    }
+
+    // Ancient Labs (Rare Tech): immediately draw and resolve one Discovery
+    // Tile. See ResolveAncientLabsDiscovery for the resolution details.
+    if (tech_def.bit == TechBit::ANCIENT_LABS) {
+        ResolveAncientLabsDiscovery(state, player_id);
     }
 
     // Artifact Key (Nano Tech): immediately gain 5 Resources of a single type

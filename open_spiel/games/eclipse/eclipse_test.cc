@@ -851,6 +851,64 @@ void ResearchRareTechTrackTest() {
   SPIEL_CHECK_EQ(get_track_tile_count(player, TechCategory::NANO), 0);
 }
 
+const TechDefinition& FindTechDef(TechBit bit) {
+  for (size_t i = 0; i < TECH_TOTAL; ++i) {
+    if (TECH_TABLE[i].bit == bit) return TECH_TABLE[i];
+  }
+  SpielFatalError("tech bit not found in TECH_TABLE");
+}
+
+// Regression: Ancient Labs' effect (draw and resolve a Discovery Tile) was
+// entirely unimplemented. Covers a non-Sector-tied reward (resources), and
+// both branches of the Sector-tied fallback (Monolith placed vs. no
+// Controlled Sector -> kept for VP).
+void ResearchAncientLabsDrawsAndResolvesDiscoveryTest() {
+  const TechDefinition& ancient_labs = FindTechDef(TechBit::ANCIENT_LABS);
+
+  {
+    ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+    ::Player& player = s.players[0];
+    player.resources.science = 20;
+    s.add_to_tech_tray(TechBit::ANCIENT_LABS);
+    s.discovery_bag.push_back(DiscoveryBit::RESOURCES_6_MATERIALS);
+
+    SPIEL_CHECK_TRUE(research_tech(s, 0, ancient_labs, TechCategory::GRID));
+    SPIEL_CHECK_EQ(player.resources.materials, 6);
+    SPIEL_CHECK_EQ(s.discovery_bag.size(), 0);
+    SPIEL_CHECK_TRUE(s.current_revealed_discovery == DiscoveryBit::NONE);
+    SPIEL_CHECK_EQ(player.discovery_vp_tiles_kept, 0);
+  }
+
+  {
+    // Sector-tied tile, and the player Controls a Sector: placed there.
+    ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+    ::Player& player = s.players[0];
+    player.resources.science = 20;
+    s.add_to_tech_tray(TechBit::ANCIENT_LABS);
+    s.discovery_bag.push_back(DiscoveryBit::ANCIENT_MONOLITH);
+    Sector& home = s.galaxy.at(0, 0);
+    home.sector_id = 1;
+    home.owner_id = 0;
+    home.coords = {0, 0};
+
+    SPIEL_CHECK_TRUE(research_tech(s, 0, ancient_labs, TechCategory::GRID));
+    SPIEL_CHECK_TRUE(home.monolith_built);
+    SPIEL_CHECK_EQ(player.discovery_vp_tiles_kept, 0);
+  }
+
+  {
+    // Sector-tied tile, but the player Controls no Sector: kept for VP.
+    ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+    ::Player& player = s.players[0];
+    player.resources.science = 20;
+    s.add_to_tech_tray(TechBit::ANCIENT_LABS);
+    s.discovery_bag.push_back(DiscoveryBit::ANCIENT_MONOLITH);
+
+    SPIEL_CHECK_TRUE(research_tech(s, 0, ancient_labs, TechCategory::GRID));
+    SPIEL_CHECK_EQ(player.discovery_vp_tiles_kept, 1);
+  }
+}
+
 void ResearchInfluenceDiscRewardsTest() {
   std::shared_ptr<const Game> game = LoadEclipseGame(2, 7);
   std::unique_ptr<State> state = game->NewInitialState();
@@ -1347,6 +1405,33 @@ void UpgradeDiscoveryPartsTest() {
 
   SPIEL_CHECK_EQ(p.blueprints[0].slots[3], ShipPartId::NONE);
   SPIEL_CHECK_EQ(p.parts_inventory.size(), 0);
+}
+
+// Regression for an off-by-one in PlaceablePartIds that excluded the last
+// entry of SHIP_PART_TABLE (SOLITON_MISSILE), so an owned Soliton Missile
+// could never be installed.
+void UpgradePlaceablePartIdsIncludesLastPartTest() {
+  ::State s = MakeSinglePlayerState(Species::TERRAN_FACTIONS);
+  ::Player& p = s.players[0];
+  p.parts_inventory.push_back(ShipPartId::SOLITON_MISSILE);
+
+  std::vector<ShipPartId> placeable = PlaceablePartIds(s, 0);
+  SPIEL_CHECK_TRUE(std::find(placeable.begin(), placeable.end(),
+                              ShipPartId::SOLITON_MISSILE) != placeable.end());
+
+  // Slot 1 keeps a drive so the layout-integrity (movement > 0) check passes;
+  // slot 3 is the empty target for the missile.
+  p.blueprints[0].capacity = 4;
+  p.blueprints[0].slots[0] = ShipPartId::ION_CANNON;
+  p.blueprints[0].slots[1] = ShipPartId::NUCLEAR_DRIVE;
+  p.blueprints[0].slots[2] = ShipPartId::NUCLEAR_SOURCE;
+  p.blueprints[0].slots[3] = ShipPartId::NONE;
+  p.blueprints[0].recompute();
+  SPIEL_CHECK_TRUE(can_upgrade(s, 0, ShipType::INTERCEPTOR, 3,
+                                ShipPartId::SOLITON_MISSILE));
+  SPIEL_CHECK_TRUE(execute_upgrade(s, 0, ShipType::INTERCEPTOR, 3,
+                                    ShipPartId::SOLITON_MISSILE));
+  SPIEL_CHECK_EQ(p.blueprints[0].slots[3], ShipPartId::SOLITON_MISSILE);
 }
 
 void MoveFullActionTest() {
@@ -2538,6 +2623,100 @@ void TiedInitiativeMidRoundDeathTest() {
   SPIEL_CHECK_GT(combat_rolls, 0);
 }
 
+// Rulebook (PLAYER ELIMINATION): a player with no Ships and no Sectors under
+// their Control at the end of the Combat Phase must be eliminated. Strips
+// player 1 to a single, doomed, unarmed interceptor with no other holdings,
+// forces every weapon die to its guaranteed-hit face (dice.h: "6 always
+// hit"), and drives the whole Combat Phase through the public API.
+void CombatEliminatesPlayerWithNoShipsOrSectorsTest() {
+  std::shared_ptr<const Game> game = LoadEclipseGame(2, 7);
+  std::unique_ptr<State> state = game->NewInitialState();
+  state->ApplyAction(0);  // resolve setup
+
+  EclipseState* eclipse_state = static_cast<EclipseState*>(state.get());
+  ::State& raw = const_cast<::State&>(eclipse_state->RawState());
+  raw.turn_order[0] = 0;
+  raw.turn_order[1] = 1;
+  raw.current_player = 0;
+  raw.current_round = 1;
+  for (int p = 0; p < 2; ++p) {
+    raw.players[p].resources.gold = 5;
+    raw.players[p].colony_ships_total = 0;
+    raw.players[p].colony_ships_available = 0;
+  }
+  raw.players[0].blueprints[static_cast<size_t>(ShipType::INTERCEPTOR)]
+      .total_stats.cannons[0] = 1;  // one guaranteed-hitting yellow die
+  raw.players[1].blueprints[static_cast<size_t>(ShipType::INTERCEPTOR)]
+      .total_stats.cannons[0] = 0;  // unarmed
+  raw.players[1].blueprints[static_cast<size_t>(ShipType::INTERCEPTOR)]
+      .total_stats.hull = 1;        // dies to the first hit
+
+  // Strip player 1 of every Sector they Control...
+  for (int q = -GALAXY_RADIUS; q <= GALAXY_RADIUS; ++q) {
+    for (int r = -GALAXY_RADIUS; r <= GALAXY_RADIUS; ++r) {
+      Sector& sector = raw.galaxy.at(q, r);
+      if (sector.owner_id == 1) sector.owner_id = 255;
+    }
+  }
+
+  uint16_t battle_sector = 0;
+  for (const Unit& u : raw.unit_registry) {
+    if (u.player_id == 0 && u.sector_id != 0) {
+      battle_sector = u.sector_id;
+      break;
+    }
+  }
+  SPIEL_CHECK_GT(battle_sector, 0);
+
+  // ...and every Ship except the one doomed interceptor in the battle Sector.
+  FixedVector<Unit, 128> kept;
+  for (const Unit& u : raw.unit_registry) {
+    if (u.player_id != 1) kept.push_back(u);
+  }
+  raw.unit_registry = kept;
+  Unit victim{};
+  victim.player_id = 1;
+  victim.type = ShipType::INTERCEPTOR;
+  victim.sector_id = battle_sector;
+  victim.damage = 0;
+  victim.arrival_order = raw.AllocateArrivalOrder();
+  raw.unit_registry.push_back(victim);
+
+  SPIEL_CHECK_FALSE(raw.players[1].eliminated);
+
+  state->ApplyAction(FindActionByName(*state, "PASS"));
+  state->ApplyAction(FindActionByName(*state, "PASS"));
+  SPIEL_CHECK_TRUE(raw.current_phase == RoundPhase::COMBAT);
+
+  int steps = 0;
+  const int kMaxSteps = 8000;
+  while (!state->IsTerminal() &&
+         raw.current_phase == RoundPhase::COMBAT && steps < kMaxSteps) {
+    ++steps;
+    if (state->IsChanceNode()) {
+      const ActionsAndProbs outcomes = state->ChanceOutcomes();
+      SPIEL_CHECK_GT(outcomes.size(), 0);
+      // Last enumerated outcome is always face 6 for a weapon die (a
+      // guaranteed hit); harmless for other chance events (e.g. reputation
+      // draws), where any legal outcome works.
+      state->ApplyAction(outcomes.back().first);
+    } else {
+      const std::vector<Action> legal = state->LegalActions();
+      SPIEL_CHECK_GT(legal.size(), 0);
+      // Legal actions are sorted and action_combat_attack < every retreat
+      // action id, so this always stands-and-fights rather than retreating.
+      state->ApplyAction(legal[0]);
+    }
+  }
+  SPIEL_CHECK_LT(steps, kMaxSteps);
+  SPIEL_CHECK_TRUE(raw.current_phase != RoundPhase::COMBAT);
+
+  SPIEL_CHECK_TRUE(raw.players[1].eliminated);
+  for (const Unit& u : raw.unit_registry) {
+    SPIEL_CHECK_TRUE(u.player_id != 1);
+  }
+}
+
 // ── Scoring integration ───────────────────────────────────────────────────────
 
 void ScoringAmbassadorTest() {
@@ -3216,6 +3395,38 @@ void DiplomacyDeclineTest() {
                     DiplomacyState::Phase::inactive);
 }
 
+// Regression: a decline changes nothing about the pre-proposal game state
+// (rulebook p.14: "the current player simply continues their Action"), so
+// without diplomacy_declined_this_turn_mask, propose+decline was a free,
+// state-preserving cycle a policy could repeat until the safety-cap move
+// limit, never taking a real Action.
+void DiplomacyDeclineBlocksReproposalUntilTurnAdvancesTest() {
+  ::State s = MakeFourPlayerState();
+  s.players[0].warp_portal_eligible = true;
+  s.players[1].warp_portal_eligible = true;
+  Sector& a = s.galaxy.at(0, 0);
+  a.sector_id = 101;
+  a.owner_id = 0;
+  a.player_warp_portal_vp = 2;
+  Sector& b = s.galaxy.at(5, 0);
+  b.sector_id = 110;
+  b.owner_id = 1;
+  b.player_warp_portal_vp = 2;
+  SPIEL_CHECK_TRUE(can_propose_diplomacy(s, 0, 1));
+
+  s.diplomacy_state.phase = DiplomacyState::Phase::choose_accept;
+  s.diplomacy_state.player_id = 0;
+  s.diplomacy_state.partner_id = 1;
+  execute_diplomacy_decline(s);
+
+  // Re-proposing the exact same pair is blocked immediately after...
+  SPIEL_CHECK_FALSE(can_propose_diplomacy(s, 0, 1));
+  // ...and the block lifts once the mask is cleared (AdvanceTurn does this
+  // whenever a turn genuinely ends).
+  s.diplomacy_declined_this_turn_mask = 0;
+  SPIEL_CHECK_TRUE(can_propose_diplomacy(s, 0, 1));
+}
+
 void DiplomacyCurrentPlayerReturnsPartnerOnChooseAcceptTest() {
   // CurrentPlayer() must return the partner during choose_accept so the
   // Accept/Decline buttons are enabled for the partner.
@@ -3564,6 +3775,7 @@ int main(int argc, char** argv) {
   RUN_TEST(ExploreSpeciesRandomSimTest);
   RUN_TEST(ExploreFullActionViaApiTest);
   RUN_TEST(ResearchRareTechTrackTest);
+  RUN_TEST(ResearchAncientLabsDrawsAndResolvesDiscoveryTest);
   RUN_TEST(ResearchInfluenceDiscRewardsTest);
   RUN_TEST(ResearchActionTest);
   RUN_TEST(InfluenceReclaimCubesTest);
@@ -3571,6 +3783,7 @@ int main(int argc, char** argv) {
   RUN_TEST(BuildFullActionTest);
   RUN_TEST(UpgradeFullActionTest);
   RUN_TEST(UpgradeDiscoveryPartsTest);
+  RUN_TEST(UpgradePlaceablePartIdsIncludesLastPartTest);
   RUN_TEST(MoveFullActionTest);
   RUN_TEST(ReactionTurnAndBonusActionTest);
   RUN_TEST(StrictMainActionFilteringTest);
@@ -3587,6 +3800,7 @@ int main(int argc, char** argv) {
   RUN_TEST(TiedInitiativeOrderTest);
   RUN_TEST(TiedInitiativeMissileEdgeTest);
   RUN_TEST(TiedInitiativeMidRoundDeathTest);
+  RUN_TEST(CombatEliminatesPlayerWithNoShipsOrSectorsTest);
   RUN_TEST(ScoringEliminatedPlayerCountsSnapshotTest);
   RUN_TEST(ScoringEliminationSerializationTest);
   RUN_TEST(ScoringAmbassadorTest);
@@ -3620,6 +3834,7 @@ int main(int argc, char** argv) {
   RUN_TEST(DiplomacySlotHelperTest);
   RUN_TEST(DiplomacyAcceptFlowTest);
   RUN_TEST(DiplomacyDeclineTest);
+  RUN_TEST(DiplomacyDeclineBlocksReproposalUntilTurnAdvancesTest);
   RUN_TEST(DiplomacyTraitorTileTransferTest);
   RUN_TEST(DiplomacyCoLocatedShipsRejectsTest);
   RUN_TEST(DiplomacyCurrentPlayerReturnsPartnerOnChooseAcceptTest);
