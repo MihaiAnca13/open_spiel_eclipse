@@ -237,18 +237,17 @@ void RandomSimulationAndSerializationTest() {
     testing::RandomSimTest(*LoadEclipseGame(4, seed), /*num_sims=*/5,
                            /*serialize=*/true, /*verbose=*/false);
   }
+}
 
-  // Regression guard for the historical OOM. RandomSimTest keeps one state
-  // clone per move in its history vector, so a game that fails to terminate
-  // through the normal round logic grows that history without bound and
-  // exhausts memory. The MoveNumber() >= MaxGameLength() backstop in
-  // IsTerminal() caps the worst case, but reaching it means round
-  // advancement is broken. Assert random games end well below the backstop.
-  std::mt19937 rng(12345);
+void SeededRandomFourPlayerPlayoutsEndNormallyTest() {
+  // A terminal state alone is insufficient: IsTerminal() also has a move-count
+  // safety cap. Every seeded random game must instead finish through round
+  // eight cleanup, which advances current_round to 9.
   for (int seed = 0; seed < 30; ++seed) {
     auto game = LoadEclipseGame(4, seed);
     const int cap = game->MaxGameLength();
     auto state = game->NewInitialState();
+    std::mt19937 policy_rng(12345 + seed);
     while (!state->IsTerminal()) {
       std::vector<open_spiel::Action> actions;
       if (state->IsChanceNode()) {
@@ -259,9 +258,13 @@ void RandomSimulationAndSerializationTest() {
         actions = state->LegalActions();
       }
       std::uniform_int_distribution<int> dis(0, actions.size() - 1);
-      state->ApplyAction(actions[dis(rng)]);
+      state->ApplyAction(actions[dis(policy_rng)]);
     }
+
+    const auto* eclipse_state = dynamic_cast<const EclipseState*>(state.get());
+    SPIEL_CHECK_TRUE(eclipse_state != nullptr);
     SPIEL_CHECK_LT(state->MoveNumber(), cap);
+    SPIEL_CHECK_EQ(eclipse_state->RawState().current_round, 9);
   }
 }
 
@@ -3880,6 +3883,7 @@ int main(int argc, char** argv) {
   RUN_TEST(BasicEclipseTests);
   RUN_TEST(InitialStateChanceNodeTest);
   RUN_TEST(RandomSimulationAndSerializationTest);
+  RUN_TEST(SeededRandomFourPlayerPlayoutsEndNormallyTest);
   RUN_TEST(DeterministicReplayTest);
   RUN_TEST(SetupHelperParityTest);
   RUN_TEST(AppConfigSnapshotTest);
