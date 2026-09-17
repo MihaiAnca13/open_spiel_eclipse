@@ -65,9 +65,10 @@ the public State/Action API where practical:
   unconditionally, on every still-alive ship in the current engagement after
   each Combat Round resolves.
 
-Add randomized full-game tests that assert every game reaches the normal
-round-eight ending below the safety cap -- the four fixes above were each
-checked in isolation, not against a full random-policy playout.
+~~Add randomized full-game tests that assert every game reaches the normal
+round-eight ending below the safety cap.~~ Thirty deterministic four-player
+random-policy playouts now require both `current_round == 9` and a move count
+below `MaxGameLength()`; the complete Eclipse engine regression suite passes.
 
 ## Make credit assignment and optimization measurable
 
