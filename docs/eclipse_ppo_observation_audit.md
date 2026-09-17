@@ -66,9 +66,12 @@ the public State/Action API where practical:
   each Combat Round resolves.
 
 ~~Add randomized full-game tests that assert every game reaches the normal
-round-eight ending below the safety cap.~~ Thirty deterministic four-player
-random-policy playouts now require both `current_round == 9` and a move count
-below `MaxGameLength()`; the complete Eclipse engine regression suite passes.
+round-eight ending below the safety cap.~~ Thirty deterministic uniform-random
+four-player playouts verify that even early universal bankruptcy continues to
+round 9 without hitting `MaxGameLength()`. Twelve additional seeded playouts
+limit each surviving player to one random main Action per round, randomize all
+sub-decisions, and require round-eight completion with survivors after at least
+32 main Actions. The complete Eclipse engine regression suite passes.
 
 ## Make credit assignment and optimization measurable
 

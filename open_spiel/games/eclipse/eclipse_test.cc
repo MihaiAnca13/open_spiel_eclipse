@@ -239,10 +239,9 @@ void RandomSimulationAndSerializationTest() {
   }
 }
 
-void SeededRandomFourPlayerPlayoutsEndNormallyTest() {
-  // A terminal state alone is insufficient: IsTerminal() also has a move-count
-  // safety cap. Every seeded random game must instead finish through round
-  // eight cleanup, which advances current_round to 9.
+void SeededRandomWipeoutsStillAdvanceRoundsTest() {
+  // Uniform random play usually bankrupts every seat early. Even then, round
+  // progression must not stall or fall through to the move-count safety cap.
   for (int seed = 0; seed < 30; ++seed) {
     auto game = LoadEclipseGame(4, seed);
     const int cap = game->MaxGameLength();
@@ -263,8 +262,84 @@ void SeededRandomFourPlayerPlayoutsEndNormallyTest() {
 
     const auto* eclipse_state = dynamic_cast<const EclipseState*>(state.get());
     SPIEL_CHECK_TRUE(eclipse_state != nullptr);
+    const int survivors = std::count_if(
+        eclipse_state->RawState().players.begin(),
+        eclipse_state->RawState().players.end(),
+        [](const ::Player& player) { return !player.eliminated; });
     SPIEL_CHECK_LT(state->MoveNumber(), cap);
     SPIEL_CHECK_EQ(eclipse_state->RawState().current_round, 9);
+    SPIEL_CHECK_EQ(survivors, 0);
+  }
+}
+
+void SeededBoundedActionPlayoutsReachRoundEightWithSurvivorsTest() {
+  // Exercise complete games without the pathological spending pattern of a
+  // uniform random policy: every surviving player takes one random main action
+  // per round, then passes. Chance events and all action sub-decisions remain
+  // random, so these are non-trivial full-game integration playouts.
+  for (int seed = 0; seed < 12; ++seed) {
+    auto game = LoadEclipseGame(4, 100 + seed);
+    const int cap = game->MaxGameLength();
+    auto state = game->NewInitialState();
+    std::mt19937 policy_rng(54321 + seed);
+    std::array<std::array<bool, 4>, 9> acted{};
+    int main_actions = 0;
+
+    while (!state->IsTerminal()) {
+      std::vector<Action> actions;
+      if (state->IsChanceNode()) {
+        for (const auto& outcome : state->ChanceOutcomes()) {
+          actions.push_back(outcome.first);
+        }
+      } else {
+        actions = state->LegalActions();
+      }
+
+      Action chosen;
+      if (!state->IsChanceNode() && HasLegalAction(*state, "PASS")) {
+        const auto* eclipse_state =
+            dynamic_cast<const EclipseState*>(state.get());
+        SPIEL_CHECK_TRUE(eclipse_state != nullptr);
+        const ::State& raw = eclipse_state->RawState();
+        const int round = raw.current_round;
+        const int player = state->CurrentPlayer();
+        SPIEL_CHECK_GE(round, 1);
+        SPIEL_CHECK_LE(round, 8);
+        SPIEL_CHECK_GE(player, 0);
+        SPIEL_CHECK_LT(player, 4);
+
+        std::vector<Action> main_actions_available;
+        for (Action action : actions) {
+          if (state->ActionToString(player, action) != "PASS") {
+            main_actions_available.push_back(action);
+          }
+        }
+        if (!acted[round][player] && !main_actions_available.empty()) {
+          std::uniform_int_distribution<int> dis(
+              0, main_actions_available.size() - 1);
+          chosen = main_actions_available[dis(policy_rng)];
+          acted[round][player] = true;
+          ++main_actions;
+        } else {
+          chosen = FindLegalAction(*state, "PASS");
+        }
+      } else {
+        std::uniform_int_distribution<int> dis(0, actions.size() - 1);
+        chosen = actions[dis(policy_rng)];
+      }
+      state->ApplyAction(chosen);
+    }
+
+    const auto* eclipse_state = dynamic_cast<const EclipseState*>(state.get());
+    SPIEL_CHECK_TRUE(eclipse_state != nullptr);
+    const ::State& raw = eclipse_state->RawState();
+    const int survivors = std::count_if(
+        raw.players.begin(), raw.players.end(),
+        [](const ::Player& player) { return !player.eliminated; });
+    SPIEL_CHECK_LT(state->MoveNumber(), cap);
+    SPIEL_CHECK_EQ(raw.current_round, 9);
+    SPIEL_CHECK_GT(survivors, 0);
+    SPIEL_CHECK_GE(main_actions, 4 * 8);
   }
 }
 
@@ -3883,7 +3958,8 @@ int main(int argc, char** argv) {
   RUN_TEST(BasicEclipseTests);
   RUN_TEST(InitialStateChanceNodeTest);
   RUN_TEST(RandomSimulationAndSerializationTest);
-  RUN_TEST(SeededRandomFourPlayerPlayoutsEndNormallyTest);
+  RUN_TEST(SeededRandomWipeoutsStillAdvanceRoundsTest);
+  RUN_TEST(SeededBoundedActionPlayoutsReachRoundEightWithSurvivorsTest);
   RUN_TEST(DeterministicReplayTest);
   RUN_TEST(SetupHelperParityTest);
   RUN_TEST(AppConfigSnapshotTest);
