@@ -3267,7 +3267,15 @@ def main(_):
       # this slot a "total=" that accounted for 15% of wall-clock read as if
       # the loop were fully instrumented.
       _t_learn = time.perf_counter() if _tm is not None else None
-      agent.learn_np(step_arrays.obs, step_arrays.seats)
+      try:
+        agent.learn_np(step_arrays.obs, step_arrays.seats)
+      except BaseException:
+        # Async workers wait on their next semaphore after rollout collection.
+        # A learner exception (notably CUDA OOM) must tear them down before the
+        # parent re-raises, otherwise the launcher keeps its process group and
+        # GPU allocation alive indefinitely.
+        envs.close()
+        raise
       if _tm is not None:
         _tm[5] += time.perf_counter() - _t_learn
       _step_controllers(agent, writer, update, num_updates)

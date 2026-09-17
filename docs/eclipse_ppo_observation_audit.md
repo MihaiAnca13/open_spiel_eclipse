@@ -99,8 +99,10 @@ Before tuning model size, prove the learning data is correct.
 - Restore optimizer state only when it belongs to the exact resumed run and
   checkpoint. An arbitrary `--resume` weight file must not silently receive
   Adam moments and schedules from `roster_dir/train_state.pt`.
-- Have async workers report exceptions to the parent and make the parent fail
-  with context rather than block indefinitely on a semaphore.
+- ~~Have async workers report exceptions to the parent and make the parent fail
+  with context rather than block indefinitely on a semaphore.~~ Worker failures
+  now carry their traceback to the parent; a learner exception also closes the
+  worker pool before it is re-raised.
 - Evict opponent modules that no longer appear in current league lineups;
   roster pruning alone does not reclaim already loaded networks.
 

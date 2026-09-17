@@ -46,6 +46,7 @@ import collections
 import multiprocessing as mp
 import multiprocessing.shared_memory as shm
 import os
+import queue
 import sys
 import threading
 import time
@@ -170,6 +171,8 @@ class AsyncVectorEnv(object):
     self._worker_procs = []
     self._go = []
     self._done = []
+    self._errors = self._ctx.Queue()
+    self._closed = False
     self._start()
 
   def _alloc(self, name, shape, dtype):
@@ -228,7 +231,7 @@ class AsyncVectorEnv(object):
                 self._max_legal, self.obs_size, seeds, self.action_buf,
                 self.obs_buf, self.legal_buf, self.legal_len, self.rew_buf,
                 self.done_buf, self.cur_buf, self.terminal_obs_buf,
-                self._terminal_obs_indices, go, done))
+                self._terminal_obs_indices, go, done, self._errors))
       p.start()
       self._worker_procs.append(p)
 
@@ -238,7 +241,7 @@ class AsyncVectorEnv(object):
     # reset_if_done during step(); there is no separate reset round-trip.
     for i in range(len(self._worker_procs)):
       if self._worker_procs[i] is not None:
-        self._done[i].acquire()
+        self._await_worker(i)
     return self._build_steps()[0]
 
   def step(self, step_outputs, reset_if_done=False, players=None):
@@ -251,7 +254,7 @@ class AsyncVectorEnv(object):
         self._go[i].release()
     for i in range(len(self._worker_procs)):
       if self._worker_procs[i] is not None:
-        self._done[i].acquire()
+        self._await_worker(i)
     return self._build_steps()
 
   def _run_step(self, actions):
@@ -284,7 +287,29 @@ class AsyncVectorEnv(object):
     """Waits for the workers released by ``start_step``."""
     for i in range(len(self._worker_procs)):
       if self._worker_procs[i] is not None:
-        self._done[i].acquire()
+        self._await_worker(i)
+
+  def _await_worker(self, worker_index):
+    """Waits for one worker while surfacing a child failure to the parent."""
+    while not self._done[worker_index].acquire(timeout=0.1):
+      self._raise_worker_error()
+      worker = self._worker_procs[worker_index]
+      if not worker.is_alive():
+        self.close()
+        raise RuntimeError(
+            f"Async environment worker {worker_index} exited without "
+            "publishing its result")
+    self._raise_worker_error()
+
+  def _raise_worker_error(self):
+    try:
+      start, error = self._errors.get_nowait()
+    except queue.Empty:
+      return
+    self.close()
+    raise RuntimeError(
+        f"Async environment worker handling environments from {start} failed:\n"
+        f"{error}")
 
   def finish_step_np(self):
     """``await_step`` + ``_collect``: the second half of a split ``step_np``."""
@@ -473,9 +498,15 @@ class AsyncVectorEnv(object):
     return self.num_envs
 
   def close(self):
+    if self._closed:
+      return
+    self._closed = True
     for p in self._worker_procs:
       if p is not None:
         p.terminate()
+    for p in self._worker_procs:
+      if p is not None:
+        p.join(timeout=1)
     for b in self._shm_blocks.values():
       b.close()
       b.unlink()
@@ -484,7 +515,22 @@ class AsyncVectorEnv(object):
 def _worker_main(start, count, num_players, games, max_legal, obs_size,
                  seeds, action_buf, obs_buf, legal_buf, legal_len, rew_buf,
                  done_buf, cur_buf, terminal_obs_buf, terminal_obs_indices,
-                 go, done):
+                 go, done, errors):
+  """Reports any worker failure before letting the process exit."""
+  try:
+    _worker_main_impl(
+        start, count, num_players, games, max_legal, obs_size, seeds,
+        action_buf, obs_buf, legal_buf, legal_len, rew_buf, done_buf, cur_buf,
+        terminal_obs_buf, terminal_obs_indices, go, done)
+  except BaseException:  # pylint: disable=broad-except
+    errors.put((start, traceback.format_exc()))
+    raise
+
+
+def _worker_main_impl(start, count, num_players, games, max_legal, obs_size,
+                      seeds, action_buf, obs_buf, legal_buf, legal_len,
+                      rew_buf, done_buf, cur_buf, terminal_obs_buf,
+                      terminal_obs_indices, go, done):
   """Worker process body: owns a shard of ``SyncVectorEnv``."""
   envs = []
   for i in range(count):

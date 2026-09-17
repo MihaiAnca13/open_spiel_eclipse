@@ -224,6 +224,19 @@ class AsyncVectorEnvTest(absltest.TestCase):
       vec.close()
     self.assertGreaterEqual(terminals, num_envs)
 
+  def test_worker_exception_reaches_parent_and_closes_workers(self):
+    envs = [_make_env(50)]
+    vec = AsyncVectorEnv(
+        envs, num_workers=1, sampler_seeds=[50],
+        game_strs=[_game_string(50)], max_legal=1)
+    try:
+      with self.assertRaisesRegex(RuntimeError, "exceeds max_legal"):
+        vec.reset(players="current")
+      self.assertTrue(vec._closed)  # pylint: disable=protected-access
+      self.assertFalse(vec._worker_procs[0].is_alive())  # pylint: disable=protected-access
+    finally:
+      vec.close()
+
 
 if __name__ == "__main__":
   absltest.main()
