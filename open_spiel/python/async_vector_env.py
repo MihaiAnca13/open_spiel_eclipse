@@ -128,7 +128,8 @@ class AsyncVectorEnv(object):
     self.obs_size = int(np.prod(self.game.observation_tensor_shape()))
     self._is_turn_based = proto._is_turn_based
     self._game_str = game_str
-    if self._game_str is None:
+    self._game_strs = game_strs
+    if self._game_str is None and self._game_strs is None:
       gt = self.game.get_type()
       self._game_str = gt.short_name
       spec = gt.parameter_specification
@@ -136,7 +137,6 @@ class AsyncVectorEnv(object):
         pieces = [f"{k}={v!s}".lower() if isinstance(v, bool) else k + "=" +
                   str(v) for k, v in spec.items()]
         self._game_str += "(" + ",".join(pieces) + ")"
-    self._game_strs = game_strs
     if self._game_strs is None:
       self._game_strs = [self._game_str] * self.num_envs
     if len(self._game_strs) != self.num_envs:

@@ -46,6 +46,10 @@ from open_spiel.python.rl_agent import StepOutput
 
 INVALID_ACTION_PENALTY = -1e6
 
+
+class PPOIntegrityError(RuntimeError):
+  """Raised when a rollout cannot safely be used for optimization."""
+
 # Rank-to-utility table used in win-value mode: the value/return of finishing
 # at each placement (1st..4th). Optimizing this (rather than raw VP) is the
 # 4-player general-sum objective: "finish first", not "maximize score".
@@ -752,6 +756,66 @@ class PPO(nn.Module):
   def _gather_obs(self, time_step, seats):
     return torch.from_numpy(self._obs_cpu(time_step, seats)).to(self.device)
 
+  def _require_finite(self, name, value):
+    """Raises with a useful boundary label before NaNs reach an optimizer."""
+    if isinstance(value, torch.Tensor):
+      finite = bool(torch.isfinite(value).all().item())
+    else:
+      finite = bool(np.isfinite(np.asarray(value)).all())
+    if not finite:
+      raise PPOIntegrityError(f"non-finite {name} in PPO rollout")
+
+  def _validate_legal_actions(self, legal_actions_list):
+    """Rejects malformed decision rows before masking hides the problem."""
+    for env_idx, legal in enumerate(legal_actions_list):
+      actions = np.asarray(legal, dtype=np.int64)
+      if actions.size == 0:
+        raise PPOIntegrityError(
+            f"empty legal-action set for env {env_idx}")
+      if ((actions < 0) | (actions >= self.num_actions)).any():
+        raise PPOIntegrityError(
+            f"out-of-range legal action for env {env_idx}")
+      if np.unique(actions).size != actions.size:
+        raise PPOIntegrityError(
+            f"duplicate legal action for env {env_idx}")
+
+  def _validate_packed_legal_actions(self, rows, cols):
+    """Validates the array-native legal-action representation."""
+    rows = np.asarray(rows, dtype=np.int64)
+    cols = np.asarray(cols, dtype=np.int64)
+    if rows.shape != cols.shape:
+      raise PPOIntegrityError("packed legal-action rows/cols shape mismatch")
+    if ((rows < 0) | (rows >= self.num_envs)).any():
+      raise PPOIntegrityError("packed legal-action row out of range")
+    if ((cols < 0) | (cols >= self.num_actions)).any():
+      raise PPOIntegrityError("packed legal action out of range")
+    counts = np.bincount(rows, minlength=self.num_envs)
+    empty = np.flatnonzero(counts == 0)
+    if empty.size:
+      raise PPOIntegrityError(
+          f"empty legal-action set for env {int(empty[0])}")
+    pairs = rows * self.num_actions + cols
+    if np.unique(pairs).size != pairs.size:
+      raise PPOIntegrityError("duplicate packed legal action")
+
+  def _validate_selected_actions(self, actions, legal_actions_list):
+    for env_idx, action in enumerate(np.asarray(actions, dtype=np.int64)):
+      if action not in legal_actions_list[env_idx]:
+        raise PPOIntegrityError(
+            f"selected action {int(action)} is illegal for env {env_idx}")
+
+  def _validate_packed_selected_actions(self, actions, rows, cols):
+    actions = np.asarray(actions, dtype=np.int64)
+    rows = np.asarray(rows, dtype=np.int64)
+    cols = np.asarray(cols, dtype=np.int64)
+    pairs = rows * self.num_actions + cols
+    selected = np.arange(self.num_envs, dtype=np.int64) * self.num_actions + actions
+    missing = np.flatnonzero(~np.isin(selected, pairs))
+    if missing.size:
+      env_idx = int(missing[0])
+      raise PPOIntegrityError(
+          f"selected action {int(actions[env_idx])} is illegal for env {env_idx}")
+
   def _build_mask(self, num_envs, mask_rows, mask_cols):
     """Builds a dense legal-action mask directly on the compute device.
 
@@ -812,12 +876,16 @@ class PPO(nn.Module):
 
   def step(self, time_step, is_evaluation=False):
     seats = self._current_seats(time_step)
-    legal_actions_mask_cpu = legal_actions_to_mask([
+    legal_actions = [
         ts.observations["legal_actions"][seats[i]]
         for i, ts in enumerate(time_step)
-    ], self.num_actions)
+    ]
+    self._validate_legal_actions(legal_actions)
+    legal_actions_mask_cpu = legal_actions_to_mask(
+        legal_actions, self.num_actions)
     legal_actions_mask = legal_actions_mask_cpu.to(self.device)
     obs_cpu = self._obs_cpu(time_step, seats)
+    self._require_finite("observations", obs_cpu)
     self.last_obs_batch = obs_cpu
     self.last_seats = list(seats)
     if is_evaluation:
@@ -825,6 +893,10 @@ class PPO(nn.Module):
         obs = torch.from_numpy(obs_cpu).to(self.device)
         action, _, _, value, probs = self.get_action_and_value(
             obs, legal_actions_mask=legal_actions_mask)
+        self._require_finite("evaluation values", value)
+        self._require_finite("evaluation probabilities", probs)
+        self._validate_selected_actions(action.detach().cpu().numpy(),
+                                        legal_actions)
         action_list = action.detach().cpu().tolist()
         return [
             StepOutput(action=a, probs=p)
@@ -836,6 +908,11 @@ class PPO(nn.Module):
         obs = torch.from_numpy(obs_cpu).to(self.device)
         action, logprob, _, value, probs = self._act_batch(
             obs, legal_actions_mask, seats)
+        self._require_finite("action log-probabilities", logprob)
+        self._require_finite("action values", value)
+        self._require_finite("action probabilities", probs)
+        self._validate_selected_actions(action.detach().cpu().numpy(),
+                                        legal_actions)
 
         # store
         row = self.cur_batch_idx
@@ -957,6 +1034,8 @@ class PPO(nn.Module):
     obs_cpu = step_arrays.obs
     mask_rows = step_arrays.legal_rows
     mask_cols = step_arrays.legal_cols
+    self._require_finite("array-native observations", obs_cpu)
+    self._validate_packed_legal_actions(mask_rows, mask_cols)
     self.last_obs_batch = obs_cpu
     self.last_seats = [int(s) for s in seats]
     if is_evaluation:
@@ -966,6 +1045,10 @@ class PPO(nn.Module):
             self.num_envs, mask_rows, mask_cols)
         action, _, _, value, probs = self.get_action_and_value(
             obs, legal_actions_mask=legal_actions_mask)
+        self._require_finite("array-native evaluation values", value)
+        self._require_finite("array-native evaluation probabilities", probs)
+        self._validate_packed_selected_actions(
+            action.detach().cpu().numpy(), mask_rows, mask_cols)
         action_list = action.detach().cpu().tolist()
         return [
             StepOutput(action=a, probs=p)
@@ -987,6 +1070,11 @@ class PPO(nn.Module):
             obs, legal_actions_mask, seats)
         if self.legal_actions_mask.shape[0]:
           self.legal_actions_mask[row] = legal_actions_mask
+
+      self._require_finite("array-native action log-probabilities", logprob)
+      self._require_finite("array-native action values", value)
+      self._validate_packed_selected_actions(
+          action.detach().cpu().numpy(), mask_rows, mask_cols)
 
       # seats arrives as freshly-allocated int32 from _collect; one int64
       # conversion, reused for both the device and host copies (the old code
@@ -1313,6 +1401,13 @@ class PPO(nn.Module):
         ``(num_envs, num_players, num_aux)`` captured before environment reset.
     """
     row = self.cur_batch_idx
+    self._require_finite("environment rewards", reward)
+    if shaped_reward is not None:
+      self._require_finite("shaped rewards", shaped_reward)
+    if phi is not None:
+      self._require_finite("potentials", phi)
+    if terminal_aux is not None:
+      self._require_finite("terminal auxiliary targets", terminal_aux)
     if self.selfplay:
       seats = self.players_cpu[row].tolist()
       rew_row = np.empty(self.num_envs, dtype=np.float32)
@@ -1364,6 +1459,14 @@ class PPO(nn.Module):
         ``(num_envs, num_players, num_aux)`` captured before environment reset.
     """
     row = self.cur_batch_idx
+    self._require_finite("array-native environment rewards", reward)
+    if shaped_reward is not None:
+      self._require_finite("array-native shaped rewards", shaped_reward)
+    if phi is not None:
+      self._require_finite("array-native potentials", phi)
+    if terminal_aux is not None:
+      self._require_finite("array-native terminal auxiliary targets",
+                           terminal_aux)
     if self.selfplay:
       seats = self.players_cpu[row].numpy()
       reward_np = np.asarray(reward, dtype=np.float32)      # (N, num_players)
@@ -1824,13 +1927,16 @@ class PPO(nn.Module):
   def _learn_core(self, next_obs, next_seats):
     # Terminal attribution for non-acting seats, deferred during the rollout to
     # keep it off the hot loop. Must land before returns are computed.
+    self._require_finite("bootstrap observations", next_obs)
     self._apply_closeout_writes()
 
     # bootstrap value if not done
     with torch.no_grad():
       next_value_per_env = self.get_value(next_obs).reshape(-1)
+    self._require_finite("bootstrap values", next_value_per_env)
 
     returns = self._compute_returns(next_value_per_env, next_seats)
+    self._require_finite("returns", returns)
 
     # flatten the batch
     b_legal_actions_mask = self.legal_actions_mask.reshape(
@@ -1846,6 +1952,9 @@ class PPO(nn.Module):
     b_advantages = (returns - self.values).reshape(-1)
     b_returns = returns.reshape(-1)
     b_values = self.values.reshape(-1)
+    self._require_finite("stored log-probabilities", b_logprobs)
+    self._require_finite("stored values", b_values)
+    self._require_finite("advantages", b_advantages)
 
     if self.num_aux:
       b_aux = self.aux_targets.reshape(-1, self.num_aux)
@@ -2204,6 +2313,7 @@ class PPO(nn.Module):
             rank_ce = (per_row * msk).sum() / msk.sum().clamp_min(1.0)
             loss = loss + self.rank_ce_coef * rank_ce
 
+        self._require_finite("minibatch loss", loss)
         self.optimizer.zero_grad()
         loss.backward()
         nn.utils.clip_grad_norm_(self.parameters(), self.max_grad_norm)
@@ -2215,8 +2325,9 @@ class PPO(nn.Module):
 
     y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
     var_y = np.var(y_true)
-    explained_var = np.nan if var_y == 0 else 1 - np.var(y_true -
-                                                          y_pred) / var_y
+    # A constant target has no explainable variance. Report zero rather than a
+    # diagnostic NaN so pilot-integrity checks can require finite telemetry.
+    explained_var = 0.0 if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
     # Share of the total loss magnitude contributed by the auxiliary term.
     #
@@ -2264,6 +2375,7 @@ class PPO(nn.Module):
         "kl": mean_kl,
         "explained_variance": float(explained_var),
     }
+    self._require_finite("reported PPO metrics", list(self.last_metrics.values()))
 
 
     # TRY NOT TO MODIFY: record rewards for plotting purposes

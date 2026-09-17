@@ -73,20 +73,24 @@ checked in isolation, not against a full random-policy playout.
 
 Before tuning model size, prove the learning data is correct.
 
-1. Create deterministic, multi-batch trajectory tests with passing, early
+1. ~~Create deterministic, multi-batch trajectory tests with passing, early
    elimination, and terminal closeout. Assert which action of each seat gets
-   the terminal target and that no stale action/log-probability is optimized.
-2. Test each shaping mode against exact expected rewards in both synchronous
+   the terminal target and that no stale action/log-probability is optimized.~~
+   Cross-batch terminal extras now pin the original per-seat observation,
+   legal set, action, and log-probability.
+2. ~~Test each shaping mode against exact expected rewards in both synchronous
    and asynchronous collection. Assert identical results for identical game
-   transitions.
-3. Log the fraction of returns outside the critic range, terminal-target
+   transitions.~~ The unshaped and same-seat telescope modes now share a
+   scripted exact-reward parity test.
+3. ~~Log the fraction of returns outside the critic range, terminal-target
    variance, all-tied outcome rate, eliminations, normal-round endings, and
    safety-cap endings. Abort a pilot on non-finite values, invalid legal-action
-   sets, or any safety-cap terminal.
-4. Decide the objective deliberately. The current rank-utility table rewards
-   guaranteed second place more than a sufficiently risky win strategy. If
-   first-place probability is the product objective, report it and select
-   policies by it; retain tie-aware utility and VP as diagnostic measures.
+   sets, or any safety-cap terminal.~~ Terminal current-round capture now
+   distinguishes normal round-eight completion from the move-count backstop;
+   malformed legal sets and non-finite training data fail immediately.
+4. ~~Decide the objective deliberately.~~ PPO keeps the tie-aware rank-utility
+   target, while first-place rate remains the checkpoint/evaluation headline;
+   tie-aware utility and VP remain diagnostics.
 
 ## Make runs recoverable
 

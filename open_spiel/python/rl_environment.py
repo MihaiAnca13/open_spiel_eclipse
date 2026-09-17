@@ -155,6 +155,23 @@ class ObservationType(enum.Enum):
   INFORMATION_STATE = 1  # Use information_state_tensor
 
 
+def _game_type_or_none(game):
+  """Returns the optional GameType exposed by a pyspiel-compatible game."""
+  get_type = getattr(game, "get_type", None)
+  return get_type() if callable(get_type) else None
+
+
+def _has_tensor_shape(game, method_name):
+  """Whether a compatibility game exposes a non-empty tensor shape."""
+  method = getattr(game, method_name, None)
+  return bool(method and method())
+
+
+def _game_name(game):
+  game_type = _game_type_or_none(game)
+  return game_type.short_name if game_type is not None else type(game).__name__
+
+
 class Environment(object):
   """Open Spiel reinforcement learning environment class."""
 
@@ -221,38 +238,55 @@ class Environment(object):
         logging.info("Using game string: %s", game)
         self._game = pyspiel.load_game(game)
     else:  # pyspiel.Game or API-compatible object.
-      logging.info("Using game instance: %s", game.get_type().short_name)
+      logging.info("Using game instance: %s", _game_name(game))
       self._game = game
 
     self._num_players = self._game.num_players()
     self._state = None
     self._should_reset = True
 
-    # Cache game-type facts once. pybind returns GameType by value (deep-copies
-    # the parameter map) and num_players() crosses the C++ boundary, so doing
-    # these per-step in the hot loop (see is_turn_based / num_actions_per_step)
-    # is expensive. Resolve once here.
-    self._dynamics = self._game.get_type().dynamics
-    self._is_turn_based = (
-        self._dynamics == pyspiel.GameType.Dynamics.SEQUENTIAL or
-        self._dynamics == pyspiel.GameType.Dynamics.MEAN_FIELD)
+    # Cache game-type facts once. Some supported native adapters deliberately
+    # expose only the gameplay/tensor API, so infer their sequential dynamics
+    # and tensor capabilities without requiring the optional `get_type` method.
+    self._game_type = _game_type_or_none(self._game)
+    if self._game_type is None:
+      self._dynamics = "sequential"
+      self._is_turn_based = True
+      self._is_mean_field = False
+      # Compatibility adapters may retain the base-class information-state
+      # method even when it terminates as unimplemented. Their advertised
+      # surface is observation tensors, so never probe that unsafe method.
+      self._provides_information_state_tensor = False
+      self._provides_observation_tensor = _has_tensor_shape(
+          self._game, "observation_tensor_shape")
+    else:
+      self._dynamics = self._game_type.dynamics
+      self._is_turn_based = (
+          self._dynamics == pyspiel.GameType.Dynamics.SEQUENTIAL or
+          self._dynamics == pyspiel.GameType.Dynamics.MEAN_FIELD)
+      self._is_mean_field = (
+          self._dynamics == pyspiel.GameType.Dynamics.MEAN_FIELD)
+      self._provides_information_state_tensor = (
+          self._game_type.provides_information_state_tensor)
+      self._provides_observation_tensor = (
+          self._game_type.provides_observation_tensor)
 
     # Discount returned at non-initial steps.
     self._discounts = [discount] * self._num_players
 
     # Determine what observation type to use.
     if observation_type is None:
-      if self._game.get_type().provides_information_state_tensor:
+      if self._provides_information_state_tensor:
         observation_type = ObservationType.INFORMATION_STATE
       else:
         observation_type = ObservationType.OBSERVATION
 
     # Check the requested observation type is supported.
     if observation_type == ObservationType.OBSERVATION:
-      if not self._game.get_type().provides_observation_tensor:
+      if not self._provides_observation_tensor:
         raise ValueError(f"observation_tensor not supported by {game}")
     elif observation_type == ObservationType.INFORMATION_STATE:
-      if not self._game.get_type().provides_information_state_tensor:
+      if not self._provides_information_state_tensor:
         raise ValueError(f"information_state_tensor not supported by {game}")
     self._use_observation = (observation_type == ObservationType.OBSERVATION)
     self._observations_as_numpy = observations_as_numpy and self._use_observation
@@ -261,7 +295,7 @@ class Environment(object):
       raise ValueError("observations_as_numpy is only supported with "
                        "observation_type=OBSERVATION")
 
-    if self._game.get_type().dynamics == pyspiel.GameType.Dynamics.MEAN_FIELD:
+    if self._is_mean_field:
       if mfg_distribution is None:
         raise InvalidParameterError(
             "mfg_distribution is required for Mean Field Games but was None"
@@ -310,8 +344,13 @@ class Environment(object):
     """Player `player_id`'s observation (numpy row when numpy mode is on)."""
     if self._observations_as_numpy:
       self._ensure_obs_buffer()
-      self._state.observation_tensor_into(player_id,
-                                          self._obs_buffer[player_id])
+      write_into = getattr(self._state, "observation_tensor_into", None)
+      if callable(write_into):
+        write_into(player_id, self._obs_buffer[player_id])
+      else:
+        # Some native adapters provide an observation tensor but omit the
+        # zero-copy convenience binding. Keep the same reusable-row contract.
+        self._obs_buffer[player_id] = self._state.observation_tensor(player_id)
       return self._obs_buffer[player_id]
     return (self._state.observation_tensor(player_id)
             if self._use_observation
@@ -346,7 +385,15 @@ class Environment(object):
     step_type = StepType.LAST if self._state.is_terminal() else StepType.MID
     self._should_reset = step_type == StepType.LAST
 
-    cur_rewards = self._state.rewards()
+    rewards_fn = getattr(self._state, "rewards", None)
+    if callable(rewards_fn):
+      cur_rewards = rewards_fn()
+    elif step_type == StepType.LAST:
+      # Terminal-reward adapters expose Returns but intentionally omit the
+      # per-step Rewards API. Non-terminal rewards are therefore zero.
+      cur_rewards = self._state.returns()
+    else:
+      cur_rewards = [0.0] * self.num_players
     for player_id in range(self.num_players):
       rewards.append(cur_rewards[player_id])
       if player_id not in to_compute:
@@ -460,8 +507,7 @@ class Environment(object):
         step_type: A `StepType` value.
     """
     self._should_reset = False
-    if (self._game.get_type().dynamics ==
-        pyspiel.GameType.Dynamics.MEAN_FIELD and self._num_players > 1):
+    if self._is_mean_field and self._num_players > 1:
       self._state = self._game.new_initial_state_for_population(
           self._mfg_population)
     else:
@@ -556,7 +602,7 @@ class Environment(object):
   # Game properties
   @property
   def name(self):
-    return self._game.get_type().short_name
+    return _game_name(self._game)
 
   @property
   def num_players(self):
@@ -595,8 +641,8 @@ class Environment(object):
     if new_state.get_game() != self.game:
       raise InvalidStateError(
           "State must have been created by the same game. "
-          f"Expected game: {self.game.get_type().short_name}, "
-          f"got state from game: {new_state.get_game().get_type().short_name}"
+          f"Expected game: {_game_name(self.game)}, "
+          f"got state from game: {_game_name(new_state.get_game())}"
       )
     self._state = new_state
 
@@ -617,9 +663,9 @@ class Environment(object):
     Raises:
       InvalidStateError: If the game is not a Mean Field Game.
     """
-    if self._game.get_type().dynamics != pyspiel.GameType.Dynamics.MEAN_FIELD:
+    if not self._is_mean_field:
       raise InvalidStateError(
           "update_mfg_distribution() can only be called on Mean Field Games. "
-          f"This game has dynamics: {self._game.get_type().dynamics}"
+          f"This game has dynamics: {self._dynamics}"
       )
     self._mfg_distribution = mfg_distribution

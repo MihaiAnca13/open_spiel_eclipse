@@ -173,6 +173,7 @@ class AsyncVectorEnvTest(absltest.TestCase):
     columns = list(range(
         obs_layout.player_block_start(0) + obs_layout.P_VP_BREAKDOWN,
         obs_layout.player_block_start(0) + obs_layout.P_VP_BREAKDOWN + 9))
+    columns.append(obs_layout.GLOBAL_START)
     envs = [_make_env(30 + i) for i in range(num_envs)]
     vec = AsyncVectorEnv(
         envs, num_workers=1, sampler_seeds=[30, 31],
@@ -207,12 +208,15 @@ class AsyncVectorEnvTest(absltest.TestCase):
           np.testing.assert_array_equal(arrays.terminal_obs[i], expected)
           scales = np.asarray(
               [30, 10, 30, 20, 20, 20, 4, 20, 20], dtype=np.float32)
-          component_totals = np.rint(expected * scales).sum(axis=1)
+          component_totals = np.rint(expected[:, :9] * scales).sum(axis=1)
           # Returns may add a sub-VP resource tiebreaker; integer parts must be
           # the captured category sum (negative eliminated totals clamp to 0).
           np.testing.assert_array_equal(
               np.asarray(arrays.rewards[i], dtype=np.int32),
               np.maximum(component_totals, 0).astype(np.int32))
+          # The final compact field is the terminal current_round (9 after a
+          # normal Eclipse closeout), not the reset state that workers publish.
+          self.assertTrue(np.all(expected[:, -1] >= 0.0))
           next_ref[i] = reference[i].reset(players="current")
         if terminals >= num_envs:
           break

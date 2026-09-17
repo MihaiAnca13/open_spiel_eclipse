@@ -1371,7 +1371,7 @@ class EclipsePPOAgent(nn.Module):
     Sources the 9 ``bd_`` aux tasks from ``CellAttentionCritic.vp_head`` rather
     than the old flat ``aux_heads``: component ``k`` (index in
     ``_VP_BREAKDOWN_TASK_NAMES``) maps to task name ``k`` -- the same order
-    ``build_aux_targets``/``_terminal_breakdown_from_steps`` lay the breakdown
+    ``build_aux_targets``/``_terminal_capture_from_steps`` lay the breakdown
     target matrix out in. ``vp_components`` denormalises the head's frozen
     z-score output back to raw VP units, so the per-name predictions sit in the
     same units as the raw-VP breakdown targets the aux MSE compares against.
@@ -1534,19 +1534,36 @@ _VP_BREAKDOWN_COMPONENT_INDEX = {
 _TERMINAL_BREAKDOWN_COLUMNS = tuple(range(
     obs_layout.player_block_start(0) + obs_layout.P_VP_BREAKDOWN,
     obs_layout.player_block_start(0) + obs_layout.P_VP_BREAKDOWN + 9))
+_TERMINAL_CAPTURE_COLUMNS = (_TERMINAL_BREAKDOWN_COLUMNS +
+                             (obs_layout.GLOBAL_START,))
+_TERMINAL_BREAKDOWN_WIDTH = len(_TERMINAL_BREAKDOWN_COLUMNS)
+_OBSERVATION_ROUND_SCALE = 9
+_FINAL_PLAY_ROUND = 8
+_NORMAL_TERMINAL_ROUND = 9
 
 
-def _terminal_breakdown_from_steps(time_steps, num_players):
-  """Exact per-seat VP components from terminal steps, before reset."""
-  targets = np.zeros((len(time_steps), num_players, 9), dtype=np.float32)
+def _terminal_capture_from_steps(time_steps, num_players):
+  """Compact terminal diagnostics from sync steps, before reset."""
+  targets = np.zeros((len(time_steps), num_players,
+                      len(_TERMINAL_CAPTURE_COLUMNS)), dtype=np.float32)
   for env_idx, time_step in enumerate(time_steps):
     if not time_step.last():
       continue
     rows = time_step.observations["info_state"]
     for seat in range(num_players):
       targets[env_idx, seat] = np.asarray(
-          rows[seat], dtype=np.float32)[list(_TERMINAL_BREAKDOWN_COLUMNS)]
+          rows[seat], dtype=np.float32)[list(_TERMINAL_CAPTURE_COLUMNS)]
   return targets
+
+
+def _terminal_aux_from_capture(capture):
+  return capture[:, :, :_TERMINAL_BREAKDOWN_WIDTH]
+
+
+def _terminal_rounds_from_capture(capture):
+  """Terminal current_round values, taken from a pre-reset terminal view."""
+  return np.rint(capture[:, 0, -1] * _OBSERVATION_ROUND_SCALE).astype(
+      np.int16)
 
 def build_aux_targets(mode, vp_scale):
   """(task names, target fn) for ``--aux_target_mode``.
@@ -1652,8 +1669,7 @@ ACTION_PASS = 0
 GALAXY_BASE = obs_layout.GALAXY_START
 CELL_STRIDE = obs_layout.CELL_CHANNELS
 
-ROUND_SLOT = obs_layout.GLOBAL_START  # round / MAX_ROUNDS
-MAX_ROUNDS = 8
+ROUND_SLOT = obs_layout.GLOBAL_START  # round / observation round scale
 
 
 def elim_slot(seat, viewer, num_players):
@@ -1681,7 +1697,8 @@ class EpisodeDiagnostics:
   is monotone, so first-seen is the answer), and the furthest round reached.
   """
 
-  def __init__(self, num_envs, num_players, history=400):
+  def __init__(self, num_envs, num_players, history=400,
+               terminal_target_fn=None):
     self.num_envs = num_envs
     self.num_players = num_players
     self.elim_round = np.zeros((num_envs, num_players), dtype=np.int16)
@@ -1692,6 +1709,12 @@ class EpisodeDiagnostics:
     self.rounds_reached = collections.deque(maxlen=history)
     self.all_seat_vp = collections.deque(maxlen=history)
     self.wipeouts = collections.deque(maxlen=history)
+    self.eliminations = collections.deque(maxlen=history)
+    self.all_tied = collections.deque(maxlen=history)
+    self.terminal_targets = collections.deque(maxlen=history)
+    self.normal_endings = collections.deque(maxlen=history)
+    self.safety_cap_endings = collections.deque(maxlen=history)
+    self.terminal_target_fn = terminal_target_fn
     self._cols = None
     # Per-VP-category breakdown (the 9 scoring sources, in P_VP_BREAKDOWN
     # order), harvested from terminal observations at episode closeout. Each
@@ -1722,7 +1745,8 @@ class EpisodeDiagnostics:
   def observe(self, obs_batch, seats):
     """Folds one step's observations into the per-episode trackers."""
     obs = np.asarray(obs_batch)
-    rounds = np.rint(obs[:, ROUND_SLOT] * MAX_ROUNDS).astype(np.int16)
+    rounds = np.rint(obs[:, ROUND_SLOT] * _OBSERVATION_ROUND_SCALE).astype(
+        np.int16)
     np.maximum(self.max_round, rounds, out=self.max_round)
     cols = self._elim_columns(seats)
     rows = np.arange(obs.shape[0], dtype=np.int64)[None, :]
@@ -1732,8 +1756,9 @@ class EpisodeDiagnostics:
       self.elim_round[newly] = np.broadcast_to(
           rounds[:, None], self.elim_round.shape)[newly]
 
-  def close_episodes(self, done_idx, rewards):
-    """Records finished episodes and resets their trackers."""
+  def close_episodes(self, done_idx, rewards, terminal_rounds=None):
+    """Records finished episodes and returns any safety-cap terminations."""
+    safety_cap = []
     for i in done_idx:
       i = int(i)
       elim = self.elim_round[i]
@@ -1741,11 +1766,26 @@ class EpisodeDiagnostics:
       self.survivors.append(alive)
       self.wipeouts.append(1 if alive == 0 else 0)
       self.elim_rounds.append(
-          float(np.mean(np.where(elim < 0, MAX_ROUNDS, elim))))
+          float(np.mean(np.where(elim < 0, _FINAL_PLAY_ROUND, elim))))
       self.rounds_reached.append(int(self.max_round[i]))
-      self.all_seat_vp.append(np.asarray(rewards[i], dtype=np.float32).copy())
+      payoff = np.asarray(rewards[i], dtype=np.float32).copy()
+      self.all_seat_vp.append(payoff)
+      self.eliminations.append(self.num_players - alive)
+      self.all_tied.append(bool(np.all(payoff == payoff[0])))
+      if self.terminal_target_fn is not None:
+        self.terminal_targets.append(np.asarray([
+            self.terminal_target_fn(payoff, seat)
+            for seat in range(self.num_players)], dtype=np.float32))
+      if terminal_rounds is not None:
+        terminal_round = int(terminal_rounds[i])
+        normal = terminal_round >= _NORMAL_TERMINAL_ROUND
+        self.normal_endings.append(1 if normal else 0)
+        self.safety_cap_endings.append(0 if normal else 1)
+        if not normal:
+          safety_cap.append((i, terminal_round))
       self.elim_round[i] = -1
       self.max_round[i] = 0
+    return safety_cap
 
   def record_breakdown(self, terminal_breakdown, seats, donor_idx):
     """Harvest the 9 VP category values for finished episodes.
@@ -1773,15 +1813,35 @@ class EpisodeDiagnostics:
     if not self.survivors:
       return None
     vp = np.stack(self.all_seat_vp)
-    return {
+    summary = {
         "wipeout_rate": float(np.mean(self.wipeouts)),
         "survivors": float(np.mean(self.survivors)),
         "mean_elim_round": float(np.mean(self.elim_rounds)),
         "rounds_reached": float(np.mean(self.rounds_reached)),
         "vp_all_seats_mean": float(vp.mean()),
         "vp_all_seats_max": float(vp.max(axis=1).mean()),
+        "mean_eliminations": float(np.mean(self.eliminations)),
+        "all_tied_rate": float(np.mean(self.all_tied)),
         "episodes": len(self.survivors),
     }
+    if self.terminal_targets:
+      summary["terminal_target_variance"] = float(np.var(
+          np.concatenate(tuple(self.terminal_targets))))
+    if self.normal_endings:
+      summary["normal_ending_rate"] = float(np.mean(self.normal_endings))
+      summary["safety_cap_endings"] = float(np.sum(self.safety_cap_endings))
+    return summary
+
+
+def _abort_on_safety_cap(safety_cap):
+  """Logs the terminal reason before making an invalid pilot fail."""
+  if not safety_cap:
+    return
+  env_idx, terminal_round = safety_cap[0]
+  message = (f"pilot aborted: env {env_idx} hit the {terminal_round}-round "
+             "safety-cap terminal")
+  _emit(message)
+  raise RuntimeError(message)
 
 
 def _greedy_pick(obs, legal, rng):
@@ -2274,9 +2334,10 @@ def _fmt_eval(label, res, num_players):
                                    ("  BELOW-CHANCE" if hi < chance else
                                     "  inconclusive"))
   ci = "" if np.isnan(lo) else f" [{lo:+.3f},{hi:+.3f}]"
-  return (f"  [verdict] vs {label:<8s} utility={mean:+.3f}{ci} "
+  return (f"  [verdict] vs {label:<8s} first_place={res.wins}/{res.games} "
+          f"utility={mean:+.3f}{ci} "
           f"(chance {chance:+.3f}, n={res.games})  "
-          f"best_rank={np.mean(res.ranks):.2f}  win={res.wins}/{res.games}"
+          f"best_rank={np.mean(res.ranks):.2f}"
           f"{beats}")
 
 
@@ -2550,8 +2611,11 @@ def _run_verdict(agent, roster, agent_fn, num_actions, input_shape, device,
     writer.add_scalar(f"verdict/{key}_utility", mean, step)
     writer.add_scalar(f"verdict/{key}_avg_rank", float(np.mean(res.ranks)),
                       step)
-    writer.add_scalar(f"verdict/{key}_win_rate", res.wins / max(1, res.games),
+    first_place_rate = res.wins / max(1, res.games)
+    writer.add_scalar(f"verdict/{key}_first_place_rate", first_place_rate,
                       step)
+    # Retain the historical name for existing dashboards.
+    writer.add_scalar(f"verdict/{key}_win_rate", first_place_rate, step)
     if not np.isnan(lo):
       writer.add_scalar(f"verdict/{key}_utility_lo", lo, step)
       writer.add_scalar(f"verdict/{key}_utility_hi", hi, step)
@@ -2680,6 +2744,7 @@ def _log_update(agent, episode_returns, recent_returns, writer, update,
     parts.append(f"approx_kl={metrics['kl']:.4f}")
     parts.append(f"clipfrac={metrics['clipfrac']:.3f}")
     parts.append(f"explained_var={metrics['explained_variance']:.3f}")
+    parts.append(f"return_oob={metrics['returns_out_of_band']:.3f}")
     losses = "  " + "  ".join(parts)
   # Headline health line: why episodes are ending. `mean_episode_return`
   # (seat-0 VP) cannot distinguish "everyone went bankrupt in round 2" from a
@@ -2691,9 +2756,16 @@ def _log_update(agent, episode_returns, recent_returns, writer, update,
     health = (f"  wipeout={dstats['wipeout_rate']:.2f}"
               f"  survivors={dstats['survivors']:.2f}/{agent.num_players}"
               f"  elim_round={dstats['mean_elim_round']:.2f}/8"
-              f"  rounds={dstats['rounds_reached']:.1f}/9"
+              f"  rounds={dstats['rounds_reached']:.1f}/8"
               f"  vp_all={dstats['vp_all_seats_mean']:.2f}"
-              f"  vp_best={dstats['vp_all_seats_max']:.2f}")
+              f"  vp_best={dstats['vp_all_seats_max']:.2f}"
+              f"  eliminations={dstats['mean_eliminations']:.2f}"
+              f"  tied={dstats['all_tied_rate']:.2f}")
+    if "terminal_target_variance" in dstats:
+      health += f"  target_var={dstats['terminal_target_variance']:.3f}"
+    if "normal_ending_rate" in dstats:
+      health += (f"  normal_end={dstats['normal_ending_rate']:.2f}"
+                 f"  safety_cap={dstats['safety_cap_endings']:.0f}")
   _emit(f"[update {update}] steps={agent.total_steps_done}"
         f"  total_episodes={n_completed}{health}{summary}{losses}")
   if writer is not None:
@@ -2706,8 +2778,16 @@ def _log_update(agent, episode_returns, recent_returns, writer, update,
                         agent.total_steps_done)
     if dstats:
       for key in ("wipeout_rate", "survivors", "mean_elim_round",
-                  "rounds_reached", "vp_all_seats_mean", "vp_all_seats_max"):
+                  "rounds_reached", "vp_all_seats_mean", "vp_all_seats_max",
+                  "mean_eliminations", "all_tied_rate",
+                  "terminal_target_variance", "normal_ending_rate",
+                  "safety_cap_endings"):
+        if key not in dstats:
+          continue
         writer.add_scalar(f"health/{key}", dstats[key], agent.total_steps_done)
+    if metrics:
+      writer.add_scalar("health/returns_out_of_critic_range",
+                        metrics["returns_out_of_band"], agent.total_steps_done)
     if diag is not None:
       actor_means, all_means = diag.breakdown_summary()
       if actor_means is not None:
@@ -2813,7 +2893,7 @@ def main(_):
         # mid-game while the initial state has ~13, so any probed/guessed
         # bound silently drops the high-id action blocks (MOVE, UPGRADE).
         max_legal=game.num_distinct_actions(),
-        terminal_obs_indices=_TERMINAL_BREAKDOWN_COLUMNS,
+        terminal_obs_indices=_TERMINAL_CAPTURE_COLUMNS,
     )
     game = envs_list[0]._game  # pylint: disable=protected-access
   else:
@@ -3077,7 +3157,8 @@ def main(_):
   recent_returns = []
   # Why episodes end (bankruptcy vs. a played-out game) -- the signal the old
   # telemetry could not express.
-  diag = EpisodeDiagnostics(FLAGS.num_envs, num_players)
+  diag = EpisodeDiagnostics(FLAGS.num_envs, num_players,
+                            terminal_target_fn=agent._terminal_target)
 
   if use_async:
     _ = envs.reset(players="current")
@@ -3146,11 +3227,12 @@ def main(_):
                        else envs.step_np(acts, reset_if_done=True))
         t2 = time.perf_counter() if _tm is not None else None
         t2b = time.perf_counter() if _tm is not None else None
+        terminal_capture = step_arrays.terminal_obs
         agent.post_step_np(
             step_arrays.rewards, step_arrays.dones,
             phi=(phi_prev if (FLAGS.shaping and FLAGS.phi == "telescope")
                  else None),
-            terminal_aux=step_arrays.terminal_obs)
+            terminal_aux=_terminal_aux_from_capture(terminal_capture))
         # After post_step: terminal closeout for the finished episode must see
         # the lineup that generated it, not the one sampled for the next.
         if FLAGS.league:
@@ -3158,9 +3240,13 @@ def main(_):
                            input_shape, device, step_arrays.dones)
         donor_idx = np.flatnonzero(step_arrays.dones)
         if donor_idx.size:
-          diag.close_episodes(donor_idx, step_arrays.rewards)
+          safety_cap = diag.close_episodes(
+              donor_idx, step_arrays.rewards,
+              _terminal_rounds_from_capture(terminal_capture))
           diag.record_breakdown(
-              step_arrays.terminal_obs, agent.last_seats, donor_idx)
+              _terminal_aux_from_capture(terminal_capture), agent.last_seats,
+              donor_idx)
+          _abort_on_safety_cap(safety_cap)
         for i in donor_idx:
           ret = float(step_arrays.rewards[i][0])
           episode_returns[i].append(ret)
@@ -3276,14 +3362,14 @@ def main(_):
 
         terminal_steps, reward, done, _ = envs.step(
             agent_output, reset_if_done=False, players="current")
-        terminal_aux = _terminal_breakdown_from_steps(
+        terminal_capture = _terminal_capture_from_steps(
             terminal_steps, num_players)
         time_step = envs.reset(envs_to_reset=done, players="current")
         agent.post_step(
             reward, done,
             phi=(phi_prev if (FLAGS.shaping and FLAGS.phi == "telescope")
                  else None),
-            terminal_aux=terminal_aux)
+            terminal_aux=_terminal_aux_from_capture(terminal_capture))
         # See the async loop: refresh only after terminal bookkeeping.
         if FLAGS.league:
           _refresh_lineups(agent, matchmaker, roster, agent_fn, num_actions,
@@ -3292,9 +3378,12 @@ def main(_):
         # Episode return logging.
         finished = [i for i, ts in enumerate(terminal_steps) if ts.last()]
         if finished:
-          diag.close_episodes(
-              finished, {i: terminal_steps[i].rewards for i in finished})
-          diag.record_breakdown(terminal_aux, agent.last_seats, finished)
+          safety_cap = diag.close_episodes(
+              finished, {i: terminal_steps[i].rewards for i in finished},
+              _terminal_rounds_from_capture(terminal_capture))
+          diag.record_breakdown(_terminal_aux_from_capture(terminal_capture),
+                                agent.last_seats, finished)
+          _abort_on_safety_cap(safety_cap)
         for i in finished:
           ret = float(terminal_steps[i].rewards[0])
           episode_returns[i].append(ret)

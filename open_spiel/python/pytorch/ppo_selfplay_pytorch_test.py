@@ -19,9 +19,11 @@ import numpy as np
 import torch
 
 import pyspiel
+from open_spiel.python.async_vector_env import _StepArrays
 from open_spiel.python import rl_environment
 from open_spiel.python.pytorch.ppo import PPO
 from open_spiel.python.pytorch.ppo import PPOAgent
+from open_spiel.python.pytorch.ppo import PPOIntegrityError
 from open_spiel.python.vector_env import SyncVectorEnv
 
 SEED = 24261711
@@ -309,6 +311,116 @@ class TelescopeShapingTest(absltest.TestCase):
     agent.learn_np(np.zeros((1, 4), dtype=np.float32), np.zeros(1, np.int32))
     self.assertEqual(agent._pending_phi[0], {})
     self.assertEqual(agent._shaping_adds, [])
+
+  def test_sync_and_array_native_shaping_are_identical(self):
+    """The two collectors must write the same exact telescope."""
+    def run(array_native, phi):
+      agent = PPO(input_shape=(4,), num_actions=5, num_players=2, num_envs=1,
+                  steps_per_batch=4, num_minibatches=1, gamma=self.GAMMA,
+                  device="cpu", agent_fn=_SparseDummy, value_mode="vp")
+      seats = (0, 1, 0, 1)
+      potentials = (1.0, 4.0, 2.0, 8.0)
+      for row, seat in enumerate(seats):
+        agent.players_cpu[row, 0] = seat
+        agent.players[row, 0] = seat
+        agent.trainable_cpu[row, 0] = True
+        agent.trainable[row, 0] = True
+        agent.cur_batch_idx = row
+        done = np.asarray([row == 3])
+        rewards = (np.asarray([[3.0, 1.0]], dtype=np.float32)
+                   if done[0] else np.zeros((1, 2), dtype=np.float32))
+        kwargs = {"phi": np.asarray([potentials[row]], dtype=np.float32)} if phi else {}
+        if array_native:
+          agent.post_step_np(rewards, done, **kwargs)
+        else:
+          agent.post_step([rewards[0]], done.tolist(), **kwargs)
+      agent._apply_closeout_writes()
+      return agent.rewards[:, 0].numpy(), agent.dones[:, 0].numpy()
+
+    for shaped in (False, True):
+      sync_rewards, sync_dones = run(False, shaped)
+      async_rewards, async_dones = run(True, shaped)
+      np.testing.assert_allclose(sync_rewards, async_rewards)
+      np.testing.assert_array_equal(sync_dones, async_dones)
+      if shaped:
+        self.assertAlmostEqual(sync_rewards[0], self.GAMMA * 2.0 - 1.0)
+      else:
+        self.assertEqual(sync_rewards[0], 0.0)
+      # Terminal closeout targets seat 0's last decision and seat 1's terminal
+      # action. Seat 1's earlier potential has no successor before termination.
+      np.testing.assert_allclose(sync_rewards[1:], [0.0, 3.0, 1.0])
+
+
+class PPOIntegrityTest(absltest.TestCase):
+
+  def test_rejects_invalid_legal_sets_and_nonfinite_rewards(self):
+    agent = PPO(input_shape=(4,), num_actions=3, num_players=2, num_envs=1,
+                steps_per_batch=1, num_minibatches=1, device="cpu",
+                agent_fn=_SparseDummy)
+    with self.assertRaises(PPOIntegrityError):
+      agent._validate_legal_actions([[]])
+    with self.assertRaises(PPOIntegrityError):
+      agent._validate_packed_legal_actions(
+          np.asarray([0, 0]), np.asarray([1, 1]))
+    with self.assertRaises(PPOIntegrityError):
+      agent.post_step_np(np.asarray([[np.nan, 0.0]], dtype=np.float32),
+                         np.asarray([False]))
+
+
+class CrossBatchTerminalAttributionTest(absltest.TestCase):
+
+  def test_terminal_extras_keep_each_seats_last_decision(self):
+    """Closeout after a batch boundary cannot reuse another seat's action."""
+    agent = PPO(input_shape=(4,), num_actions=5, num_players=3, num_envs=1,
+                steps_per_batch=2, num_minibatches=1, device="cpu",
+                agent_fn=_SparseDummy, value_mode="vp")
+
+    def arrays(seat, tag):
+      return _StepArrays(
+          obs=np.asarray([[tag, 0.0, 0.0, 0.0]], dtype=np.float32),
+          seats=np.asarray([seat], dtype=np.int32),
+          legal_rows=np.asarray([0, 0], dtype=np.int64),
+          legal_cols=np.asarray([0, 1], dtype=np.int64),
+          rewards=np.zeros((1, 3), dtype=np.float32),
+          dones=np.zeros(1, dtype=bool), terminal_obs=None)
+
+    # Seats 0 and 1 act in batch A. Save their unique records before calling
+    # learn, which resets the buffer but intentionally preserves episode state.
+    step = arrays(0, 10.0)
+    agent.step_np(step)
+    agent.post_step_np(step.rewards, step.dones)
+    step = arrays(1, 20.0)
+    agent.step_np(step)
+    agent.post_step_np(step.rewards, step.dones)
+    expected = {seat: agent._last_decision[0][seat] for seat in (0, 1)}
+    agent.learn_np(arrays(2, 30.0).obs, np.asarray([2], dtype=np.int32))
+
+    # Seat 2 terminates in batch B. Its own row gets the terminal reward;
+    # seats 0 and 1 must be represented once each by their original records.
+    terminal = arrays(2, 30.0)
+    agent.step_np(terminal)
+    terminal_rewards = np.asarray([[7.0, 4.0, 1.0]], dtype=np.float32)
+    agent.post_step_np(terminal_rewards, np.asarray([True]))
+
+    self.assertEqual(len(agent._extra_samples), 2)
+    for sample in agent._extra_samples:
+      seat = sample[1]
+      self.assertIn(seat, expected)
+      old = expected[seat]
+      np.testing.assert_array_equal(sample[2], old[0])
+      np.testing.assert_array_equal(sample[3], old[1])
+      self.assertEqual(sample[4], old[2])
+      self.assertEqual(sample[5], old[3])
+      self.assertEqual(sample[7], terminal_rewards[0, seat])
+
+    # Fill the remainder with the first decision of the reset episode so learn
+    # consumes both closeout records and cannot silently leave stale extras.
+    reset = arrays(0, 40.0)
+    agent.step_np(reset)
+    agent.post_step_np(reset.rewards, reset.dones)
+    agent.learn_np(arrays(1, 50.0).obs, np.asarray([1], dtype=np.int32))
+    self.assertEqual(agent._extra_samples, [])
+    self.assertTrue(np.isfinite(list(agent.last_metrics.values())).all())
 
 
 if __name__ == "__main__":
