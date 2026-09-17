@@ -1219,7 +1219,7 @@ class PPO(nn.Module):
       return None
 
   def _attribute_terminal(self, env_idx, row, per_agent_reward, acting_seat,
-                          aux_targets=None):
+                          aux_targets=None, terminal_targets=None):
     """Gives every seat other than the mover its slot of the terminal payoff.
 
     ``dones`` is one flag per (row, env), so only the seat that happened to make
@@ -1242,7 +1242,8 @@ class PPO(nn.Module):
     for seat in range(self.num_players):
       if seat == acting_seat:
         continue
-      target = self._terminal_target(per_agent_reward, seat)
+      target = (float(terminal_targets[seat]) if terminal_targets is not None
+                else self._terminal_target(per_agent_reward, seat))
       rows_seat = np.flatnonzero((players_col == seat) & trainable_col)
       if rows_seat.size:
         self._closeout_writes.append(
@@ -1386,7 +1387,7 @@ class PPO(nn.Module):
             torch.ones((self.num_aux,), dtype=torch.float32).to(self.device))
 
   def post_step(self, reward, done, shaped_reward=None, phi=None,
-                terminal_aux=None):
+                terminal_aux=None, terminal_targets=None):
     """Stores rewards/dones for the action taken at the current batch step.
 
     Args:
@@ -1399,6 +1400,9 @@ class PPO(nn.Module):
         used instead), which keeps the shaped reward telescope consistent.
       terminal_aux: optional exact terminal targets with shape
         ``(num_envs, num_players, num_aux)`` captured before environment reset.
+      terminal_targets: optional scalar PPO targets with shape
+        ``(num_envs, num_players)``. Overrides the ordinary terminal objective
+        for terminal rows while preserving raw payoffs for auxiliary labels.
     """
     row = self.cur_batch_idx
     self._require_finite("environment rewards", reward)
@@ -1408,6 +1412,8 @@ class PPO(nn.Module):
       self._require_finite("potentials", phi)
     if terminal_aux is not None:
       self._require_finite("terminal auxiliary targets", terminal_aux)
+    if terminal_targets is not None:
+      self._require_finite("terminal PPO targets", terminal_targets)
     if self.selfplay:
       seats = self.players_cpu[row].tolist()
       rew_row = np.empty(self.num_envs, dtype=np.float32)
@@ -1417,8 +1423,10 @@ class PPO(nn.Module):
         seat = seats[i]
         is_done = bool(done[i])
         shaped = 0.0 if shaped_reward is None else shaped_reward[i]
-        rew_row[i] = (self._terminal_target(rvec, seat) if is_done else
-                      rvec[seat] + shaped)
+        target = (float(terminal_targets[i][seat])
+                  if terminal_targets is not None else
+                  self._terminal_target(rvec, seat))
+        rew_row[i] = target if is_done else rvec[seat] + shaped
         done_row[i] = 1.0 if is_done else 0.0
         if phi is not None and not is_done:
           self._record_phi(i, seat, row, phi[i])
@@ -1432,7 +1440,9 @@ class PPO(nn.Module):
             raise ValueError("terminal auxiliary targets were not captured")
           self._backfill_aux(i, row, rvec, direct_targets=direct)
           self._backfill_rank_labels(i, row, rvec)
-          self._attribute_terminal(i, row, rvec, seat, direct)
+          targets = (terminal_targets[i]
+                     if terminal_targets is not None else None)
+          self._attribute_terminal(i, row, rvec, seat, direct, targets)
           self._last_decision[i].clear()
           self._pending_phi[i].clear()
           self._episode_start_row[i] = row + 1
@@ -1446,7 +1456,7 @@ class PPO(nn.Module):
     self.cur_batch_idx += 1
 
   def post_step_np(self, reward, done, shaped_reward=None, phi=None,
-                   terminal_aux=None):
+                   terminal_aux=None, terminal_targets=None):
     """Array-native ``post_step``; identical semantics, numpy inputs.
 
     Args:
@@ -1457,6 +1467,8 @@ class PPO(nn.Module):
         potential-based shaping delta for the acting seat's transition.
       terminal_aux: optional exact terminal targets with shape
         ``(num_envs, num_players, num_aux)`` captured before environment reset.
+      terminal_targets: optional scalar PPO targets with shape
+        ``(num_envs, num_players)``. See :meth:`post_step`.
     """
     row = self.cur_batch_idx
     self._require_finite("array-native environment rewards", reward)
@@ -1467,6 +1479,9 @@ class PPO(nn.Module):
     if terminal_aux is not None:
       self._require_finite("array-native terminal auxiliary targets",
                            terminal_aux)
+    if terminal_targets is not None:
+      self._require_finite("array-native terminal PPO targets",
+                           terminal_targets)
     if self.selfplay:
       seats = self.players_cpu[row].numpy()
       reward_np = np.asarray(reward, dtype=np.float32)      # (N, num_players)
@@ -1478,7 +1493,10 @@ class PPO(nn.Module):
       terminal.fill(0.0)
       done_idx = np.flatnonzero(done_np)
       if done_idx.size:
-        if self.value_mode == "win":
+        if terminal_targets is not None:
+          target_np = np.asarray(terminal_targets, dtype=np.float32)
+          terminal[done_idx] = target_np[done_idx, seats[done_idx]]
+        elif self.value_mode == "win":
           for i in done_idx:
             terminal[i] = rank_utility(reward_np[i], int(seats[i]),
                                        vp_beta=self.rank_vp_beta)
@@ -1504,7 +1522,9 @@ class PPO(nn.Module):
           raise ValueError("terminal auxiliary targets were not captured")
         self._backfill_aux(i, row, rvec, direct_targets=direct)
         self._backfill_rank_labels(i, row, rvec)
-        self._attribute_terminal(int(i), row, rvec, seat, direct)
+        targets = (terminal_targets[i]
+                   if terminal_targets is not None else None)
+        self._attribute_terminal(int(i), row, rvec, seat, direct, targets)
         self._last_decision[i].clear()
         self._pending_phi[i].clear()
         self._episode_start_row[i] = row + 1

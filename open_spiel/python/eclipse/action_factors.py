@@ -110,7 +110,8 @@ class ActionFactorization:
   """
 
   def __init__(self, decode, num_rows, families, stats, cell_id, unit_id,
-               slot_id, seat_id, direction_id, family_id, ship_id, part_id):
+               slot_id, seat_id, direction_id, family_id, ship_id, part_id,
+               pass_action):
     self.decode = decode
     self.num_rows = num_rows
     self.families = families
@@ -123,6 +124,7 @@ class ActionFactorization:
     self.family_id = family_id
     self.ship_id = ship_id
     self.part_id = part_id
+    self.pass_action = pass_action
 
   def summary(self):
     factored = sum(n for f, n in self.stats.items() if f != "atom")
@@ -142,6 +144,8 @@ def build_action_factorization(action_strings):
     An ActionFactorization.
   """
   num_actions = len(action_strings)
+  pass_action = (action_strings.index("PASS")
+                 if "PASS" in action_strings else -1)
   rows = {}          # (factor, value) -> row index
 
   def row_of(factor, value):
@@ -224,7 +228,7 @@ def build_action_factorization(action_strings):
   family_id = np.asarray([family_rows[name] for name in families], dtype=np.int64)
   return ActionFactorization(decode, len(rows), families, stats, cell_id,
                              unit_id, slot_id, seat_id, direction_id, family_id,
-                             ship_id, part_id)
+                             ship_id, part_id, pass_action)
 
 
 def factorization_from_game(game, player=0):

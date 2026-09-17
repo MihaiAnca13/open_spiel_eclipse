@@ -263,6 +263,25 @@ flags.DEFINE_float(
     "advantage); this term supplies a gradient inside that dead zone. It is "
     "clamped so it can never reorder two placements. 0 disables it.")
 flags.DEFINE_float(
+    "universal_bankruptcy_penalty", 2.0,
+    "Terminal PPO penalty applied to every seat only when all players have "
+    "been eliminated. This prevents a marginal pre-elimination VP lead from "
+    "making universal bankruptcy preferable to every normal rank outcome. "
+    "0 disables the guard.")
+flags.DEFINE_float(
+    "abort_wipeout_rate", 0.9,
+    "Abort a pilot once at least --abort_wipeout_min_episodes complete "
+    "episodes have a universal-bankruptcy rate at or above this value. "
+    "Set above 1 to disable the guard.")
+flags.DEFINE_integer(
+    "abort_wipeout_min_episodes", 16,
+    "Completed-episode sample size required before the wipeout abort gate.")
+flags.DEFINE_integer(
+    "abort_wipeout_after_updates", 2,
+    "Do not apply the wipeout abort before this many PPO updates. The first "
+    "terminal batch teaches the universal-bankruptcy penalty, so aborting it "
+    "would prevent the fix from affecting the policy.")
+flags.DEFINE_float(
     "rank_vp_beta_anneal_to", -1.0,
     "If >= 0, linearly anneal --rank_vp_beta to this value over the run, "
     "recovering the pure constant-sum 'finish first' objective once real "
@@ -1103,6 +1122,7 @@ class CandidateActorHead(nn.Module):
     super().__init__()
     self.num_actions = len(factorization.families)
     self.out_features = self.num_actions
+    self.pass_action = int(factorization.pass_action)
     slots = factorization.decode.shape[1]
     self.embedding = nn.Parameter(torch.randn(
         factorization.num_rows, width) * (0.01 / np.sqrt(slots)))
@@ -1119,6 +1139,21 @@ class CandidateActorHead(nn.Module):
     self.scorer = nn.Sequential(
         layer_init(nn.Linear(8 * width, width)), nn.GELU(),
         layer_init(nn.Linear(width, 1), std=0.01))
+    # A uniformly random legal policy bankrupts virtually every Eclipse game
+    # before PPO has seen a terminal target. Start from a solvent baseline
+    # instead; this is a trainable logit, so evidence can replace it once the
+    # terminal objective distinguishes productive actions from bankruptcy.
+    self.pass_bias = nn.Parameter(torch.tensor(4.0))
+
+  def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                            missing_keys, unexpected_keys, error_msgs):
+    """Keeps pre-safe-prior league snapshots usable as frozen opponents."""
+    super()._load_from_state_dict(
+        state_dict, prefix, local_metadata, strict, missing_keys,
+        unexpected_keys, error_msgs)
+    key = prefix + "pass_bias"
+    if key in missing_keys:
+      missing_keys.remove(key)
 
   def _pick(self, values, rows, ids):
     valid = ids >= 0
@@ -1166,9 +1201,11 @@ class CandidateActorHead(nn.Module):
         self.part_id[cols].clamp(0, obs_layout.SHIP_PART_COUNT))
     proposed_part_h = proposed_part_h * (self.part_id[cols] >= 0).unsqueeze(-1)
 
-    return self.scorer(torch.cat([
+    logits = self.scorer(torch.cat([
         context.fused[rows], factor_h, cell_h, unit_h, route_h,
         planet_slot_h, blueprint_h, proposed_part_h], dim=-1)).squeeze(-1)
+    is_pass = (cols == self.pass_action).to(logits.dtype)
+    return logits + is_pass * self.pass_bias
 
   def forward(self, context):
     cols = torch.arange(self.num_actions, device=context.fused.device)
@@ -1534,9 +1571,13 @@ _VP_BREAKDOWN_COMPONENT_INDEX = {
 _TERMINAL_BREAKDOWN_COLUMNS = tuple(range(
     obs_layout.player_block_start(0) + obs_layout.P_VP_BREAKDOWN,
     obs_layout.player_block_start(0) + obs_layout.P_VP_BREAKDOWN + 9))
+_TERMINAL_ELIMINATION_COLUMN = (
+    obs_layout.player_block_start(0) + obs_layout.P_ELIMINATED)
 _TERMINAL_CAPTURE_COLUMNS = (_TERMINAL_BREAKDOWN_COLUMNS +
-                             (obs_layout.GLOBAL_START,))
+                             (_TERMINAL_ELIMINATION_COLUMN,
+                              obs_layout.GLOBAL_START))
 _TERMINAL_BREAKDOWN_WIDTH = len(_TERMINAL_BREAKDOWN_COLUMNS)
+_TERMINAL_ELIMINATION_OFFSET = _TERMINAL_BREAKDOWN_WIDTH
 _OBSERVATION_ROUND_SCALE = 9
 _FINAL_PLAY_ROUND = 8
 _NORMAL_TERMINAL_ROUND = 9
@@ -1564,6 +1605,45 @@ def _terminal_rounds_from_capture(capture):
   """Terminal current_round values, taken from a pre-reset terminal view."""
   return np.rint(capture[:, 0, -1] * _OBSERVATION_ROUND_SCALE).astype(
       np.int16)
+
+
+def _terminal_eliminated_from_capture(capture):
+  """Per-seat elimination flags from each terminal observer's self block."""
+  return np.asarray(capture)[:, :, _TERMINAL_ELIMINATION_OFFSET] > .5
+
+
+def apply_universal_bankruptcy_penalty(rewards, eliminated, penalty,
+                                       terminal_target_fn=rank_utility):
+  """Returns terminal PPO targets, rejecting all-player bankruptcy.
+
+  Eclipse preserves a bankrupt player's earned VP for final scoring. That is
+  correct for the engine, but rank utility can consequently reward a policy
+  that eliminates every seat after collecting a few early VP. An all-player
+  wipeout has no winner and is not a useful self-play outcome, so make it
+  strictly worse than the lowest normal rank utility without altering any
+  non-wipeout game's objective or its auxiliary rank labels.
+  """
+  payoff = np.asarray(rewards, dtype=np.float32)
+  eliminated = np.asarray(eliminated, dtype=bool)
+  if payoff.ndim != 2 or eliminated.shape != payoff.shape:
+    raise ValueError(
+        "rewards and eliminated must be matching (envs, players) arrays")
+  targets = np.empty_like(payoff)
+  for env_idx, rvec in enumerate(payoff):
+    for seat in range(rvec.shape[0]):
+      targets[env_idx, seat] = terminal_target_fn(rvec, seat)
+  if penalty > 0:
+    wipeout = eliminated.all(axis=1)
+    targets[wipeout] -= float(penalty)
+  return targets
+
+
+def _terminal_targets_from_capture(rewards, capture, terminal_target_fn,
+                                   penalty):
+  """PPO terminal targets using each terminal observer's self-elimination bit."""
+  return apply_universal_bankruptcy_penalty(
+      rewards, _terminal_eliminated_from_capture(capture), penalty,
+      terminal_target_fn=terminal_target_fn)
 
 def build_aux_targets(mode, vp_scale):
   """(task names, target fn) for ``--aux_target_mode``.
@@ -1756,13 +1836,16 @@ class EpisodeDiagnostics:
       self.elim_round[newly] = np.broadcast_to(
           rounds[:, None], self.elim_round.shape)[newly]
 
-  def close_episodes(self, done_idx, rewards, terminal_rounds=None):
+  def close_episodes(self, done_idx, rewards, terminal_rounds=None,
+                     terminal_eliminated=None):
     """Records finished episodes and returns any safety-cap terminations."""
     safety_cap = []
     for i in done_idx:
       i = int(i)
       elim = self.elim_round[i]
-      alive = int(np.sum(elim < 0))
+      eliminated = (elim >= 0 if terminal_eliminated is None else
+                    np.asarray(terminal_eliminated[i], dtype=bool))
+      alive = self.num_players - int(np.sum(eliminated))
       self.survivors.append(alive)
       self.wipeouts.append(1 if alive == 0 else 0)
       self.elim_rounds.append(
@@ -1842,6 +1925,19 @@ def _abort_on_safety_cap(safety_cap):
              "safety-cap terminal")
   _emit(message)
   raise RuntimeError(message)
+
+
+def _abort_on_universal_bankruptcy(diag, updates_done):
+  """Fails fast instead of training through the all-bankrupt attractor."""
+  if updates_done < FLAGS.abort_wipeout_after_updates:
+    return
+  if len(diag.wipeouts) < FLAGS.abort_wipeout_min_episodes:
+    return
+  rate = float(np.mean(diag.wipeouts))
+  if rate >= FLAGS.abort_wipeout_rate:
+    raise RuntimeError(
+        "Eclipse universal-bankruptcy gate: "
+        f"wipeout={rate:.2f} across {len(diag.wipeouts)} completed games")
 
 
 def _greedy_pick(obs, legal, rng):
@@ -3228,11 +3324,15 @@ def main(_):
         t2 = time.perf_counter() if _tm is not None else None
         t2b = time.perf_counter() if _tm is not None else None
         terminal_capture = step_arrays.terminal_obs
+        terminal_targets = _terminal_targets_from_capture(
+            step_arrays.rewards, terminal_capture, agent._terminal_target,
+            FLAGS.universal_bankruptcy_penalty)
         agent.post_step_np(
             step_arrays.rewards, step_arrays.dones,
             phi=(phi_prev if (FLAGS.shaping and FLAGS.phi == "telescope")
                  else None),
-            terminal_aux=_terminal_aux_from_capture(terminal_capture))
+            terminal_aux=_terminal_aux_from_capture(terminal_capture),
+            terminal_targets=terminal_targets)
         # After post_step: terminal closeout for the finished episode must see
         # the lineup that generated it, not the one sampled for the next.
         if FLAGS.league:
@@ -3240,13 +3340,22 @@ def main(_):
                            input_shape, device, step_arrays.dones)
         donor_idx = np.flatnonzero(step_arrays.dones)
         if donor_idx.size:
-          safety_cap = diag.close_episodes(
-              donor_idx, step_arrays.rewards,
-              _terminal_rounds_from_capture(terminal_capture))
-          diag.record_breakdown(
-              _terminal_aux_from_capture(terminal_capture), agent.last_seats,
-              donor_idx)
-          _abort_on_safety_cap(safety_cap)
+          try:
+            safety_cap = diag.close_episodes(
+                donor_idx, step_arrays.rewards,
+                _terminal_rounds_from_capture(terminal_capture),
+                _terminal_eliminated_from_capture(terminal_capture))
+            diag.record_breakdown(
+                _terminal_aux_from_capture(terminal_capture), agent.last_seats,
+                donor_idx)
+            _abort_on_safety_cap(safety_cap)
+            _abort_on_universal_bankruptcy(diag, agent.updates_done)
+          except BaseException:
+            # Terminal health gates run outside learn_np's existing cleanup
+            # handler. Without this close, an intentional pilot abort leaves
+            # all workers blocked on their next semaphore.
+            envs.close()
+            raise
         for i in donor_idx:
           ret = float(step_arrays.rewards[i][0])
           episode_returns[i].append(ret)
@@ -3372,12 +3481,16 @@ def main(_):
             agent_output, reset_if_done=False, players="current")
         terminal_capture = _terminal_capture_from_steps(
             terminal_steps, num_players)
+        terminal_targets = _terminal_targets_from_capture(
+            reward, terminal_capture, agent._terminal_target,
+            FLAGS.universal_bankruptcy_penalty)
         time_step = envs.reset(envs_to_reset=done, players="current")
         agent.post_step(
             reward, done,
             phi=(phi_prev if (FLAGS.shaping and FLAGS.phi == "telescope")
                  else None),
-            terminal_aux=_terminal_aux_from_capture(terminal_capture))
+            terminal_aux=_terminal_aux_from_capture(terminal_capture),
+            terminal_targets=terminal_targets)
         # See the async loop: refresh only after terminal bookkeeping.
         if FLAGS.league:
           _refresh_lineups(agent, matchmaker, roster, agent_fn, num_actions,
@@ -3388,10 +3501,12 @@ def main(_):
         if finished:
           safety_cap = diag.close_episodes(
               finished, {i: terminal_steps[i].rewards for i in finished},
-              _terminal_rounds_from_capture(terminal_capture))
+              _terminal_rounds_from_capture(terminal_capture),
+              _terminal_eliminated_from_capture(terminal_capture))
           diag.record_breakdown(_terminal_aux_from_capture(terminal_capture),
                                 agent.last_seats, finished)
           _abort_on_safety_cap(safety_cap)
+          _abort_on_universal_bankruptcy(diag, agent.updates_done)
         for i in finished:
           ret = float(terminal_steps[i].rewards[0])
           episode_returns[i].append(ret)

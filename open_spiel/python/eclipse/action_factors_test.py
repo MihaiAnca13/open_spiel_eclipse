@@ -162,6 +162,36 @@ class FactoredActorHeadTest(absltest.TestCase):
     self.assertEqual(latent.shape, (3, 64))
     self._assert_sparse_matches_dense(net, agent, torch.randn(3, self.obs_size))
 
+  def test_new_candidate_policy_prefers_safe_pass(self):
+    """Cold-start sampling must not enter Eclipse's all-bankrupt attractor."""
+    torch.manual_seed(0)
+    net = EclipsePPOAgent(
+        self.num_actions, (self.obs_size,), "cpu", width=64, depth=2,
+        aux_tasks=("final_rank",), factored_actions=self.fz, encoder="spatial")
+    state = self.game.new_initial_state()
+    while state.is_chance_node():
+      state.apply_action(state.chance_outcomes()[0][0])
+    seat = state.current_player()
+    legal = state.legal_actions()
+    obs = torch.tensor([state.observation_tensor(seat)], dtype=torch.float32)
+    logits = net.dense_logits(obs)[0, legal]
+    probability = torch.softmax(logits, dim=0)[legal.index(self.fz.pass_action)]
+    self.assertGreater(float(probability.detach()), 0.75)
+
+  def test_old_candidate_snapshot_gets_the_safe_pass_prior(self):
+    """League loading must accept snapshots written before the cold-start fix."""
+    net = EclipsePPOAgent(
+        self.num_actions, (self.obs_size,), "cpu", width=64, depth=2,
+        aux_tasks=("final_rank",), factored_actions=self.fz, encoder="spatial")
+    old_state = net.state_dict()
+    old_state.pop("actor_head.pass_bias")
+    old_state.pop("actor.pass_bias")
+    restored = EclipsePPOAgent(
+        self.num_actions, (self.obs_size,), "cpu", width=64, depth=2,
+        aux_tasks=("final_rank",), factored_actions=self.fz, encoder="spatial")
+    restored.load_state_dict(old_state)
+    self.assertEqual(float(restored.actor_head.pass_bias.detach()), 4.0)
+
   def test_spatial_norm_flag_reaches_branch_mlps(self):
     net = EclipsePPOAgent(
         self.num_actions, (self.obs_size,), "cpu", width=32, depth=1,
