@@ -37,7 +37,7 @@
 set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$REPO_ROOT"
-export PYTHONPATH="build/open_spiel/python:$PWD"
+export PYTHONPATH="build/python:build/open_spiel/python:$PWD"
 export CUDA_VISIBLE_DEVICES=3
 
 SECS="${1:-18000}"          # per arm; 5h. docs/eclipse_rl_todo.md recommends 4-6h.

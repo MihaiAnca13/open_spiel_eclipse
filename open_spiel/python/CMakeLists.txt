@@ -219,6 +219,14 @@ endif()
 add_library(pyspiel MODULE ${PYTHON_BINDINGS} ${OPEN_SPIEL_OBJECTS})
 target_link_directories(pyspiel PUBLIC ${Python3_LIBRARY_DIRS})
 
+# Python imports the module by resolving PyInit_pyspiel from its dynamic symbol
+# table. Some Linux linkers omit that entry from MODULE targets unless it is
+# explicitly exported, yielding an otherwise successful build that Python
+# cannot import.
+if(UNIX AND NOT APPLE)
+  target_link_options(pyspiel PRIVATE "-Wl,--export-dynamic")
+endif()
+
 # Explicitly link against Python and Abseil libraries. This is required on
 # Windows as symbols must be resolved at link time.
 if (WIN32)

@@ -53,7 +53,7 @@
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$REPO_ROOT"
-export PYTHONPATH="build/open_spiel/python:$PWD"
+export PYTHONPATH="build/python:build/open_spiel/python:$PWD"
 
 ARM="${1:-pointer}"             # pointer | control
 SECS="${2:-28800}"              # 8h default

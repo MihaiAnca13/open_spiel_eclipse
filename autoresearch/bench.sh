@@ -98,7 +98,7 @@ BRANCH="$(git -C "$ROOT" branch --show-current)"
 say "variant: commit=$COMMIT branch=$BRANCH envs=$ENVS budget=${BUDGET_SECS}s batch=${BATCH}/update"
 say "launching ppo_eclipse (roster -> $RUN_DIR)"
 
-export PYTHONPATH="build/open_spiel/python:$ROOT"
+export PYTHONPATH="build/python:build/open_spiel/python:$ROOT"
 START=$(date +%s)
 # 2x budget hard kill; the training loop itself also enforces --max_seconds.
 timeout $((BUDGET_SECS * 2 + 120)) \

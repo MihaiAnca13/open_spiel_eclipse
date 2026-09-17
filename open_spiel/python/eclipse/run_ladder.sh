@@ -5,7 +5,7 @@
 # (or a roster arch.json is preferred by the ladder when present). Random is
 # pinned at rating 0, so ratings across rosters are comparable.
 set -u
-export PYTHONPATH=build/open_spiel/python:.
+export PYTHONPATH=build/python:build/open_spiel/python:.
 VENV=.venv/bin/python
 LADDER=open_spiel/python/eclipse/roster_ladder.py
 
