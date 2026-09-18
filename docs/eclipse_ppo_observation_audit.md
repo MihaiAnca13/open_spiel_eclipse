@@ -122,6 +122,23 @@ not the current two-candidate-seat versus two-bot arrangement. Every scheduled
 held-out scenario must complete; do not take merely the first environments to
 finish.
 
+The FFA collector now writes this report directly: terminal VP, first-place
+rate, reached round, eliminations, normal-ending rate, and tie-aware utility
+are preserved in input order, with bootstrap samples formed from matched
+setup/chance replicates across all four candidate-seat rotations. Homogeneous
+opponent trios and genuinely mixed historical trios are reported separately.
+
+The first full evidence artifact is remote-only at
+`runs/pilot_2026-09-18-v2/ffa_product_32.{json,npz}`: all 8,192 scheduled
+games (four policies, all profiles, 32 fixed setup/chance pairs) completed
+normally. For `main` as the candidate, rotated one-seat utility was 0.912
+[0.857, 0.957] vs `snap_u25` x3, 0.691 [0.623, 0.771] vs `snap_u50` x3, and
+0.365 [0.315, 0.421] vs `snap_u75` x3; mixed historical trios were 0.644
+[0.621, 0.668]. Each lower bound clears four-player chance utility (0.25).
+This establishes the recovery pilot's internal progression, not a promotion
+to a long training run: its opponents are its own earlier snapshots, and
+independent training seeds remain required.
+
 For each candidate:
 
 - Rotate the candidate through all four seats.
