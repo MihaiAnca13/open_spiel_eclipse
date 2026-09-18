@@ -33,8 +33,13 @@ assumed plain-tensor `features` when the candidate actor head passes a
 structured context; `head_logits()` silently returned a non-float32 dtype
 under autocast that broke the log-prob/entropy reductions built on top of it.
 
-Not yet re-run: a longer pilot to confirm these hold under real load (many
-envs, many updates, checkpoint/resume). Do that before anything longer.
+~~Longer pilot to confirm these hold under real load~~ (256 envs, 50→100 updates,
+checkpoint/resume): found and fixed a Diplomacy rearrange loop bug
+(slot_is_returnable ignored already-empty slots, causing the proposer and
+partner to ping-pong "returning nothing" forever under real PPO load until
+the safety-cap move limit — invisible to uniform-random and one-action
+regression tests). Pilot completed cleanly post-fix with `normal_end=1.00`
+throughout; checkpoint/resume verified working correctly.
 
 ## Game rules that must be fixed or explicitly scoped out
 
