@@ -48,6 +48,32 @@ class FfaMetagameTest(absltest.TestCase):
       self.assertEqual(table.shape, (2, 2, 2, 2))
       np.testing.assert_allclose(table, 100 * seat + 1)
 
+  def test_one_vs_three_report_rotates_seats_and_excludes_homogeneous_mixed(self):
+    utilities = np.full((4, 4, 4, 4, 3, 4), 0.5, dtype=np.float64)
+    metrics = {
+        "vp": np.full_like(utilities, 12.0),
+        "first_place": np.full_like(utilities, 0.25, dtype=bool),
+        "rounds": np.full((4, 4, 4, 4, 3), 8, dtype=np.int16),
+        "eliminations": np.full((4, 4, 4, 4, 3), 1, dtype=np.int16),
+        "normal_endings": np.ones((4, 4, 4, 4, 3), dtype=bool),
+    }
+
+    report = ffa_metagame.one_vs_three_report(
+        utilities, metrics, boot=20, boot_seed=7,
+        policy_ids=["main", "early", "middle", "late"])
+
+    main = report["candidates"][0]
+    mixed = main["mixed_historical_lineups"]
+    self.assertEqual(mixed["profiles_per_replicate"], 96)
+    self.assertEqual(mixed["utility"]["samples"], 3)
+    self.assertAlmostEqual(mixed["utility"]["mean"], 0.5)
+    self.assertAlmostEqual(mixed["vp"]["mean"], 12.0)
+    self.assertEqual(set(mixed["seat_rotations"]), {"0", "1", "2", "3"})
+    self.assertTrue(mixed["utility_clears_chance"])
+    self.assertEqual(
+        main["homogeneous_opponents"]["early"]["profiles_per_replicate"],
+        4)
+
   def test_one_shot_evaluation_is_input_ordered_and_reproducible(self):
     game_strings = [
         "eclipse(players=4,rng_seed=7)",
@@ -72,6 +98,10 @@ class FfaMetagameTest(absltest.TestCase):
     self.assertEqual(first[0].games, 2)
     np.testing.assert_array_equal(first[0].utils, repeated[0].utils)
     np.testing.assert_array_equal(first[2], repeated[2])
+    np.testing.assert_array_equal(first[3]["vp"], repeated[3]["vp"])
+    self.assertTrue(np.isfinite(first[3]["vp"]).all())
+    np.testing.assert_array_equal(
+        first[3]["normal_endings"], repeated[3]["normal_endings"])
     np.testing.assert_array_equal(reordered[0].utils, first[0].utils[::-1])
     np.testing.assert_array_equal(reordered[2], first[2][::-1])
 
@@ -79,7 +109,8 @@ class FfaMetagameTest(absltest.TestCase):
     return pe.evaluate_batched(
         policies, lineups, game_strings, 4, len(game_strings), 1,
         torch.device("cpu"), (0,), max_legal, return_seat_utils=True,
-        sampler_seeds=seeds, one_episode_per_env=True)
+        sampler_seeds=seeds, one_episode_per_env=True,
+        return_seat_metrics=True)
 
 
 if __name__ == "__main__":

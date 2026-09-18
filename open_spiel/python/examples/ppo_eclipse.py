@@ -2476,7 +2476,7 @@ def _argmax_over_legal(net, obs_np, legal_rows, legal_cols, idx, device):
 def evaluate_batched(policies, lineup, game_strs, num_players, num_games,
                      num_workers, device, main_seats, max_legal,
                      return_seat_utils=False, sampler_seeds=None,
-                     one_episode_per_env=False):
+                     one_episode_per_env=False, return_seat_metrics=False):
   """Plays ``num_games`` complete games in parallel and scores main's outcomes.
 
   Replaces the per-game single-env evaluators, which built a fresh
@@ -2494,12 +2494,18 @@ def evaluate_batched(policies, lineup, game_strs, num_players, num_games,
   game per input environment and returns results in input order, retaining the
   first completed episode from each environment even if another environment
   finishes earlier. ``sampler_seeds`` makes all external chance streams
-  explicit in that mode.
+  explicit in that mode. ``return_seat_metrics`` additionally preserves the
+  terminal VP, first-place indicator, reached round, and elimination count in
+  that same input order; it is intentionally limited to one-shot evaluation.
 
   Returns an EvalResult whose ``utils`` are per-game mean tie-aware rank
   utilities over ``main_seats``, plus an EpisodeDiagnostics for the eval games.
   """
   num_envs = len(game_strs)
+  if return_seat_metrics and (not one_episode_per_env or not return_seat_utils):
+    raise ValueError(
+        "return_seat_metrics requires one_episode_per_env and "
+        "return_seat_utils")
   if sampler_seeds is None:
     sampler_seeds = [1 + i for i in range(num_envs)]
   elif len(sampler_seeds) != num_envs:
@@ -2524,7 +2530,11 @@ def evaluate_batched(policies, lineup, game_strs, num_players, num_games,
   # shared helper covers every caller instead of one at a time.
   vec = AsyncVectorEnv(envs, num_workers=max(1, min(num_workers, num_envs)),
                        sampler_seeds=sampler_seeds,
-                       game_strs=game_strs, max_legal=max_legal)
+                       game_strs=game_strs, max_legal=max_legal,
+                       terminal_obs_indices=(
+                           obs_layout.GLOBAL_START,
+                           obs_layout.PLAYERS_START +
+                           obs_layout.P_ELIMINATED))
   diag = EpisodeDiagnostics(num_envs, num_players, history=max(num_games, 1))
   if one_episode_per_env:
     utils = np.full(num_envs, np.nan, dtype=np.float64)
@@ -2532,6 +2542,12 @@ def evaluate_batched(policies, lineup, game_strs, num_players, num_games,
     completed = np.zeros(num_envs, dtype=bool)
     seat_utils = (np.full((num_envs, num_players), np.nan, dtype=np.float64)
                   if return_seat_utils else None)
+    if return_seat_metrics:
+      seat_vp = np.full((num_envs, num_players), np.nan, dtype=np.float64)
+      seat_first = np.zeros((num_envs, num_players), dtype=bool)
+      rounds = np.zeros(num_envs, dtype=np.int16)
+      eliminations = np.zeros(num_envs, dtype=np.int16)
+      normal_endings = np.zeros(num_envs, dtype=bool)
   else:
     utils, ranks = [], []
     seat_utils = []  # (per-game, num_players) rank utilities when requested.
@@ -2569,7 +2585,12 @@ def evaluate_batched(policies, lineup, game_strs, num_players, num_games,
       arrays = vec.step_np(actions, reset_if_done=True)
       done_idx = np.flatnonzero(arrays.dones)
       if done_idx.size:
-        diag.close_episodes(done_idx, arrays.rewards)
+        terminal_rounds = np.rint(
+            arrays.terminal_obs[:, 0, 0] * _OBSERVATION_ROUND_SCALE).astype(
+                np.int16)
+        terminal_eliminated = arrays.terminal_obs[:, :, 1] > .5
+        diag.close_episodes(done_idx, arrays.rewards, terminal_rounds,
+                            terminal_eliminated)
         for i in done_idx:
           if one_episode_per_env and completed[i]:
             continue
@@ -2591,6 +2612,13 @@ def evaluate_batched(policies, lineup, game_strs, num_players, num_games,
               seat_utils[i] = values
             else:
               seat_utils.append(values)
+          if return_seat_metrics:
+            seat_vp[i] = arrays.rewards[i]
+            seat_first[i] = [rank_of(arrays.rewards[i], s) == 1
+                             for s in range(num_players)]
+            rounds[i] = terminal_rounds[i]
+            eliminations[i] = int(np.sum(terminal_eliminated[i]))
+            normal_endings[i] = rounds[i] >= _NORMAL_TERMINAL_ROUND
   finally:
     vec.close()
   if one_episode_per_env and not completed.all():
@@ -2598,6 +2626,14 @@ def evaluate_batched(policies, lineup, game_strs, num_players, num_games,
         f"only completed {int(completed.sum())}/{num_envs} evaluation games")
   res = EvalResult(wins, len(utils), ranks, utils)
   if return_seat_utils:
+    if return_seat_metrics:
+      return res, diag, np.asarray(seat_utils, dtype=np.float64), {
+          "vp": seat_vp,
+          "first_place": seat_first,
+          "rounds": rounds,
+          "eliminations": eliminations,
+          "normal_endings": normal_endings,
+      }
     return res, diag, np.asarray(seat_utils, dtype=np.float64)
   return res, diag
 
