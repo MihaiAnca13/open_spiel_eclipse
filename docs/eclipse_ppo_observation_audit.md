@@ -139,6 +139,18 @@ This establishes the recovery pilot's internal progression, not a promotion
 to a long training run: its opponents are its own earlier snapshots, and
 independent training seeds remain required.
 
+**2026-09-18 second independent seed:**
+`runs/pilot_2026-09-18-seed2/phase1.log` completed the same 256-environment,
+50-update pilot, then `phase2.log` resumed `main` with its optimizer/counters
+from update 50 and completed at update 100. Both phases reported only normal
+round-eight endings (`normal_end=1.00`), no universal-bankruptcy collapse, no
+safety-cap ending, and finite losses/returns; `roster/snap_u100.pt` and
+`train_state.pt` are present. The first cold compiled-encoder step took about
+four and a half minutes and retained up to 88 GiB on GPU 2, but the process
+completed and released the device. Next session: run the fixed 32-replicate
+one-vs-three FFA suite for seed 2, then add a third independent short seed
+before considering any long run.
+
 For each candidate:
 
 - Rotate the candidate through all four seats.
