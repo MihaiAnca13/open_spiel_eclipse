@@ -97,6 +97,14 @@ export PYTHONPATH="build/python:build/open_spiel/python:$PWD"
 GPU="${GPU:-3}"
 export CUDA_VISIBLE_DEVICES="$GPU"
 
+# This shape (1,024 envs at --nn_width=256) peaks around 88-93 GiB on a 95 GiB
+# card -- marginal by design, and it OOM'd on 2026-09-18 trying to allocate
+# 14.28 GiB while holding 12.17 GiB reserved-but-unallocated. That gap is
+# fragmentation, not demand, so give the allocator expandable segments rather
+# than shrinking the run: the envs/minibatch ratio is what every measurement on
+# this box assumes, and changing it would make the arms incomparable.
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+
 RUN="${RUN:-runs/main_v1}"
 WIDTH="${WIDTH:-256}"          # set from run_t4_capacity.sh's table
 DEPTH="${DEPTH:-2}"
