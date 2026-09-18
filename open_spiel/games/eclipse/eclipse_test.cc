@@ -3509,6 +3509,50 @@ void DiplomacyRearrangeReturnsTileToBagTest() {
   SPIEL_CHECK_FALSE(s.players[0].reputation_track[0].holds_ambassador);
 }
 
+// Regression: slot_is_returnable ignored an already-empty slot's rep_value,
+// so choose_rearrange could ping-pong the proposer and partner "returning"
+// an already-empty slot forever without ever freeing a real ambassador slot.
+// Under real PPO self-play this ran two independent seeds into the 1000-move
+// safety cap (see docs/eclipse_ppo_observation_audit.md).
+void DiplomacyRearrangeRejectsAlreadyEmptySlotTest() {
+  ::State s = MakeFourPlayerState();
+  auto fill_ambassador_slots = [](::Player& p, uint8_t from) {
+    for (auto& slot : p.reputation_track) {
+      if (slot.kind == ReputationSlotKind::AMBASSADOR_OR_REP ||
+          slot.kind == ReputationSlotKind::AMBASSADOR_ONLY) {
+        slot.holds_ambassador = true;
+        slot.ambassador_from = from;
+      }
+    }
+  };
+  fill_ambassador_slots(s.players[0], /*from=*/2);
+  fill_ambassador_slots(s.players[1], /*from=*/3);
+  SPIEL_CHECK_FALSE(has_free_ambassador_slot(s.players[0]));
+  SPIEL_CHECK_FALSE(has_free_ambassador_slot(s.players[1]));
+  // Neither player has anything left to return: their REP_ONLY slots are
+  // already empty (as if returned earlier in the same negotiation).
+  SPIEL_CHECK_FALSE(has_freeable_ambassador_slot(s.players[0]));
+  SPIEL_CHECK_FALSE(has_freeable_ambassador_slot(s.players[1]));
+
+  int empty_slot = -1;
+  for (size_t i = 0; i < s.players[0].reputation_track.size(); ++i) {
+    if (s.players[0].reputation_track[i].kind == ReputationSlotKind::REP_ONLY) {
+      empty_slot = static_cast<int>(i);
+      break;
+    }
+  }
+  SPIEL_CHECK_TRUE(empty_slot >= 0);
+
+  s.diplomacy_state.phase = DiplomacyState::Phase::choose_rearrange;
+  s.diplomacy_state.player_id = 0;
+  s.diplomacy_state.partner_id = 1;
+  s.diplomacy_state.rearrange_side = 0;
+
+  // Before the fix this "succeeded" as a no-op and flipped rearrange_side to
+  // the partner, who would do the same thing back -- forever.
+  SPIEL_CHECK_FALSE(execute_return_rep_to_bag(s, 0, empty_slot));
+}
+
 void DiplomacyWarpPortalPathTest() {
   // Both players have a Warp Portal in a sector they each Control. The
   // diplomacy wormhole check should accept the Warp Portal adjacency.
@@ -4033,6 +4077,7 @@ int main(int argc, char** argv) {
   RUN_TEST(DiplomacyBreakClearsSlotsAndAssignsTraitorTest);
   RUN_TEST(DiplomacyDeferredReturnTrackTest);
   RUN_TEST(DiplomacyRearrangeReturnsTileToBagTest);
+  RUN_TEST(DiplomacyRearrangeRejectsAlreadyEmptySlotTest);
   RUN_TEST(DiplomacyWarpPortalPathTest);
   RUN_TEST(DiplomacySlotHelperTest);
   RUN_TEST(DiplomacyAcceptFlowTest);

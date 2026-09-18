@@ -105,6 +105,12 @@ namespace open_spiel::eclipse
     bool slot_is_returnable(const ReputationSlot& slot) {
         if (slot.holds_ambassador) return false;
         if (!slot_kind_holds_rep(slot.kind)) return false;
+        // An already-empty slot has nothing to return. Without this, the
+        // choose_rearrange phase treats an emptied slot as forever
+        // "returnable" and can ping-pong the proposer and partner back and
+        // forth returning nothing, never freeing an actual ambassador slot,
+        // until the 1000-move safety cap ends the game.
+        if (slot.rep_value == ReputationTiles::NONE) return false;
         return true;
     }
 
