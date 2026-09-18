@@ -2216,6 +2216,14 @@ def _refresh_lineups(agent, matchmaker, roster, agent_fn, num_actions,
     if networks is None:
       raise ValueError(f"roster has no weights for opponent {pid}")
     agent.networks[pid] = networks
+  # agent.networks only ever grew before this: an opponent id rotated out of
+  # every env's lineup stayed resident, so a long run's live-opponent GPU
+  # memory tracked every snapshot ever sampled, not the current lineup.
+  # Roster pruning alone doesn't help -- it deletes the .pt/entry, not this
+  # already-loaded module.
+  for pid in list(agent.networks):
+    if pid != "main" and pid not in need:
+      del agent.networks[pid]
 
 
 def _train_state_path(roster_dir):
@@ -3140,7 +3148,16 @@ def main(_):
             f"freshly initialized {list(incompatible.missing_keys)}, "
             f"ignored {list(incompatible.unexpected_keys)}")
     _emit(f"resumed network weights from {resume_src}")
-    if _load_train_state(agent, FLAGS.roster_dir):
+    # train_state.pt is overwritten in lockstep with main.pt at every
+    # snapshot, so it only describes the optimizer trajectory behind the
+    # roster's own "main" id. Resuming any other snapshot/exploiter id or an
+    # external .pt path must not silently inherit Adam moments/LR schedule
+    # left over from a different checkpoint.
+    if resume_src != PolicyRoster.MAIN_ID:
+      _emit(f"--resume={resume_src} is not the roster main entry: Adam "
+            f"moments and step counters start fresh, ignoring any "
+            f"train_state.pt in {FLAGS.roster_dir}")
+    elif _load_train_state(agent, FLAGS.roster_dir):
       _emit(f"resumed optimizer + counters: steps={agent.total_steps_done} "
             f"updates={agent.updates_done} lr_base={agent.learning_rate:.2e} "
             f"rank_vp_beta={agent.rank_vp_beta:.4g}")
@@ -3544,6 +3561,12 @@ def main(_):
                               agent.total_steps_done)
             writer.add_scalar("squad/avg_rank", float(np.mean(res.ranks)),
                               agent.total_steps_done)
+
+  # Ordinary completion (the loop ran out num_updates rather than hitting the
+  # --max_seconds deadline or an abort) previously wrote nothing unless the
+  # last update happened to land on --snapshot_every -- silently losing the
+  # final weights/optimizer state of an otherwise-successful run.
+  _maybe_snapshot(agent, roster, num_updates, force=True)
 
   # Sequential-exploiter closeout: report the win-rate vs the frozen victim and
   # optionally fold the trained policy into the roster.
