@@ -75,14 +75,27 @@
 #   touch runs/main_v1/STOP            # stop cleanly after the current chunk
 #   tail -f runs/main_v1/gates.log     # the only file worth watching
 #
-# GPU 3 ONLY. GPUs 1-2 hold two resident vLLM workers at 96.8 GB each and 0
-# drives the display. Never run two arms at once -- two once thrashed the card
-# to ~45 SPS and three OOM'd.
+# ONE ARM PER GPU. The original rule here was "GPU 3 only, never two arms at
+# once" -- but that was a statement about AVAILABILITY, not about the trainer:
+# GPUs 1-2 then held two resident vLLM workers at 96.8 GB each and 0 drives the
+# display, so "two arms" necessarily meant two arms on GPU 3, which is what
+# thrashed the card to ~45 SPS and OOM'd at three. As of 2026-09-18 GPU 2 is
+# free, so a second arm can have a card to itself. Two arms on the SAME card is
+# still forbidden.
+#
+# WHAT IS NOT FREE ABOUT THE SECOND ARM: the cards are separate but the CPU is
+# not. BIG has 12 physical / 24 logical cores and already carries a load average
+# near 7.5 from the resident vLLM workers. Two arms at the stock --num_workers=16
+# would ask for 32 env workers on 12 physical cores and steal from each main
+# process's act/learn dispatch -- the exact effect run_t0_workers.sh measured.
+# Set WORKERS=8 per arm when two are running. GPU and WORKERS are overridable
+# for this reason; nothing else about the production shape is.
 set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$REPO_ROOT"
 export PYTHONPATH="build/python:build/open_spiel/python:$PWD"
-export CUDA_VISIBLE_DEVICES=3
+GPU="${GPU:-3}"
+export CUDA_VISIBLE_DEVICES="$GPU"
 
 RUN="${RUN:-runs/main_v1}"
 WIDTH="${WIDTH:-256}"          # set from run_t4_capacity.sh's table
@@ -94,7 +107,13 @@ GATE_KEEP="${GATE_KEEP:-3}"    # snapshots subsampled per gate (+ main)
 GATE_GAMES="${GATE_GAMES:-24}" # per pair per seat direction
 SEED="${SEED:-1}"
 
-ENVS=1024; STEPS=128; MB=16; WORKERS=16; UE=4; K=4
+ENVS=1024; STEPS=128; MB=16; UE=4; K=4
+WORKERS="${WORKERS:-16}"   # drop to 8 per arm when two arms share the box's CPU
+
+# EXTRA carries the one flag a diagnostic arm changes against this production
+# control. Leave it empty for the control -- an arm with two variables moved
+# answers nothing.
+read -r -a EXTRA_ARGS <<< "${EXTRA:-}"
 
 mkdir -p "$RUN"
 GATES="$RUN/gates.log"
@@ -102,7 +121,8 @@ GATES="$RUN/gates.log"
 say() { echo "$@" | tee -a "$GATES"; }
 
 say "=== production run  $(date +%F' '%H:%M:%S) ==="
-say "run=$RUN width=$WIDTH depth=$DEPTH seed=$SEED"
+say "run=$RUN width=$WIDTH depth=$DEPTH seed=$SEED gpu=$GPU workers=$WORKERS"
+say "extra=${EXTRA:-<none, production control>}"
 say "chunks=$CHUNKS (first ${CHUNK1}s, then ${CHUNK}s)  gate: keep=$GATE_KEEP games=$GATE_GAMES"
 say "commit $(git rev-parse --short HEAD)"
 say ""
@@ -137,7 +157,7 @@ for i in $(seq 1 "$CHUNKS"); do
     --verdict_every_sec=0 --noeval_greedy --noeval_random --eval_games=8 \
     --timing --timing_every=100 \
     --total_timesteps=100000000000 --max_seconds="$SECS" \
-    "${RESUME[@]}" \
+    "${RESUME[@]}" "${EXTRA_ARGS[@]}" \
     --roster_dir="$RUN" --run_dir="$RUN" --track="$(basename "$RUN")" \
     >> "$RUN/train.log" 2>&1
   rc=$?
@@ -153,7 +173,7 @@ for i in $(seq 1 "$CHUNKS"); do
   # next chunk) into a zombie -- a 91 GB one once made a clean config look like
   # a fresh OOM. Poll a file/driver, never pgrep on this loop's own cmdline.
   for _ in $(seq 1 30); do
-    used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i 3)
+    used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i "$GPU")
     [ "$used" -lt 2000 ] && break
     sleep 10
   done
@@ -165,7 +185,7 @@ for i in $(seq 1 "$CHUNKS"); do
   AGE=$(ls "$RUN"/snap_u*.pt 2>/dev/null | sed 's/.*snap_u//;s/\.pt//' \
         | sort -n | tail -1)
   NSNAP=$(ls "$RUN"/snap_*.pt 2>/dev/null | wc -l)
-  say "[chunk $i] trained to update ${AGE:-?}  ($NSNAP snapshots kept)  gpu3=${used}MiB  $(date +%F' '%H:%M:%S)"
+  say "[chunk $i] trained to update ${AGE:-?}  ($NSNAP snapshots kept)  gpu$GPU=${used}MiB  $(date +%F' '%H:%M:%S)"
 
   # ── Gate ────────────────────────────────────────────────────────────────
   # Rate a subsample of THIS run's own history in one tournament. Ratings are
