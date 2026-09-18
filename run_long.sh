@@ -98,12 +98,13 @@ GPU="${GPU:-3}"
 export CUDA_VISIBLE_DEVICES="$GPU"
 
 # This shape (1,024 envs at --nn_width=256) peaks around 88-93 GiB on a 95 GiB
-# card -- marginal by design, and it OOM'd on 2026-09-18 trying to allocate
+# card. PYTORCH_CUDA_ALLOC_CONF is the deprecated spelling; use PYTORCH_ALLOC_CONF.
+# It OOM'd on 2026-09-18 trying to allocate
 # 14.28 GiB while holding 12.17 GiB reserved-but-unallocated. That gap is
 # fragmentation, not demand, so give the allocator expandable segments rather
 # than shrinking the run: the envs/minibatch ratio is what every measurement on
 # this box assumes, and changing it would make the arms incomparable.
-export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
 
 RUN="${RUN:-runs/main_v1}"
 WIDTH="${WIDTH:-256}"          # set from run_t4_capacity.sh's table
@@ -115,7 +116,19 @@ GATE_KEEP="${GATE_KEEP:-3}"    # snapshots subsampled per gate (+ main)
 GATE_GAMES="${GATE_GAMES:-24}" # per pair per seat direction
 SEED="${SEED:-1}"
 
-ENVS=1024; STEPS=128; MB=16; UE=4; K=4
+ENVS=1024; STEPS=128; UE=4; K=4
+
+# MB=16 (8,192 rows) was the most efficient minibatch measured on BIG, but it no
+# longer FITS: the action-conditioned observation fix (0bab02b0) grew per-row
+# memory, and the critic's forward over an 8,192-row minibatch now asks for a
+# single 14.28 GiB block on top of 80.38 GiB already allocated -- about 0.6 GiB
+# more than a 95 GiB card has. expandable_segments cut fragmentation to 221 MiB
+# and did not save it, because this is demand, not fragmentation. MB=32 (4,096
+# rows) halves that block. It costs some throughput and nothing else: the sample
+# count, env count and update count are unchanged, and both arms share it, so
+# they stay comparable to each other -- but NOT to any pre-0bab02b0 throughput
+# number.
+MB="${MB:-32}"
 WORKERS="${WORKERS:-16}"   # drop to 8 per arm when two arms share the box's CPU
 
 # EXTRA carries the one flag a diagnostic arm changes against this production
