@@ -147,9 +147,46 @@ round-eight endings (`normal_end=1.00`), no universal-bankruptcy collapse, no
 safety-cap ending, and finite losses/returns; `roster/snap_u100.pt` and
 `train_state.pt` are present. The first cold compiled-encoder step took about
 four and a half minutes and retained up to 88 GiB on GPU 2, but the process
-completed and released the device. Next session: run the fixed 32-replicate
-one-vs-three FFA suite for seed 2, then add a third independent short seed
-before considering any long run.
+completed and released the device.
+
+**2026-09-18 three-seed one-vs-three result:** seeds 2 and 3 completed the same
+two-phase 50→100 pilot and the same fixed 32-replicate FFA suite (8,192 profiles
+each, all completed). All three seeds are healthy: no traceback, `normal_end=1.00`,
+`safety_cap=0`, finite losses, and a full snapshot roster. Rotated one-seat utility
+for `main`, with four-player chance utility at 0.25:
+
+| `main` vs | seed 1 | seed 2 | seed 3 |
+|---|---|---|---|
+| 3x `snap_u25` | 0.912 [0.857, 0.957] | 0.834 [0.774, 0.883] | 0.939 [0.895, 0.975] |
+| 3x `snap_u50` | 0.691 [0.623, 0.771] | 0.736 [0.680, 0.788] | 0.592 [0.501, 0.679] |
+| 3x `snap_u75` | 0.365 [0.315, 0.421] | 0.367 [0.308, 0.433] | 0.309 [0.252, 0.354] |
+
+Every lower bound clears 0.25, every snapshot loses to 3x `main`, and AlphaRank
+puts essentially all mass on the all-`main` profile in each seed. The margin
+shrinks monotonically as the opponent snapshot gets later, in all three seeds —
+the signature of continuing improvement rather than a single lucky arm.
+
+One consistent artifact: `snap_u75` against 3x `main` scores positive (0.191,
+0.100, 0.189) but does not clear chance in any seed. This is the odd-one-out
+advantage against three identical opponents, reproducible across seeds, and
+reads as a property of the one-vs-three protocol rather than a defect.
+
+This closes the observation-audit pilot gate. It does **not** close the separate
+`docs/eclipse_rl_todo.md` blocker ("why does this stop learning"): these pilots
+run to update 100, and the documented plateau/collapse is in the update
+100→1700 range, which no pilot here exercises. See below.
+
+**Still open before a long run — the late-regime blocker.** `eclipse_rl_todo.md`
+records that at `update_epochs=4` the rating is flat after update 100 (1,622
+updates inside one CI) and at `update_epochs=1` it rises to update 1700 then
+regresses below its own update-100 snapshot. That finding predates the
+observation and terminal-attribution fixes landed in this audit, so it may well
+have been caused by them and may already be fixed — but nothing has re-measured
+the late regime since. Three healthy 100-update seeds cannot speak to it. The
+cheapest next step is one medium diagnostic run carried past update 100 with the
+ladder and entropy tracked, testing the documented suspects in order: entropy
+collapse, `--lr_schedule=fixed` with no decay, and league overfitting to the
+bounded live-opponent set.
 
 For each candidate:
 
