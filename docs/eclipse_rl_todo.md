@@ -33,6 +33,45 @@ regresses.** Headline:
 learning". Do not start a long run until that is understood**: at either setting
 most of the hours buy nothing, and at ue=1 they actively cost rating.
 
+### 2026-09-19: a likely cause of "stops learning after update 100"
+
+**The MOVE action was free, and greedy play looped on it for ever.**
+`begin_move()` declines to start when the player has nothing able to move, and
+the influence disc was charged only *if it started*. So MOVE changed nothing,
+cost nothing and did not end the turn — and a free non-progressing action can
+be repeated indefinitely. A deterministic policy that rates MOVE above PASS
+never passes, so the round never ends and the game dies on the 1,000-move cap.
+
+Measured on one run, one engine build, greedy self-play *finishing* a game:
+
+| snapshot | before fix | after fix |
+|---|---|---|
+| u100 | 127/128 | 128/128 |
+| u150 | 33/128 | — |
+| u200 | **6/128** | 128/128 |
+| u250 | 63/256 | 128/128 |
+
+**Why nothing caught it.** Training *samples* actions, and a stochastic policy
+eventually picks PASS, so it escapes: `normal_end=1.00` and `safety_cap=0`
+across 56,278 training episodes. The ladder and FFA evaluate with
+**greedy argmax**. So from ~u150 on, every rating in this project was computed
+on games that mostly never finished and were then scored as if complete. That
+is a strong candidate for the "flat after update 100" finding above: the ladder
+could not see improvement because the policy it rated had degenerated. Treat
+every pre-2026-09-19 ladder number past ~u100 as suspect, and re-measure before
+citing one.
+
+Fixed by charging the disc for *taking* the action rather than for it working
+out (which is also the rule). MOVE stays legal — `ReactionTurnAndBonusActionTest`
+documents completing-immediately as the way to hand the turn to a passed player
+— but is now self-limiting: discs run out, `has_action_disk` goes false, PASS is
+all that is left. Gating MOVE out of `LegalActions` was tried first and is
+wrong; two tests reject it.
+
+**The rule this earns again:** a metric computed under one action-selection rule
+(sampling) says nothing about behaviour under another (argmax). The training log
+was perfect throughout.
+
 A long run is expensive and its failure modes are quiet. The two that already bit
 this project — a terminal-attribution bug that cost 408M steps, and a league
 throughput cliff invisible in every metric — were both found by *running the

@@ -176,6 +176,25 @@ This closes the observation-audit pilot gate. It does **not** close the separate
 run to update 100, and the documented plateau/collapse is in the update
 100→1700 range, which no pilot here exercises. See below.
 
+**2026-09-19, engine and trainer fixes found by running at 1,024 envs.** Five
+decision nodes could offer no legal action at all (each crashed or could crash a
+run): diplomacy `choose_pop_track` (no Population Cube to give — `can_propose_
+diplomacy` lacked the guard `can_form_minor_species` already had),
+`choose_rearrange` (now resolved automatically, preferring a lossless swap and
+giving up the cheapest tile only when forced), `choose_accept` (now always
+offers DECLINE), move `choose_warp_destination` (now offers MOVE_STOP like
+`choose_move`), and upkeep `choose_return_track` (unreachable by invariant;
+wants an assert, not a fallback). A kept Reputation tile now fills a free slot
+and the tile it displaces goes back to the bag rather than out of the game,
+which matters because `reputation_draw` is a chance node whose probabilities
+come from the bag. Separately, a move-capped game no longer pays
+(`--stalled_game_penalty`; flattening payoffs instead would have *rewarded* a
+losing seat, since an all-tie scores the mean of the rank table), stalls are
+counted rather than instantly fatal (`--safety_cap_abort_rate`), and a looping
+game is now captured at 900 moves while it still exists. The largest find is the
+free MOVE action — see `eclipse_rl_todo.md`, "a likely cause of stops learning
+after update 100".
+
 **Still open before a long run — the late-regime blocker.** `eclipse_rl_todo.md`
 records that at `update_epochs=4` the rating is flat after update 100 (1,622
 updates inside one CI) and at `update_epochs=1` it rises to update 1700 then
