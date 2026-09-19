@@ -3120,10 +3120,23 @@ void EclipseState::DoApplyAction(Action action_id) {
     if (current_player < eclipse_state_.players.size()) {
       const auto& player = eclipse_state_.players[current_player];
       if (player.available_influence_discs() > 0) {
-        bool started = begin_move(eclipse_state_, current_player);
-        if (started) {
-          ++eclipse_state_.players[current_player].disks_on_actions;
-        }
+        begin_move(eclipse_state_, current_player);
+        // The disc is spent for TAKING the Action, not for the Action turning
+        // out to be useful -- which is also the rule. Charging only when
+        // begin_move started left MOVE free whenever nothing could move, and a
+        // free action that changes nothing and does not end the turn can be
+        // repeated for ever: a deterministic policy rating MOVE above PASS
+        // never passes, so the round never ends. At update 200, 95% of greedy
+        // self-play games hit the 1,000-move cap without finishing. Sampling
+        // hid it completely (a stochastic policy eventually picks PASS), so
+        // every training metric read normal_end=1.00 throughout.
+        //
+        // Keeping MOVE legal but priced preserves the documented use of it --
+        // completing immediately to hand the turn to a passed player, see
+        // ReactionTurnAndBonusActionTest -- while making it self-limiting:
+        // discs run out, has_action_disk goes false, and PASS is all that is
+        // left.
+        ++eclipse_state_.players[current_player].disks_on_actions;
         if (eclipse_state_.move_state.phase != ::MoveState::Phase::inactive) {
           return;
         }
