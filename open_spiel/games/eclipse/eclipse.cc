@@ -1113,6 +1113,11 @@ std::vector<Action> EclipseState::InfluenceLegalActions() const {
     for (uint8_t track : get_legal_return_tracks_for_current_pending(s)) {
       actions.push_back(action_choose_return_track_start + track);
     }
+    // Unlike the warp and accept nodes, this one has no sensible fallback: the
+    // cube has already left the board and must land somewhere. It is also
+    // unreachable -- a cube on the board came OFF a track, so that track has
+    // room -- so assert rather than invent an escape that would lose the cube.
+    SPIEL_CHECK_FALSE(actions.empty());
   }
 
   std::sort(actions.begin(), actions.end());
@@ -1286,6 +1291,9 @@ std::vector<Action> EclipseState::DiplomacyLegalActions() const {
       if (p.resources.science_prod < 12) actions.push_back(action_choose_return_track_start + 1);
       if (p.resources.materials_prod < 12) actions.push_back(action_choose_return_track_start + 2);
     }
+    // See InfluenceLegalActions: the cube is already off the board and all
+    // three tracks full is unreachable, so this must not silently empty out.
+    SPIEL_CHECK_FALSE(actions.empty());
   }
   return actions;
 }
@@ -1320,14 +1328,18 @@ std::vector<Action> EclipseState::UpkeepLegalActions() const {
       break;
     }
     case UpkeepState::Step::choose_return_track: {
-      if (!us.pending_returns.empty()) {
-        for (PopTrack track : get_legal_return_tracks(
-                 player, us.pending_returns.front().type,
-                 us.pending_returns.front().is_orbital)) {
-          actions.push_back(action_choose_return_track_start +
-                            static_cast<int>(track));
-        }
+      // ProcessCurrentPendingReturnsAuto only enters this step with a pending
+      // return that needs a choice, and a cube on the board came off a track
+      // that therefore has room -- so neither of these can empty out. There is
+      // no fallback to offer either: the cube has already left the board.
+      SPIEL_CHECK_FALSE(us.pending_returns.empty());
+      for (PopTrack track : get_legal_return_tracks(
+               player, us.pending_returns.front().type,
+               us.pending_returns.front().is_orbital)) {
+        actions.push_back(action_choose_return_track_start +
+                          static_cast<int>(track));
       }
+      SPIEL_CHECK_FALSE(actions.empty());
       break;
     }
     case UpkeepState::Step::cleanup_graveyards:
