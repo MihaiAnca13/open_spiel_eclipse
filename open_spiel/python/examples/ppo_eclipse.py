@@ -269,6 +269,27 @@ flags.DEFINE_float(
     "making universal bankruptcy preferable to every normal rank outcome. "
     "0 disables the guard.")
 flags.DEFINE_float(
+    "safety_cap_abort_rate", 0.01,
+    "Fail the run when the share of episodes ending on the MaxGameLength move "
+    "cap exceeds this. A stall is an engine loop, not a strategy, so a rare "
+    "one is reported and counted rather than fatal -- killing a multi-day run "
+    "over one looping env in 8,549 episodes costs far more than the episode "
+    "is worth, and --stalled_game_penalty can only teach avoidance of "
+    "something the run survives. 0 restores fail-on-first, which is what a "
+    "short pilot wants.")
+flags.DEFINE_float(
+    "stalled_game_penalty", 2.0,
+    "Terminal PPO penalty applied to every seat when a game hits the "
+    "MaxGameLength move cap before round 9. Returns() scores such a game "
+    "exactly like a completed one, so whoever leads when the cap lands wins "
+    "outright -- a player ahead at round 4 who would have been overtaken by "
+    "round 8 profits by stalling, which self-play will eventually find. "
+    "Note that merely zeroing the payoffs is NOT safe: an all-equal vector is "
+    "an all-tie, worth the mean of the rank table (0.25 of (1, .5, 0, -.5)), "
+    "which beats last place outright and would pay a LOSING seat to stall. "
+    "The default sends even a first-place stall to -1.0, below the -0.5 of "
+    "last place, so no seat can gain. 0 disables the guard.")
+flags.DEFINE_float(
     "abort_wipeout_rate", 0.9,
     "Abort a pilot once at least --abort_wipeout_min_episodes complete "
     "episodes have a universal-bankruptcy rate at or above this value. "
@@ -1638,12 +1659,38 @@ def apply_universal_bankruptcy_penalty(rewards, eliminated, penalty,
   return targets
 
 
+def apply_stalled_game_penalty(targets, terminal_rounds, penalty):
+  """Makes a move-capped game worse than any real result, for every seat.
+
+  ``IsTerminal()`` force-ends a game at ``MaxGameLength()`` moves, and
+  ``Returns()`` then scores it exactly like a completed one, so whoever happens
+  to lead at that moment wins outright. That pays a player who is ahead early
+  to stall rather than play the game out.
+
+  Subtracting a flat penalty (rather than flattening the payoffs) is what makes
+  this safe. An all-equal payoff vector is an all-TIE, which fractional ranking
+  scores at the mean of the table -- 0.25 for (1, .5, 0, -.5) -- comfortably
+  above the -0.5 of last place, so "everybody scores nothing" would be a raise
+  for a losing seat and would pay it to stall. The shift keeps the relative
+  order and moves the whole stalled game below every normal outcome instead.
+  """
+  if penalty <= 0:
+    return targets
+  rounds = np.asarray(terminal_rounds)
+  stalled = rounds < _NORMAL_TERMINAL_ROUND
+  if stalled.any():
+    targets[stalled] -= float(penalty)
+  return targets
+
+
 def _terminal_targets_from_capture(rewards, capture, terminal_target_fn,
-                                   penalty):
+                                   penalty, stall_penalty=0.0):
   """PPO terminal targets using each terminal observer's self-elimination bit."""
-  return apply_universal_bankruptcy_penalty(
+  targets = apply_universal_bankruptcy_penalty(
       rewards, _terminal_eliminated_from_capture(capture), penalty,
       terminal_target_fn=terminal_target_fn)
+  return apply_stalled_game_penalty(
+      targets, _terminal_rounds_from_capture(capture), stall_penalty)
 
 def build_aux_targets(mode, vp_scale):
   """(task names, target fn) for ``--aux_target_mode``.
@@ -1916,15 +1963,32 @@ class EpisodeDiagnostics:
     return summary
 
 
-def _abort_on_safety_cap(safety_cap):
-  """Logs the terminal reason before making an invalid pilot fail."""
+def _abort_on_safety_cap(safety_cap, diag=None, abort_rate=0.0):
+  """Reports move-capped games, and fails only if they stop being anomalies.
+
+  Written for short pilots, where a single abnormal ending invalidates the
+  evidence, this used to raise on the first one. On a multi-day run that is a
+  hair trigger: on 2026-09-19 one looping env out of 8,549 episodes killed
+  three hours of training. It is also self-defeating now that
+  ``--stalled_game_penalty`` prices stalling below every honest outcome,
+  because the policy can only learn to avoid something the run survives.
+
+  So a rare stall is reported loudly and counted, and only a RATE of them --
+  which would mean the objective really is compromised -- ends the run. Set
+  ``abort_rate`` to 0 to restore the old fail-on-first behaviour.
+  """
   if not safety_cap:
     return
   env_idx, terminal_round = safety_cap[0]
-  message = (f"pilot aborted: env {env_idx} hit the {terminal_round}-round "
-             "safety-cap terminal")
-  _emit(message)
-  raise RuntimeError(message)
+  rate = None
+  if diag is not None and getattr(diag, "safety_cap_endings", None):
+    rate = float(np.mean(diag.safety_cap_endings))
+  detail = "" if rate is None else f" (recent safety-cap rate {rate:.4f})"
+  message = (f"env {env_idx} hit the {terminal_round}-round safety-cap "
+             f"terminal{detail}")
+  _emit(f"[stall] {message}")
+  if abort_rate <= 0 or (rate is not None and rate > abort_rate):
+    raise RuntimeError(f"pilot aborted: {message}")
 
 
 def _abort_on_universal_bankruptcy(diag, updates_done):
@@ -3389,7 +3453,8 @@ def main(_):
         terminal_capture = step_arrays.terminal_obs
         terminal_targets = _terminal_targets_from_capture(
             step_arrays.rewards, terminal_capture, agent._terminal_target,
-            FLAGS.universal_bankruptcy_penalty)
+            FLAGS.universal_bankruptcy_penalty,
+            stall_penalty=FLAGS.stalled_game_penalty)
         agent.post_step_np(
             step_arrays.rewards, step_arrays.dones,
             phi=(phi_prev if (FLAGS.shaping and FLAGS.phi == "telescope")
@@ -3411,7 +3476,8 @@ def main(_):
             diag.record_breakdown(
                 _terminal_aux_from_capture(terminal_capture), agent.last_seats,
                 donor_idx)
-            _abort_on_safety_cap(safety_cap)
+            _abort_on_safety_cap(safety_cap, diag,
+                                 FLAGS.safety_cap_abort_rate)
             _abort_on_universal_bankruptcy(diag, agent.updates_done)
           except BaseException:
             # Terminal health gates run outside learn_np's existing cleanup
@@ -3546,7 +3612,8 @@ def main(_):
             terminal_steps, num_players)
         terminal_targets = _terminal_targets_from_capture(
             reward, terminal_capture, agent._terminal_target,
-            FLAGS.universal_bankruptcy_penalty)
+            FLAGS.universal_bankruptcy_penalty,
+            stall_penalty=FLAGS.stalled_game_penalty)
         time_step = envs.reset(envs_to_reset=done, players="current")
         agent.post_step(
             reward, done,
@@ -3568,7 +3635,8 @@ def main(_):
               _terminal_eliminated_from_capture(terminal_capture))
           diag.record_breakdown(_terminal_aux_from_capture(terminal_capture),
                                 agent.last_seats, finished)
-          _abort_on_safety_cap(safety_cap)
+          _abort_on_safety_cap(safety_cap, diag,
+                               FLAGS.safety_cap_abort_rate)
           _abort_on_universal_bankruptcy(diag, agent.updates_done)
         for i in finished:
           ret = float(terminal_steps[i].rewards[0])

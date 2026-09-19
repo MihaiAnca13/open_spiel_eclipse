@@ -512,6 +512,12 @@ class AsyncVectorEnv(object):
       b.unlink()
 
 
+# A complete Eclipse game takes ~160 moves (worst of 25 random playouts: 268)
+# against a MaxGameLength() cap of 1000, so a game past this many moves is
+# looping rather than playing slowly.
+_STALL_DUMP_MOVES = 900
+
+
 def _worker_main(start, count, num_players, games, max_legal, obs_size,
                  seeds, action_buf, obs_buf, legal_buf, legal_len, rew_buf,
                  done_buf, cur_buf, terminal_obs_buf, terminal_obs_indices,
@@ -543,7 +549,20 @@ def _worker_main_impl(start, count, num_players, games, max_legal, obs_size,
     envs.append(env)
   vec = SyncVectorEnv(envs)
 
+  # A game that loops instead of progressing is force-ended by IsTerminal() at
+  # MaxGameLength() (1000 moves), and by then the env has auto-reset and the
+  # evidence is gone -- which is why two of these have now been seen and
+  # neither could be diagnosed. Catch it WHILE it is still looping instead.
+  # Measured: a complete game takes ~160 moves, worst seen 268, so 900 is far
+  # outside normal and still short of the cap. Probing every env every step
+  # would cost ~1024 pybind calls per step for an event seen once in ~8,500
+  # episodes, so sample instead: a stall lasts hundreds of moves, so a coarse
+  # tick still catches it with room to spare. One dump per worker is plenty.
+  stall_probe = {"tick": 0, "dumped": False}
+
   def publish(ts_new, done_list, rew_list):
+    stall_probe["tick"] += 1
+    probe_now = (not stall_probe["dumped"]) and stall_probe["tick"] % 16 == 0
     for i in range(count):
       idx = start + i
       seat = int(ts_new[i].observations["current_player"])
@@ -577,6 +596,28 @@ def _worker_main_impl(start, count, num_players, games, max_legal, obs_size,
         raise ValueError(
             f"empty legal-action set for env {idx} seat {seat} on a "
             f"non-terminal state; serialized state written to {dump}")
+      if probe_now and not done_list[i]:
+        try:
+          state = vec.envs[i]._state
+          moves = state.move_number()
+        except Exception:  # pylint: disable=broad-except
+          moves = 0
+        if moves >= _STALL_DUMP_MOVES:
+          stall_probe["dumped"] = True
+          dump = f"/tmp/eclipse_stalled_env{idx}_{os.getpid()}.txt"
+          try:
+            with open(dump, "w") as fh:
+              fh.write(state.serialize())
+            note = dump
+          except Exception as exc:  # pylint: disable=broad-except
+            note = f"<state capture failed: {exc!r}>"
+          # Deliberately not raised: the move cap is the trainer's to judge
+          # (see --stalled_game_penalty), and one looping env out of a thousand
+          # should not decide on its own to end a 74-hour run. Report and let
+          # the game hit the cap.
+          print(f"[stall] env {idx} at move {moves} without finishing "
+                f"(cap {_STALL_DUMP_MOVES}+); state written to {note}",
+                file=sys.stderr, flush=True)
       legal_buf[idx, :n] = np.asarray(la, dtype=np.int32)
       legal_len[idx] = n
       rew_buf[idx, :] = np.asarray(rew_list[i][:num_players],

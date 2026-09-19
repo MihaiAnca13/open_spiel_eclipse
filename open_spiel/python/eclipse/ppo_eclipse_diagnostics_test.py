@@ -5,7 +5,9 @@ import numpy as np
 
 from open_spiel.python.examples.ppo_eclipse import EpisodeDiagnostics
 from open_spiel.python.examples.ppo_eclipse import _NORMAL_TERMINAL_ROUND
+from open_spiel.python.examples.ppo_eclipse import apply_stalled_game_penalty
 from open_spiel.python.examples.ppo_eclipse import apply_universal_bankruptcy_penalty
+from open_spiel.python.pytorch.ppo import rank_utility
 
 
 class EpisodeDiagnosticsTest(absltest.TestCase):
@@ -23,6 +25,39 @@ class EpisodeDiagnosticsTest(absltest.TestCase):
     np.testing.assert_allclose(adjusted[0], [-1.0, -1.5, -2.0, -2.5])
     np.testing.assert_allclose(adjusted[1], [1.0, 0.5, 0.0, -0.5])
     self.assertLess(float(adjusted[0].max()), -0.5)
+
+  def test_stalled_game_loses_to_any_normal_rank_outcome(self):
+    """Leading when the move cap lands must not beat playing the game out."""
+    targets = np.asarray([[1.0, 0.5, 0.0, -0.5],
+                          [1.0, 0.5, 0.0, -0.5]], dtype=np.float32)
+    rounds = np.asarray([4, _NORMAL_TERMINAL_ROUND])
+
+    adjusted = apply_stalled_game_penalty(targets.copy(), rounds, penalty=2.0)
+
+    # The stalled game sinks for every seat...
+    np.testing.assert_allclose(adjusted[0], [-1.0, -1.5, -2.0, -2.5])
+    # ...and a game that actually finished is untouched.
+    np.testing.assert_allclose(adjusted[1], [1.0, 0.5, 0.0, -0.5])
+    # Even the best stall is worse than the worst honest result, so no seat
+    # can gain by running the clock out.
+    self.assertLess(float(adjusted[0].max()), -0.5)
+
+  def test_zeroing_payoffs_would_pay_a_losing_seat_to_stall(self):
+    """Why the guard shifts the targets instead of flattening the payoffs.
+
+    An all-equal payoff vector is an all-TIE, which fractional ranking scores
+    at the mean of the table. That is well above last place, so "nobody scores"
+    would be a promotion for the seat that was losing.
+    """
+    self.assertAlmostEqual(rank_utility([0.0, 0.0, 0.0, 0.0], 0), 0.25)
+    self.assertAlmostEqual(rank_utility([30.0, 20.0, 10.0, 5.0], 3), -0.5)
+    self.assertGreater(rank_utility([0.0, 0.0, 0.0, 0.0], 0),
+                       rank_utility([30.0, 20.0, 10.0, 5.0], 3))
+
+  def test_stall_penalty_disabled_is_a_no_op(self):
+    targets = np.asarray([[1.0, 0.5, 0.0, -0.5]], dtype=np.float32)
+    out = apply_stalled_game_penalty(targets.copy(), np.asarray([4]), 0.0)
+    np.testing.assert_allclose(out, targets)
 
   def test_terminal_summary_separates_normal_and_safety_endings(self):
     diag = EpisodeDiagnostics(
