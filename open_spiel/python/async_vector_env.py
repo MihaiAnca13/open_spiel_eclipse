@@ -561,6 +561,22 @@ def _worker_main_impl(start, count, num_players, games, max_legal, obs_size,
             f"legal action set of size {n} exceeds max_legal={max_legal} "
             f"(env {idx}, seat {seat}); truncating would silently hide "
             f"{n - max_legal} legal actions from the agent")
+      # An empty set on a non-terminal env is an engine bug, and the parent's
+      # integrity check reports only the env index -- which is not enough to
+      # find the branch. Two training runs died this way on 2026-09-19 and left
+      # nothing to debug, while 9.9M uniform-random playout steps failed to
+      # reproduce it (the state needs competent play to reach). So capture the
+      # state HERE, where the env still exists, before the process unwinds.
+      if n == 0 and not done_list[i]:
+        dump = f"/tmp/eclipse_empty_legal_env{idx}_seat{seat}_{os.getpid()}.txt"
+        try:
+          with open(dump, "w") as fh:
+            fh.write(vec.envs[i]._state.serialize())
+        except Exception as exc:  # pylint: disable=broad-except
+          dump = f"<state capture failed: {exc!r}>"
+        raise ValueError(
+            f"empty legal-action set for env {idx} seat {seat} on a "
+            f"non-terminal state; serialized state written to {dump}")
       legal_buf[idx, :n] = np.asarray(la, dtype=np.int32)
       legal_len[idx] = n
       rew_buf[idx, :] = np.asarray(rew_list[i][:num_players],

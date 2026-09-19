@@ -1,6 +1,7 @@
 #include "open_spiel/games/eclipse/eclipse.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <array>
 #include <iostream>
 #include <random>
@@ -3987,6 +3988,66 @@ void SectorCoordMapTest() {
   SPIEL_CHECK_EQ(deserialized_c.r, -1);
 }
 
+void LegalActionsNeverEmptyStressTest() {
+  // An OpenSpiel decision node must always offer at least one legal action.
+  // Two 1,024-env training runs died on 2026-09-19 with PPO's
+  // "empty legal-action set" integrity error, roughly one step in four million,
+  // and several LegalActions() branches can return empty BY CONSTRUCTION with
+  // no fallback: diplomacy choose_pop_track (all three pop tracks at 0),
+  // choose_accept (partner eliminated) and choose_rearrange (no returnable slot
+  // and no legal swap); upkeep bankruptcy (insolvent, cannot trade, nothing to
+  // reclaim) and choose_return_track (no pending returns, or every track full);
+  // and move choose_warp_destination (no reachable cell, and unlike
+  // choose_move it has no stop action to fall back on).
+  //
+  // Uniform-random play reaches those corners far faster than a trained policy,
+  // which is the point: the trained runs needed ~30-50 minutes each to find one.
+  // On failure this dumps the serialized state, because the branch that fired
+  // is exactly what the crash logs did not record.
+  // 200 seeds keeps this ~0.5s so it can live in the ordinary suite. The bug
+  // being hunted is ~1 step in 4,000,000, which needs far more than that, so
+  // ECLIPSE_STRESS_SEEDS cranks it for a deep hunt without a rebuild.
+  int num_seeds = 200;
+  if (const char* env = std::getenv("ECLIPSE_STRESS_SEEDS")) {
+    const int parsed = std::atoi(env);
+    if (parsed > 0) num_seeds = parsed;
+  }
+  long long steps = 0;
+  for (int seed = 0; seed < num_seeds; ++seed) {
+    auto game = LoadEclipseGame(4, 7000 + seed);
+    auto state = game->NewInitialState();
+    std::mt19937 rng(9001 + seed);
+    const int cap = game->MaxGameLength() * 4;
+    int n = 0;
+    while (!state->IsTerminal() && n++ < cap) {
+      std::vector<Action> actions;
+      if (state->IsChanceNode()) {
+        for (const auto& outcome : state->ChanceOutcomes()) {
+          actions.push_back(outcome.first);
+        }
+      } else {
+        actions = state->LegalActions();
+        if (actions.empty()) {
+          const auto* es = dynamic_cast<const EclipseState*>(state.get());
+          std::cout << "EMPTY LEGAL ACTIONS seed=" << seed << " step=" << n
+                    << " current_player=" << state->CurrentPlayer()
+                    << std::endl;
+          if (es != nullptr) {
+            nlohmann::json j;
+            to_json(j, es->RawState());
+            std::cout << "state=" << j.dump() << std::endl;
+          }
+        }
+      }
+      SPIEL_CHECK_TRUE(!actions.empty());
+      std::uniform_int_distribution<size_t> pick(0, actions.size() - 1);
+      state->ApplyAction(actions[pick(rng)]);
+      ++steps;
+    }
+  }
+  std::cout << "  stress playout steps=" << steps << std::endl;
+}
+
 }  // namespace
 }  // namespace eclipse
 }  // namespace open_spiel
@@ -4089,6 +4150,7 @@ int main(int argc, char** argv) {
   RUN_TEST(WarpedUniverseTest);
   RUN_TEST(WarpedUniverseExploreRotationTest);
   RUN_TEST(SectorCoordMapTest);
+  RUN_TEST(LegalActionsNeverEmptyStressTest);
   RUN_TEST(SetupRandomizationTest);
 
 #undef RUN_TEST

@@ -3349,7 +3349,17 @@ def main(_):
       _wall_roll0 = time.perf_counter() if _tm is not None else None
       for step in range(FLAGS.num_steps):
         t0 = time.perf_counter() if _tm is not None else None
-        acts = agent.step_np(step_arrays, defer_record=_overlap)
+        try:
+          acts = agent.step_np(step_arrays, defer_record=_overlap)
+        except BaseException:
+          # The third site needing this, after learn_np and the terminal health
+          # gates. Rollout collection is where the integrity checks on legal
+          # actions fire, and without this close the workers stay blocked on
+          # their next semaphore: on 2026-09-19 a PPOIntegrityError here printed
+          # its traceback and then held 89 GiB on each of two cards for eight
+          # hours, because non-daemon workers keep the interpreter alive.
+          envs.close()
+          raise
         t1 = time.perf_counter() if _tm is not None else None
         # Release the env workers BEFORE doing the CPU-side bookkeeping, so the
         # two run concurrently. At 1,024 envs the per-env `_last_decision` stores
