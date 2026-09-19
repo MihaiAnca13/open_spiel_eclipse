@@ -952,6 +952,18 @@ phase-sum-derived.**
 
 ## Still open, none of it gating
 
+- **The entropy-band diagnostic arm is dropped (decided 2026-09-19).** `runs/diag_entband`
+  ran `EXTRA="--ent_lo=0.75 ..."` and the controller never fired once: measured
+  entropy sat at ~0.86, inside the band for the whole run, so the arm was a
+  second control wearing a treatment's name. Raising the floor to ~0.95 would
+  make it bind, but the thing it was built to probe — "stops learning after
+  u100" — now has a much likelier explanation (the free-MOVE loop, fixed in
+  66ac89ea; every ladder number past ~u100 was rated on games that never
+  finished). Re-measure the plateau on the fixed engine first. If it survives,
+  the arm is worth rebuilding with a floor set from the *then*-observed entropy,
+  not from 0.75. Second arm runs as a seed replicate (`SEED=2`, no `EXTRA`)
+  instead, which at least buys a variance estimate.
+
 - **`learn`'s remaining 35%.** `elementwise / copy` is the largest bucket now.
   The pointer head is compiled (`--compile_encoder` covers it as of 2026-08-14);
   `embedding_dense_backward` for `sector_embed` is ~7% and has no identified fix.
