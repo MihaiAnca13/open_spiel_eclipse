@@ -1199,6 +1199,12 @@ std::vector<Action> EclipseState::MoveLegalActions() const {
     for (uint8_t cell : cells) {
       actions.push_back(action_move_warp_destination_start + cell);
     }
+    // Same escape hatch choose_move has. Without it a unit that began a warp
+    // and then had no reachable destination left the player with no legal
+    // action at all. Aborting is clean because begin_warp_move only records
+    // warp_unit_idx and the phase -- it does not touch the board -- so stopping
+    // here simply means the unit does not move.
+    actions.push_back(action_move_stop);
   }
 
   std::sort(actions.begin(), actions.end());
@@ -1215,8 +1221,13 @@ std::vector<Action> EclipseState::DiplomacyLegalActions() const {
     const uint8_t expected = ds.partner_id;
     if (expected < s.players.size() && !s.players[expected].eliminated) {
       actions.push_back(action_diplomacy_accept);
-      actions.push_back(action_diplomacy_decline);
     }
+    // Declining is always available, so a partner who can no longer accept
+    // (gone, or eliminated since the proposal) resolves to a decline instead of
+    // leaving a decision node with nothing in it. Rulebook p.14: "If either
+    // player declines the proposed Diplomatic Relations, the current player
+    // simply continues their Action."
+    actions.push_back(action_diplomacy_decline);
   } else if (ds.phase == DiplomacyState::Phase::choose_pop_track) {
     // Proposer (side=0) or partner (side=1) picks a Pop Track for the cube
     // they're giving. The three legal tracks are gated by cube availability.

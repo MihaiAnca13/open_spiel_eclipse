@@ -4100,6 +4100,58 @@ void ReputationTileAutoPicksBestTest() {
                  "COMBAT_REPUTATION_SKIP");
 }
 
+void WarpDestinationAlwaysHasStopTest() {
+  // A unit that began a warp but has no reachable destination must still be
+  // able to stop, exactly as choose_move can. Previously this branch offered
+  // nothing at all.
+  std::shared_ptr<const Game> game = LoadEclipseGame(4, 41);
+  std::unique_ptr<State> state = game->NewInitialState();
+  state->ApplyAction(0);
+  auto* es = static_cast<EclipseState*>(state.get());
+  ::State& raw = const_cast<::State&>(es->RawState());
+
+  raw.current_phase = RoundPhase::ACTION;
+  raw.move_state.phase = ::MoveState::Phase::choose_warp_destination;
+  raw.move_state.player_id = 0;
+  raw.move_state.warp_unit_idx = 255;  // no such unit, so no legal destination
+
+  const std::vector<Action> actions = state->LegalActions();
+  SPIEL_CHECK_TRUE(!actions.empty());
+  SPIEL_CHECK_EQ(actions.size(), 1u);
+  SPIEL_CHECK_EQ(state->ActionToString(0, actions[0]), "MOVE_STOP");
+
+  // Stopping clears the Move action rather than stranding the player.
+  state->ApplyAction(actions[0]);
+  SPIEL_CHECK_TRUE(raw.move_state.phase == ::MoveState::Phase::inactive);
+}
+
+void DiplomacyAcceptAlwaysAllowsDeclineTest() {
+  // A partner who cannot accept any more resolves to a decline instead of
+  // leaving a decision node with no legal action.
+  std::shared_ptr<const Game> game = LoadEclipseGame(4, 43);
+  std::unique_ptr<State> state = game->NewInitialState();
+  state->ApplyAction(0);
+  auto* es = static_cast<EclipseState*>(state.get());
+  ::State& raw = const_cast<::State&>(es->RawState());
+
+  raw.diplomacy_state.phase = DiplomacyState::Phase::choose_accept;
+  raw.diplomacy_state.player_id = 0;
+  raw.diplomacy_state.partner_id = 1;
+
+  // A live partner still gets the full choice.
+  raw.players[1].eliminated = false;
+  SPIEL_CHECK_EQ(state->LegalActions().size(), 2u);
+
+  // An eliminated partner gets exactly one: decline.
+  raw.players[1].eliminated = true;
+  const std::vector<Action> actions = state->LegalActions();
+  SPIEL_CHECK_EQ(actions.size(), 1u);
+  SPIEL_CHECK_EQ(state->ActionToString(0, actions[0]), "DIPLOMACY_DECLINE");
+
+  state->ApplyAction(actions[0]);
+  SPIEL_CHECK_TRUE(raw.diplomacy_state.phase == DiplomacyState::Phase::inactive);
+}
+
 void LegalActionsNeverEmptyStressTest() {
   // An OpenSpiel decision node must always offer at least one legal action.
   // Two 1,024-env training runs died on 2026-09-19 with PPO's
@@ -4265,6 +4317,8 @@ int main(int argc, char** argv) {
   RUN_TEST(DiplomacyRequiresPopCubeFromBothSidesTest);
   RUN_TEST(AutoFreeAmbassadorSlotTest);
   RUN_TEST(ReputationTileAutoPicksBestTest);
+  RUN_TEST(WarpDestinationAlwaysHasStopTest);
+  RUN_TEST(DiplomacyAcceptAlwaysAllowsDeclineTest);
   RUN_TEST(LegalActionsNeverEmptyStressTest);
   RUN_TEST(SetupRandomizationTest);
 
