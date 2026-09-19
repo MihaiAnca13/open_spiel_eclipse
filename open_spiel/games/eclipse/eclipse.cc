@@ -497,6 +497,43 @@ void AppendReclaimActions(const ::State& state, uint8_t player_id,
   }
 }
 
+// VP printed on a Reputation tile. ReputationTiles is {ONE,TWO,THREE,FOUR,NONE}
+// so NONE is numerically 4: comparing the raw enum would rank an empty slot
+// above a 4 VP tile. Everything that ranks tiles must go through this.
+int RepTileVp(ReputationTiles tile) {
+  return tile == ReputationTiles::NONE ? 0 : static_cast<int>(tile) + 1;
+}
+
+// The single action the player would take anyway: keep the best tile drawn,
+// unless keeping it would cost more than it gains.
+Action BestReputationTileAction(const ::State& state, const CombatState& cs) {
+  uint8_t best_idx = 0;
+  int best_vp = -1;
+  for (uint8_t i = 0; i < cs.drawn_tiles_size; ++i) {
+    const int vp = RepTileVp(cs.drawn_tiles[i]);
+    if (vp > best_vp) {
+      best_vp = vp;
+      best_idx = i;
+    }
+  }
+  // Placement writes into the LAST rep-capable slot, overwriting whatever sits
+  // there (see the select_reputation_tile case in ApplyAction), so a draw is
+  // only worth keeping if it beats the tile it would displace.
+  if (cs.tile_select_player >= state.players.size()) {
+    return action_combat_rep_select_start + best_idx;
+  }
+  const ::Player& p = state.players[cs.tile_select_player];
+  int displaced_vp = 0;
+  for (size_t i = 0; i < p.reputation_track.size(); ++i) {
+    const ReputationSlot& slot = p.reputation_track[i];
+    if (slot.holds_ambassador) continue;
+    if (slot.kind == ReputationSlotKind::AMBASSADOR_ONLY) continue;
+    displaced_vp = RepTileVp(slot.rep_value);
+  }
+  if (best_vp <= displaced_vp) return action_combat_rep_skip;
+  return action_combat_rep_select_start + best_idx;
+}
+
 bool HasReclaimableSector(const ::State& state, uint8_t player_id) {
   for (int cell = 0; cell < GALAXY_CELL_COUNT; ++cell) {
     if (can_reclaim_from_sector(state, player_id, static_cast<uint8_t>(cell))) {
@@ -2452,10 +2489,11 @@ std::vector<Action> EclipseState::CombatLegalActions() const {
     }
     case CombatState::Phase::select_reputation_tile: {
       if (cs.tile_select_player != kNoPlayer && cs.drawn_tiles_size > 0) {
-        for (uint8_t i = 0; i < cs.drawn_tiles_size; ++i) {
-          actions.push_back(action_combat_rep_select_start + i);
-        }
-        actions.push_back(action_combat_rep_skip);
+        // Keeping the most valuable tile you drew is bookkeeping, not a
+        // decision, so offer only that one rather than making the policy learn
+        // to compare four numbers. The action ids are unchanged, so existing
+        // checkpoints and the observation layout still line up.
+        actions.push_back(BestReputationTileAction(eclipse_state_, cs));
       } else {
         actions.push_back(action_combat_continue);
       }

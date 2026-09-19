@@ -3988,6 +3988,118 @@ void SectorCoordMapTest() {
   SPIEL_CHECK_EQ(deserialized_c.r, -1);
 }
 
+void DiplomacyRequiresPopCubeFromBothSidesTest() {
+  // Forming relations costs each side a Population Cube for the Ambassador
+  // tile. These fields count cubes REMAINING, so 0 on all three means the
+  // player has none left to give. Proposing anyway used to reach
+  // choose_pop_track with no legal action and kill the run.
+  ::State s = MakeFourPlayerState();
+  s.players[0].resources.gold_prod = 0;
+  s.players[0].resources.science_prod = 0;
+  s.players[0].resources.materials_prod = 0;
+  SPIEL_CHECK_FALSE(has_placeable_pop_cube(s.players[0]));
+
+  s.players[0].resources.materials_prod = 1;
+  SPIEL_CHECK_TRUE(has_placeable_pop_cube(s.players[0]));
+  s.players[0].resources.materials_prod = 0;
+  s.players[0].resources.gold_prod = 12;
+  SPIEL_CHECK_TRUE(has_placeable_pop_cube(s.players[0]));
+
+  // A player with nothing to give can never be a legal diplomacy partner,
+  // whichever side of the proposal they sit on.
+  s.players[0].resources.gold_prod = 0;
+  SPIEL_CHECK_FALSE(can_propose_diplomacy(s, 0, 1));
+  SPIEL_CHECK_FALSE(can_propose_diplomacy(s, 1, 0));
+}
+
+void AutoFreeAmbassadorSlotTest() {
+  // Rearranging to fit an incoming Ambassador is resolved automatically now.
+  // It must always terminate and must never report success it did not achieve.
+  ::State s = MakeFourPlayerState();
+  ::Player& p = s.players[0];
+
+  // A player who already has room needs no rearranging.
+  SPIEL_CHECK_TRUE(auto_free_ambassador_slot(s, 0));
+  SPIEL_CHECK_TRUE(has_free_ambassador_slot(p));
+
+  // Every Ambassador-capable slot taken: nothing can be freed, so it must
+  // report failure rather than spin or claim a slot it has not got. The caller
+  // turns that into a declined proposal.
+  for (size_t i = 0; i < p.reputation_track.size(); ++i) {
+    if (slot_kind_holds_ambassador(p.reputation_track[i].kind)) {
+      p.reputation_track[i].holds_ambassador = true;
+      p.reputation_track[i].ambassador_from = 1;
+    }
+  }
+  SPIEL_CHECK_FALSE(auto_free_ambassador_slot(s, 0));
+  SPIEL_CHECK_FALSE(has_free_ambassador_slot(p));
+
+  // Out-of-range player ids are rejected, not indexed.
+  SPIEL_CHECK_FALSE(auto_free_ambassador_slot(s, 99));
+}
+
+void ReputationTileAutoPicksBestTest() {
+  // Keeping the best drawn tile is bookkeeping, so the engine offers exactly
+  // one action instead of asking. The 9.9M-step stress playouts never reach
+  // this node (their step count is unchanged by this behaviour), so it needs
+  // its own test.
+  std::shared_ptr<const Game> game = LoadEclipseGame(4, 31);
+  std::unique_ptr<State> state = game->NewInitialState();
+  state->ApplyAction(0);  // resolve initial setup
+  auto* es = static_cast<EclipseState*>(state.get());
+  ::State& raw = const_cast<::State&>(es->RawState());
+
+  raw.current_phase = RoundPhase::COMBAT;
+  raw.combat_state.phase = CombatState::Phase::select_reputation_tile;
+  raw.combat_state.tile_select_player = 0;
+
+  // Clear player 0's Reputation tiles so a kept tile displaces nothing.
+  for (size_t i = 0; i < raw.players[0].reputation_track.size(); ++i) {
+    raw.players[0].reputation_track[i].rep_value = ReputationTiles::NONE;
+    raw.players[0].reputation_track[i].holds_ambassador = false;
+  }
+
+  // FOUR is the best of the three, and it sits at index 1.
+  raw.combat_state.drawn_tiles_size = 3;
+  raw.combat_state.drawn_tiles[0] = ReputationTiles::ONE;
+  raw.combat_state.drawn_tiles[1] = ReputationTiles::FOUR;
+  raw.combat_state.drawn_tiles[2] = ReputationTiles::TWO;
+  std::vector<Action> actions = state->LegalActions();
+  SPIEL_CHECK_EQ(actions.size(), 1u);
+  SPIEL_CHECK_EQ(state->ActionToString(0, actions[0]),
+                 "COMBAT_REPUTATION_SELECT_1");
+
+  // The enum is {ONE,TWO,THREE,FOUR,NONE}, so NONE is numerically 4 and a naive
+  // max would rank "no tile" above every real tile. ONE must win here.
+  raw.combat_state.drawn_tiles_size = 2;
+  raw.combat_state.drawn_tiles[0] = ReputationTiles::NONE;
+  raw.combat_state.drawn_tiles[1] = ReputationTiles::ONE;
+  actions = state->LegalActions();
+  SPIEL_CHECK_EQ(actions.size(), 1u);
+  SPIEL_CHECK_EQ(state->ActionToString(0, actions[0]),
+                 "COMBAT_REPUTATION_SELECT_1");
+
+  // Placement overwrites the last rep-capable slot, so a draw worth less than
+  // the tile it would displace is declined instead of taken at a loss.
+  int last_rep_slot = -1;
+  for (size_t i = 0; i < raw.players[0].reputation_track.size(); ++i) {
+    const ReputationSlot& slot = raw.players[0].reputation_track[i];
+    if (!slot.holds_ambassador &&
+        slot.kind != ReputationSlotKind::AMBASSADOR_ONLY) {
+      last_rep_slot = static_cast<int>(i);
+    }
+  }
+  SPIEL_CHECK_TRUE(last_rep_slot >= 0);
+  raw.players[0].reputation_track[last_rep_slot].rep_value =
+      ReputationTiles::FOUR;
+  raw.combat_state.drawn_tiles_size = 1;
+  raw.combat_state.drawn_tiles[0] = ReputationTiles::ONE;
+  actions = state->LegalActions();
+  SPIEL_CHECK_EQ(actions.size(), 1u);
+  SPIEL_CHECK_EQ(state->ActionToString(0, actions[0]),
+                 "COMBAT_REPUTATION_SKIP");
+}
+
 void LegalActionsNeverEmptyStressTest() {
   // An OpenSpiel decision node must always offer at least one legal action.
   // Two 1,024-env training runs died on 2026-09-19 with PPO's
@@ -4150,6 +4262,9 @@ int main(int argc, char** argv) {
   RUN_TEST(WarpedUniverseTest);
   RUN_TEST(WarpedUniverseExploreRotationTest);
   RUN_TEST(SectorCoordMapTest);
+  RUN_TEST(DiplomacyRequiresPopCubeFromBothSidesTest);
+  RUN_TEST(AutoFreeAmbassadorSlotTest);
+  RUN_TEST(ReputationTileAutoPicksBestTest);
   RUN_TEST(LegalActionsNeverEmptyStressTest);
   RUN_TEST(SetupRandomizationTest);
 

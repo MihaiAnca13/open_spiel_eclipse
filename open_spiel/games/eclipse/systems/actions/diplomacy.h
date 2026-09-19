@@ -101,6 +101,16 @@ namespace open_spiel::eclipse
                k == ReputationSlotKind::REP_ONLY;
     }
 
+    // True if the player still has a Population Cube on some track to place on
+    // an Ambassador tile. Diplomacy formation requires one from BOTH sides.
+    bool has_placeable_pop_cube(const ::Player& player);
+
+    // Makes room for an incoming Ambassador tile without asking the player,
+    // preferring to keep every Reputation tile (swap into a free REP_ONLY slot)
+    // and only giving up the cheapest tile when that is impossible. Returns
+    // false if no slot can be freed at all.
+    bool auto_free_ambassador_slot(::State& state, uint8_t player_id);
+
     // Returns the index of the first free slot that can hold an Ambassador,
     // or 255 if none.
     uint8_t find_free_ambassador_slot(const ::Player& player);

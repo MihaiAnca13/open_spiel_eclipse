@@ -114,6 +114,12 @@ namespace open_spiel::eclipse
         return true;
     }
 
+    bool has_placeable_pop_cube(const ::Player& player) {
+        return player.resources.gold_prod > 0 ||
+               player.resources.science_prod > 0 ||
+               player.resources.materials_prod > 0;
+    }
+
     uint8_t find_free_ambassador_slot(const ::Player& player) {
         for (size_t i = 0; i < player.reputation_track.size(); ++i) {
             const ReputationSlot& s = player.reputation_track[i];
@@ -137,6 +143,77 @@ namespace open_spiel::eclipse
 
     bool has_free_ambassador_slot(const ::Player& player) {
         return find_free_ambassador_slot(player) != NO_SLOT;
+    }
+
+    namespace {
+        // Lossless: move a Reputation tile out of a slot that could hold an
+        // Ambassador into a free REP_ONLY slot. Keeps the tile and its VP.
+        bool try_swap_rep_out_of_ambassador_slot(::Player& player) {
+            for (size_t src = 0; src < player.reputation_track.size(); ++src) {
+                ReputationSlot& from = player.reputation_track[src];
+                if (from.kind != ReputationSlotKind::AMBASSADOR_OR_REP) continue;
+                if (from.holds_ambassador) continue;
+                if (from.rep_value == ReputationTiles::NONE) continue;
+                for (size_t dst = 0; dst < player.reputation_track.size(); ++dst) {
+                    if (src == dst) continue;
+                    ReputationSlot& to = player.reputation_track[dst];
+                    if (to.kind != ReputationSlotKind::REP_ONLY) continue;
+                    if (to.holds_ambassador) continue;
+                    if (to.rep_value != ReputationTiles::NONE) continue;
+                    std::swap(from.rep_value, to.rep_value);
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Lossy fallback: give up the CHEAPEST Reputation tile, so the forced
+        // concession costs as little VP as possible. Note ReputationTiles is
+        // {ONE,TWO,THREE,FOUR,NONE}, so NONE is numerically 4 and comparing the
+        // raw enum would rank "no tile" above a 4 VP tile; slot_is_returnable
+        // screens NONE out, and rep_tile_vp() is the safe comparison elsewhere.
+        bool try_return_cheapest_rep_tile(::State& state, ::Player& player) {
+            uint8_t best_slot = NO_SLOT;
+            int best_value = 0;
+            for (size_t i = 0; i < player.reputation_track.size(); ++i) {
+                const ReputationSlot& slot = player.reputation_track[i];
+                if (!slot_is_returnable(slot)) continue;
+                const int value = static_cast<int>(slot.rep_value) + 1;
+                if (best_slot == NO_SLOT || value < best_value) {
+                    best_slot = static_cast<uint8_t>(i);
+                    best_value = value;
+                }
+            }
+            if (best_slot == NO_SLOT) return false;
+            ReputationSlot& slot = player.reputation_track[best_slot];
+            state.reputation_tiles.push_back(slot.rep_value);
+            slot.rep_value = ReputationTiles::NONE;
+            slot.holds_ambassador = false;
+            slot.ambassador_from = NO_PLAYER;
+            slot.pending_track_choice = false;
+            return true;
+        }
+    }  // namespace
+
+    bool auto_free_ambassador_slot(::State& state, uint8_t player_id) {
+        // Rearranging the Reputation Track to fit an incoming Ambassador is
+        // bookkeeping, not a strategic choice, so resolve it here instead of
+        // asking. The old choose_rearrange phase handed the turn to the other
+        // side after each return and only bailed out when NEITHER side had an
+        // option left, so it could hand play to a side with nothing to do and
+        // produce a decision node with zero legal actions.
+        //
+        // "Fits best" = keep every tile if possible (swap), and only when that
+        // fails give up the cheapest one.
+        if (player_id >= state.players.size()) return false;
+        ::Player& player = state.players[player_id];
+        for (int guard = 0; guard < 8; ++guard) {
+            if (has_free_ambassador_slot(player)) return true;
+            if (try_swap_rep_out_of_ambassador_slot(player)) continue;
+            if (try_return_cheapest_rep_tile(state, player)) continue;
+            break;
+        }
+        return has_free_ambassador_slot(player);
     }
 
     bool has_freeable_ambassador_slot(const ::Player& player) {
@@ -193,6 +270,16 @@ namespace open_spiel::eclipse
         if (p.traitor_held || q.traitor_held) return false;
         if (!has_freeable_ambassador_slot(p)) return false;
         if (!has_freeable_ambassador_slot(q)) return false;
+        // Both sides place a Population Cube on their new Ambassador tile, and
+        // these fields count cubes REMAINING on each track, so all three at
+        // zero means every cube is already on the board and the player has
+        // none to give. can_form_minor_species already guards its PLACE_POP_CUBE
+        // ability this way; diplomacy did not, and the choose_pop_track phase
+        // then offered no legal action at all. It takes a very developed player
+        // to empty all three tracks, which is why only trained self-play found
+        // it and 9.9M uniform-random playout steps did not.
+        if (!has_placeable_pop_cube(p)) return false;
+        if (!has_placeable_pop_cube(q)) return false;
         for (size_t i = 0; i < p.reputation_track.size(); ++i) {
             if (p.reputation_track[i].holds_ambassador &&
                 p.reputation_track[i].ambassador_from == partner) {
@@ -238,18 +325,19 @@ namespace open_spiel::eclipse
             return false;
         }
 
-        // Move to formation: check slot availability, same logic as old
-        // begin_diplomacy body.
-        if (!has_free_ambassador_slot(state.players[ds.player_id])) {
-            ds.phase = DiplomacyState::Phase::choose_rearrange;
-            ds.rearrange_side = 0;
-        } else if (!has_free_ambassador_slot(state.players[ds.partner_id])) {
-            ds.phase = DiplomacyState::Phase::choose_rearrange;
-            ds.rearrange_side = 1;
-        } else {
-            ds.phase = DiplomacyState::Phase::choose_pop_track;
-            ds.pop_track_side = 0;
+        // Move to formation. Both sides make room for the incoming Ambassador
+        // automatically; see auto_free_ambassador_slot. If either genuinely
+        // cannot, the relation simply does not form -- rulebook p.14: "If
+        // either player declines the proposed Diplomatic Relations, the current
+        // player simply continues their Action." Declining also sets the
+        // declined-this-turn mask, which stops the proposer retrying forever.
+        if (!auto_free_ambassador_slot(state, ds.player_id) ||
+            !auto_free_ambassador_slot(state, ds.partner_id)) {
+            execute_diplomacy_decline(state);
+            return false;
         }
+        ds.phase = DiplomacyState::Phase::choose_pop_track;
+        ds.pop_track_side = 0;
         return true;
     }
 
