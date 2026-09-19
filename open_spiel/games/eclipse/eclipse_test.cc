@@ -4079,17 +4079,21 @@ void ReputationTileAutoPicksBestTest() {
   SPIEL_CHECK_EQ(state->ActionToString(0, actions[0]),
                  "COMBAT_REPUTATION_SELECT_1");
 
-  // Placement overwrites the last rep-capable slot, so a draw worth less than
-  // the tile it would displace is declined instead of taken at a loss.
+  // A tile already on the track costs nothing while a free slot remains: the
+  // draw goes in the empty slot instead of displacing anything, so even a 1 VP
+  // draw is worth keeping alongside a 4 VP tile.
   int last_rep_slot = -1;
+  std::vector<size_t> rep_slots;
   for (size_t i = 0; i < raw.players[0].reputation_track.size(); ++i) {
     const ReputationSlot& slot = raw.players[0].reputation_track[i];
     if (!slot.holds_ambassador &&
         slot.kind != ReputationSlotKind::AMBASSADOR_ONLY) {
       last_rep_slot = static_cast<int>(i);
+      rep_slots.push_back(i);
     }
   }
   SPIEL_CHECK_TRUE(last_rep_slot >= 0);
+  SPIEL_CHECK_TRUE(rep_slots.size() >= 2);
   raw.players[0].reputation_track[last_rep_slot].rep_value =
       ReputationTiles::FOUR;
   raw.combat_state.drawn_tiles_size = 1;
@@ -4097,7 +4101,112 @@ void ReputationTileAutoPicksBestTest() {
   actions = state->LegalActions();
   SPIEL_CHECK_EQ(actions.size(), 1u);
   SPIEL_CHECK_EQ(state->ActionToString(0, actions[0]),
+                 "COMBAT_REPUTATION_SELECT_0");
+
+  // Only once the track is FULL does keeping cost something, and then a draw
+  // worth less than the highest-index tile it would evict is declined.
+  for (size_t slot_idx : rep_slots) {
+    raw.players[0].reputation_track[slot_idx].rep_value = ReputationTiles::FOUR;
+  }
+  actions = state->LegalActions();
+  SPIEL_CHECK_EQ(actions.size(), 1u);
+  SPIEL_CHECK_EQ(state->ActionToString(0, actions[0]),
                  "COMBAT_REPUTATION_SKIP");
+}
+
+void ReputationTilePlacementPrefersEmptySlotTest() {
+  // Keeping a tile must fill a free slot rather than overwrite an occupied one,
+  // and a tile that really is displaced must go back to the bag. The bag is not
+  // cosmetic: reputation_draw is a chance node whose probabilities come from
+  // its contents, so a tile that silently leaves the game skews every later
+  // draw.
+  std::shared_ptr<const Game> game = LoadEclipseGame(4, 47);
+  std::unique_ptr<State> state = game->NewInitialState();
+  state->ApplyAction(0);
+  auto* es = static_cast<EclipseState*>(state.get());
+  ::State& raw = const_cast<::State&>(es->RawState());
+
+  raw.current_phase = RoundPhase::COMBAT;
+  raw.combat_state.phase = CombatState::Phase::select_reputation_tile;
+  raw.combat_state.tile_select_player = 0;
+
+  std::vector<size_t> rep_slots;
+  for (size_t i = 0; i < raw.players[0].reputation_track.size(); ++i) {
+    ReputationSlot& slot = raw.players[0].reputation_track[i];
+    slot.holds_ambassador = false;
+    slot.rep_value = ReputationTiles::NONE;
+    if (slot.kind != ReputationSlotKind::AMBASSADOR_ONLY) rep_slots.push_back(i);
+  }
+  SPIEL_CHECK_TRUE(rep_slots.size() >= 2);
+
+  // Occupy the LAST rep slot and leave an earlier one free. The keep must land
+  // in the free slot and must not touch the 4 VP tile.
+  raw.players[0].reputation_track[rep_slots.back()].rep_value =
+      ReputationTiles::FOUR;
+  raw.combat_state.drawn_tiles_size = 1;
+  raw.combat_state.drawn_tiles[0] = ReputationTiles::TWO;
+  const size_t bag_before = raw.reputation_tiles.size();
+
+  std::vector<Action> actions = state->LegalActions();
+  SPIEL_CHECK_EQ(actions.size(), 1u);
+  state->ApplyAction(actions[0]);
+
+  SPIEL_CHECK_EQ(raw.players[0].reputation_track[rep_slots.back()].rep_value,
+                 ReputationTiles::FOUR);
+  bool placed = false;
+  for (size_t slot_idx : rep_slots) {
+    if (slot_idx == rep_slots.back()) continue;
+    if (raw.players[0].reputation_track[slot_idx].rep_value ==
+        ReputationTiles::TWO) {
+      placed = true;
+    }
+  }
+  SPIEL_CHECK_TRUE(placed);
+  // Nothing was displaced, so nothing went back to the bag.
+  SPIEL_CHECK_EQ(raw.reputation_tiles.size(), bag_before);
+
+  // Full track: the eviction branch. It was unreachable before this fix
+  // because it re-tested the predicate the search above had just failed, so
+  // its "return the evicted tile to the bag" had never once run. Applying an
+  // action above advanced the round, so this starts from a fresh state rather
+  // than trying to rewind one.
+  std::unique_ptr<State> full = game->NewInitialState();
+  full->ApplyAction(0);
+  auto* full_es = static_cast<EclipseState*>(full.get());
+  ::State& fraw = const_cast<::State&>(full_es->RawState());
+
+  fraw.current_phase = RoundPhase::COMBAT;
+  fraw.combat_state.phase = CombatState::Phase::select_reputation_tile;
+  fraw.combat_state.tile_select_player = 0;
+  std::vector<size_t> full_slots;
+  for (size_t i = 0; i < fraw.players[0].reputation_track.size(); ++i) {
+    ReputationSlot& slot = fraw.players[0].reputation_track[i];
+    slot.holds_ambassador = false;
+    if (slot.kind == ReputationSlotKind::AMBASSADOR_ONLY) continue;
+    slot.rep_value = ReputationTiles::TWO;  // every rep slot taken
+    full_slots.push_back(i);
+  }
+  SPIEL_CHECK_TRUE(!full_slots.empty());
+  fraw.combat_state.drawn_tiles_size = 1;
+  fraw.combat_state.drawn_tiles[0] = ReputationTiles::FOUR;
+  const size_t bag_full_before = fraw.reputation_tiles.size();
+
+  const std::vector<Action> full_actions = full->LegalActions();
+  SPIEL_CHECK_EQ(full_actions.size(), 1u);
+  SPIEL_CHECK_EQ(full->ActionToString(0, full_actions[0]),
+                 "COMBAT_REPUTATION_SELECT_0");
+  full->ApplyAction(full_actions[0]);
+
+  // The highest-index tile made way for the better draw...
+  SPIEL_CHECK_EQ(fraw.players[0].reputation_track[full_slots.back()].rep_value,
+                 ReputationTiles::FOUR);
+  // ...and the tile it displaced is back in the bag rather than gone.
+  SPIEL_CHECK_EQ(fraw.reputation_tiles.size(), bag_full_before + 1);
+  bool returned_two = false;
+  for (size_t i = bag_full_before; i < fraw.reputation_tiles.size(); ++i) {
+    if (fraw.reputation_tiles[i] == ReputationTiles::TWO) returned_two = true;
+  }
+  SPIEL_CHECK_TRUE(returned_two);
 }
 
 void WarpDestinationAlwaysHasStopTest() {
@@ -4317,6 +4426,7 @@ int main(int argc, char** argv) {
   RUN_TEST(DiplomacyRequiresPopCubeFromBothSidesTest);
   RUN_TEST(AutoFreeAmbassadorSlotTest);
   RUN_TEST(ReputationTileAutoPicksBestTest);
+  RUN_TEST(ReputationTilePlacementPrefersEmptySlotTest);
   RUN_TEST(WarpDestinationAlwaysHasStopTest);
   RUN_TEST(DiplomacyAcceptAlwaysAllowsDeclineTest);
   RUN_TEST(LegalActionsNeverEmptyStressTest);

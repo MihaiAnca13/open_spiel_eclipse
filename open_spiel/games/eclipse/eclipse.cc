@@ -516,9 +516,11 @@ Action BestReputationTileAction(const ::State& state, const CombatState& cs) {
       best_idx = i;
     }
   }
-  // Placement writes into the LAST rep-capable slot, overwriting whatever sits
-  // there (see the select_reputation_tile case in ApplyAction), so a draw is
-  // only worth keeping if it beats the tile it would displace.
+  // What keeping it costs, mirroring the placement in ApplyAction: a free
+  // rep-capable slot costs nothing, and only a full track displaces a tile --
+  // the highest-index one. Keep these two in step; if placement prefers an
+  // empty slot and this does not, the draw looks expensive and good tiles get
+  // declined for free.
   if (cs.tile_select_player >= state.players.size()) {
     return action_combat_rep_select_start + best_idx;
   }
@@ -528,6 +530,10 @@ Action BestReputationTileAction(const ::State& state, const CombatState& cs) {
     const ReputationSlot& slot = p.reputation_track[i];
     if (slot.holds_ambassador) continue;
     if (slot.kind == ReputationSlotKind::AMBASSADOR_ONLY) continue;
+    if (slot.rep_value == ReputationTiles::NONE) {
+      displaced_vp = 0;  // a free slot: nothing is given up
+      break;
+    }
     displaced_vp = RepTileVp(slot.rep_value);
   }
   if (best_vp <= displaced_vp) return action_combat_rep_skip;
@@ -2688,10 +2694,19 @@ void EclipseState::ApplyCombatSubAction(Action action_id) {
         // Place the tile in a Reputation-capable slot (AMBASSADOR_OR_REP or
         // REP_ONLY). Cap at 5 by evicting the highest-index rep tile first.
         ::Player& p = s.players[player];
+        // The EMPTY rep-capable slot. Without the rep_value test this found the
+        // last rep-capable slot whether or not it held a tile, which had two
+        // consequences: a kept tile overwrote a tile that was already there
+        // (destroying it -- it never reached the bag, so the reputation_draw
+        // chance node's probabilities drifted for the rest of the game) even
+        // when an earlier slot was free, and the eviction branch below became
+        // unreachable, because it tested the same predicate this loop had just
+        // failed to satisfy.
         int last_rep_slot = -1;
         for (size_t i = 0; i < p.reputation_track.size(); ++i) {
           if (!p.reputation_track[i].holds_ambassador &&
-              p.reputation_track[i].kind != ReputationSlotKind::AMBASSADOR_ONLY) {
+              p.reputation_track[i].kind != ReputationSlotKind::AMBASSADOR_ONLY &&
+              p.reputation_track[i].rep_value == ReputationTiles::NONE) {
             last_rep_slot = static_cast<int>(i);
           }
         }
