@@ -232,9 +232,18 @@ all mass on the all-`main` profile. Conclusions:
    directly; neither arm is distinguishable from the control or from the other.
    The third suspect (entropy collapse) was not tested — the entropy-band arm
    never bound, see `eclipse_rl_todo.md`.
-2. **The plateau is measured, not inferred.** `ctrl763` does not clear chance
-   against 3x `ctrl625` (0.305 [0.243, 0.366]) — a policy cannot beat a snapshot
-   of its own run from 138 updates earlier, on 8,192 games.
+2. **No improvement is DETECTABLE past ~u625 — which is not the same as none
+   happening.** `ctrl763` does not clear chance against 3x `ctrl625`
+   (0.305 [0.243, 0.366]) on 8,192 games. But read the width: CIs here are
+   about ±0.06, so any true gain smaller than that is invisible to this suite,
+   and resolving a +0.02 effect would need roughly 9x the games. Two details
+   argue against calling the plateau proven: `ctrl763` holds the highest point
+   estimate in all three of its matchups (0.305 / 0.244 / 0.301) and the highest
+   AlphaRank mass (0.275). Not significant — but not the shape pure noise
+   usually takes either. **"Improvement continues below our noise floor" and
+   "improvement has stopped" both fit this data, and they call for opposite
+   responses.** Distinguishing them is the open question, and it needs no
+   training: the snapshots are already on disk.
 3. **The free-MOVE fix removed the crash and made measurement honest. It did not
    fix learning.** The optimistic earlier reading of that fix is superseded.
 
@@ -249,6 +258,41 @@ spending another multi-day arm, make the gate able to fail:** drop the oldest
 snapshot from the tournament, or add a verdict comparing newest against the
 previous snapshot. 18h of GPU on three arms produced a confidently wrong
 IMPROVING story that only an 8,192-game FFA caught.
+
+**Next three steps, in this order. None needs a training run.** All three are
+cheap, and together they decide whether this stack is sufficient or whether
+something structural is required — do them before spending another multi-day arm
+or changing the network.
+
+1. **Make the gate able to fail** (detail above): drop the oldest snapshot from
+   the tournament, or add a newest-vs-previous verdict. Until this lands, every
+   future run reports IMPROVING regardless of what it did, which is how 18h on
+   three arms produced a confidently wrong story.
+2. **Power the comparison.** Re-run the FFA newest-vs-previous on the snapshots
+   already on disk at a much higher `--metagame_replicates` (32 gave ±0.06; a
+   few hundred is affordable — the full 8,192-game suite took 17 min on one
+   idle GPU, measured 6.6 games/s at width 256). This answers conclusion 2
+   above: real plateau, or improvement below the noise floor. Everything else
+   depends on the answer, so do it first of the two measurements.
+3. **Test the metagame for intransitivity** using the per-profile utilities
+   already in `runs/crossarm/ffa_u625_32.npz` — no new games needed. If the
+   population is cyclic (A beats B beats C beats A), flat AlphaRank mass is the
+   EXPECTED outcome rather than evidence of no learning, and plain self-play
+   cannot produce a dominant policy however long it runs.
+
+Decision rule these feed: if (2) shows improvement continuing below the noise,
+this is an instrumentation and throughput problem and the existing stack is
+adequate — see the two uncommitted-to-remote throughput patches `cf6fa5d9` and
+`527ed459`, neither yet measured on a GPU. If (2) confirms a true plateau AND
+(3) shows intransitivity, that is the case for population-based methods (PSRO)
+or play-time search — the actor-only MCTS plan in `eclipse_rl_todo.md` — rather
+than more self-play. Nothing measured so far points at the network architecture
+being the limit, so change it last, not first.
+
+Still untested from the original suspect list: **entropy collapse**. Measured
+entropy sat at 0.79-0.86 and never fell toward zero, which argues against it,
+but the entropy-band arm built to probe it never bound (see
+`eclipse_rl_todo.md`) so it has not been tested directly.
 
 **Where the evidence lives** (all remote on `behemoth`, under
 `~/mihai/open_spiel_eclipse`; `runs/` is gitignored, so none of this is in git):
