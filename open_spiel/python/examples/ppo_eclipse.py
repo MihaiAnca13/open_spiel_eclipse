@@ -706,16 +706,37 @@ class SpatialEclipseEncoder(nn.Module):
     contract every actor-path caller (``self.actor``, ``ppo.shared``) depends
     on and what the compiled graph is built for.
     """
+    return self._encode(x)
+
+  def _encode(self, x, **kw):
+    """Call the encoder body, compiled when available, eager on failure.
+
+    Every entry point routes through here so --compile_encoder covers the paths
+    the run actually takes. It used to wrap only the no-kwarg (fused-only)
+    call, so --factored_actions (actor_context) and --critic_readout=cell_attn
+    (forward_with_cells) both went straight to eager -- i.e. the flag was close
+    to inert for exactly the production config, the third time this file has
+    misdirected the compile target (see eclipse_rl_todo.md, "Re-check the
+    compile target whenever the head's entry points are refactored").
+
+    torch.compile guards on the bool kwargs, so this is one graph per return
+    shape rather than one graph total: expect a longer cold compile.
+
+    Caveat kept from the original: a runtime failure in ANY variant disables
+    compilation for all of them. That is the conservative direction (correct,
+    slower) and it warns, but a cells-path failure will also cost the actor
+    path its graph.
+    """
     if self._compiled_context is None:
-      return self._encode_impl(x)
+      return self._encode_impl(x, **kw)
     try:
-      return self._compiled_context(x)
+      return self._compiled_context(x, **kw)
     except Exception as e:  # pylint: disable=broad-except
       warnings.warn(
           f"torch.compile(SpatialEclipseEncoder) failed at runtime ({e!r}); "
           "falling back to eager for the rest of this run.")
       self._compiled_context = None
-      return self._encode_impl(x)
+      return self._encode_impl(x, **kw)
 
   def forward_with_cells(self, x):
     """(fused, h_cells): the fused state PLUS the per-cell conv features.
@@ -723,15 +744,14 @@ class SpatialEclipseEncoder(nn.Module):
     The cell-attention critic needs ``h_cells`` (B, 64, 225) -- the actor path
     never does, so the plain ``forward``/``_encode_context`` path keeps
     returning just ``fused`` and this method exists only for the critic. ``x``
-    is encoded once (the same body, eager -- torch.compile is not set up for
-    the two-tensor return, and this is the new, not-yet-hot critic path).
+    is encoded once, through the compiled body when --compile_encoder is on.
     """
-    fused, h_cells = self._encode_impl(x, return_cells=True)
+    fused, h_cells = self._encode(x, return_cells=True)
     return fused, h_cells
 
   def actor_context(self, x):
     """Retain the V2 entities needed by candidate-action scoring."""
-    return self._encode_impl(x, return_context=True)
+    return self._encode(x, return_context=True)
 
   def _encode_impl(self, x, return_cells=False, return_context=False):
     b = x.shape[0]

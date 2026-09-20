@@ -275,6 +275,32 @@ class CellAttentionCriticTest(absltest.TestCase):
       g = self.net.aux_heads[name].weight.grad
       self.assertIsNone(g, f"old flat aux head {name} trained by breakdown")
 
+  def test_compile_target_covers_the_hot_encoder_paths(self):
+    """--compile_encoder must cover actor_context and forward_with_cells.
+
+    Misdirecting the compile target is invisible -- nothing errors, the flag
+    just stops paying (eclipse_rl_todo.md measured 3.99s vs 2.74s of learn
+    while misdirected). The production config uses --factored_actions
+    (actor_context) and --critic_readout=cell_attn (forward_with_cells), and
+    both used to call _encode_impl directly, straight past the compiled body.
+    Spies on the compiled slot rather than really compiling, so this stays a
+    fast unit test.
+    """
+    enc = self._net("cell_attn").shared
+    seen = []
+    enc._compiled_context = (
+        lambda t, **kw: (seen.append(kw), enc._encode_impl(t, **kw))[1])
+    x = torch.randn(2, self.obs_size)
+
+    enc(x)
+    enc.actor_context(x)
+    enc.forward_with_cells(x)
+
+    self.assertEqual(
+        seen,
+        [{}, {"return_context": True}, {"return_cells": True}],
+        "an encoder entry point bypassed the compiled body")
+
   def test_rank_aux_skips_the_breakdown_encode(self):
     """cell_attn + rank: aux_from_obs must not encode for an empty breakdown.
 
