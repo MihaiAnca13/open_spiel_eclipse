@@ -275,6 +275,44 @@ class CellAttentionCriticTest(absltest.TestCase):
       g = self.net.aux_heads[name].weight.grad
       self.assertIsNone(g, f"old flat aux head {name} trained by breakdown")
 
+  def test_rank_aux_skips_the_breakdown_encode(self):
+    """cell_attn + rank: aux_from_obs must not encode for an empty breakdown.
+
+    With --aux_target_mode=rank the only registered head is ``final_rank``,
+    which is not a breakdown name, so ``_vp_breakdown_from_features`` returns
+    {}. Computing it anyway cost a full encoder forward AND backward per
+    minibatch for a discarded result -- learn is ~74% of a training step, so
+    this was real money. Asserts the encode is skipped here and still happens
+    when a breakdown task IS registered, and that the prediction is unchanged.
+    """
+    self.net = self._net("cell_attn")  # aux_tasks=("final_rank",)
+    x = torch.randn(4, self.obs_size)
+
+    calls = []
+    real = self.net._critic_features
+    self.net._critic_features = lambda t: (calls.append(1), real(t))[1]
+
+    pred = self.net.aux_from_obs(x)
+    self.assertEqual(set(pred.keys()), {"final_rank"})
+    self.assertEqual(
+        calls, [], "rank-only aux still ran the breakdown encode")
+
+    # The value is unchanged: still the flat head off critic_trunk.
+    expected = self.net.aux_heads["final_rank"](self.net.critic_trunk(x))
+    self.assertTrue(torch.allclose(pred["final_rank"], expected, atol=1e-6))
+
+    # A registered breakdown task must still take the encode path.
+    bd = EclipsePPOAgent(
+        self.num_actions, (self.obs_size,), "cpu", width=self.width, depth=2,
+        aux_tasks=_AUX_TASKS_BY_MODE["breakdown"], factored_actions=self.fz,
+        encoder="spatial", critic_readout="cell_attn")
+    bd_calls = []
+    bd_real = bd._critic_features
+    bd._critic_features = lambda t: (bd_calls.append(1), bd_real(t))[1]
+    bd.aux_from_obs(x)
+    self.assertEqual(len(bd_calls), 1,
+                     "breakdown aux no longer encodes fused/h_cells")
+
   def test_breakdown_components_match_same_index_order(self):
     """Component k of vp_components maps to breakdown task name k."""
     self.net = self._net("cell_attn")

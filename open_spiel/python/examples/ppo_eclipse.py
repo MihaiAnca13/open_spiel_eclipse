@@ -1447,8 +1447,17 @@ class EclipsePPOAgent(nn.Module):
 
   def aux_from_obs(self, x):
     if self.critic_readout == "cell_attn":
-      fused, h_cells = self._critic_features(x)
-      pred = self._vp_breakdown_from_features(fused, h_cells)
+      # Only pay for the (fused, h_cells) encode when a breakdown task will
+      # actually read it. Under --aux_target_mode=rank the one registered head
+      # is final_rank, which is NOT in _VP_BREAKDOWN_TASK_NAMES, so
+      # _vp_breakdown_from_features returned {} -- and the encoder forward AND
+      # backward behind it were computed and thrown away, once per minibatch.
+      # Skipping it is bit-identical: an empty dict contributes nothing to the
+      # loss, so nothing downstream sees a different number.
+      pred = {}
+      if any(n in self.aux_heads for n in _VP_BREAKDOWN_TASK_NAMES):
+        fused, h_cells = self._critic_features(x)
+        pred = self._vp_breakdown_from_features(fused, h_cells)
       # Any non-breakdown aux task (e.g. final_vp/final_rank) still uses the
       # flat aux head off the fused vector.
       flat_names = [n for n in self.aux_heads if n not in pred]
