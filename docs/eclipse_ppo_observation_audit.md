@@ -196,17 +196,76 @@ game is now captured at 900 moves while it still exists. The largest find is the
 free MOVE action — see `eclipse_rl_todo.md`, "a likely cause of stops learning
 after update 100".
 
-**Still open before a long run — the late-regime blocker.** `eclipse_rl_todo.md`
-records that at `update_epochs=4` the rating is flat after update 100 (1,622
-updates inside one CI) and at `update_epochs=1` it rises to update 1700 then
-regresses below its own update-100 snapshot. That finding predates the
-observation and terminal-attribution fixes landed in this audit, so it may well
-have been caused by them and may already be fixed — but nothing has re-measured
-the late regime since. Three healthy 100-update seeds cannot speak to it. The
-cheapest next step is one medium diagnostic run carried past update 100 with the
-ladder and entropy tracked, testing the documented suspects in order: entropy
-collapse, `--lr_schedule=fixed` with no decay, and league overfitting to the
-bounded live-opponent set.
+**2026-09-20 — the late-regime blocker is now MEASURED, and it is not fixed.**
+The step above ("one medium diagnostic run carried past update 100") was run, as
+three arms rather than one, on the post-free-MOVE engine (`0c32d7c7`). Same seed,
+one variable each, ~18h, no crashes, `normal_end=1.00` and `safety_cap=0`
+throughout:
+
+| arm | variable | final age |
+|---|---|---|
+| `runs/main_v3` | production control | u763 |
+| `runs/lr_anneal` | `--lr_schedule=anneal` on a real 1,400-update horizon | u650 |
+| `runs/league_refresh` | `--live_opponent_refresh=250` | u625 |
+
+Every chunk gate in every arm read IMPROVING, with the ladder rising
+monotonically through u100-300 — the window where T1 went flat. **That reading
+was wrong.** `runs/crossarm/ffa_u625_32.json` compares `snap_u625` from all three
+arms plus `ctrl763` at a common age, 8,192 games, 32 matched setup/chance
+replicates, all four seats rotated, all completed normally. Rotated one-seat
+utility against four-player chance utility (0.25):
+
+| candidate | vs 3x ctrl625 | vs 3x anneal625 | vs 3x refresh625 | vs 3x ctrl763 | mixed |
+|---|---|---|---|---|---|
+| ctrl625 | — | 0.279 [0.215, 0.337] | 0.244 [0.177, 0.306] | 0.266 [0.211, 0.319] | 0.239 [0.221, 0.254] |
+| anneal625 | 0.309 [0.244, 0.377] | — | 0.207 [0.155, 0.262] | 0.291 [0.250, 0.344] | 0.263 [0.248, 0.279] |
+| refresh625 | 0.277 [0.213, 0.338] | 0.270 [0.213, 0.339] | — | 0.248 [0.175, 0.314] | 0.241 [0.226, 0.256] |
+| ctrl763 | 0.305 [0.243, 0.366] | 0.244 [0.173, 0.319] | 0.301 [0.236, 0.367] | — | 0.255 [0.233, 0.273] |
+
+**Not one of the sixteen clears 0.25.** AlphaRank seat-average mass is flat
+(0.216-0.275, every CI containing 0.25; top profile 0.031 against 0.0039 for
+uniform) — contrast the recovery pilot above, where AlphaRank put essentially
+all mass on the all-`main` profile. Conclusions:
+
+1. **Two of the three documented suspects are eliminated.** `--lr_schedule=fixed`
+   with no decay and league overfitting to the bounded live set were both tested
+   directly; neither arm is distinguishable from the control or from the other.
+   The third suspect (entropy collapse) was not tested — the entropy-band arm
+   never bound, see `eclipse_rl_todo.md`.
+2. **The plateau is measured, not inferred.** `ctrl763` does not clear chance
+   against 3x `ctrl625` (0.305 [0.243, 0.366]) — a policy cannot beat a snapshot
+   of its own run from 138 updates earlier, on 8,192 games.
+3. **The free-MOVE fix removed the crash and made measurement honest. It did not
+   fix learning.** The optimistic earlier reading of that fix is superseded.
+
+**The chunk gate cannot report a plateau, by construction — distrust it.**
+`tools/prune_roster.py` pins the endpoints of the birth-update range, so every
+gate tournament contains `snap_u25`. The IMPROVING verdict compares newest
+against *oldest*, so it only ever means "still beats a 25-update policy", which
+stays true indefinitely while recent progress is zero. The deceleration was
+present in the gate numbers (u275→u525 gains of +0.086 / +0.061 / +0.111 against
+u25→u275 gains of +0.29 to +0.37) but no verdict line reads it. **Before
+spending another multi-day arm, make the gate able to fail:** drop the oldest
+snapshot from the tournament, or add a verdict comparing newest against the
+previous snapshot. 18h of GPU on three arms produced a confidently wrong
+IMPROVING story that only an 8,192-game FFA caught.
+
+**Where the evidence lives** (all remote on `behemoth`, under
+`~/mihai/open_spiel_eclipse`; `runs/` is gitignored, so none of this is in git):
+
+- `runs/{main_v3,lr_anneal,league_refresh}/gates.log` — per-chunk gate verdicts
+  and rating tables, one block per chunk; the quickest way to re-read the runs.
+- `runs/{...}/train.log` — full trainer output, including `[timing uN]` lines and
+  the `resumed optimizer + counters: ... updates=N` line that gives the true
+  global age (the `[update N]` counter in this log is chunk-local, not the age).
+- `runs/{...}/gate_N.json` — machine-readable ladder results per gate.
+- `runs/{...}/snap_u*.pt` — full snapshot history at `--snapshot_every=25`,
+  nothing pruned (34 snapshots for `main_v3`).
+- `runs/crossarm/ffa_u625_32.{json,npz}` — the cross-arm FFA above; the `.json`
+  holds `one_vs_three` and `alpharank`, the `.npz` the raw per-profile utilities.
+- `runs/crossarm/roster.json` — built by `tools/stage_crossarm_roster.py`, which
+  indexes policies across separate run dirs without copying weights (the FFA
+  collector takes four ids from ONE roster dir, so cross-arm needs this).
 
 For each candidate:
 
@@ -236,7 +295,10 @@ closed. Promote to a long run only when every seed shows:
 - no safety-cap termination, with healthy round completion and no unexplained
   collapse into universal bankruptcy;
 - stable improvement on the held-out one-seat-versus-three suite over a
-  documented baseline and older snapshots.
+  documented baseline and older snapshots. **As of 2026-09-20 this last
+  criterion is known to FAIL beyond ~u625**: no arm beats an older snapshot of
+  its own run on the FFA suite (see the 2026-09-20 result above). The pilot gate
+  passes at u100; the long run does not hold it at u625.
 
 Do not add a larger network, recurrence, search, or a more elaborate league
 until this pilot identifies a bottleneck they address. The existing structured
