@@ -950,6 +950,62 @@ phase-sum-derived.**
 
 ---
 
+## 2026-09-20: three arms on the fixed engine — the gates say IMPROVING and an 8,192-game FFA says nothing is happening
+
+Three arms ran ~18h on the post-free-MOVE engine (commit `0c32d7c7`), same seed,
+one variable each: `runs/main_v3` (production control), `runs/lr_anneal`
+(`--lr_schedule=anneal` on a real 1,400-update horizon), `runs/league_refresh`
+(`--live_opponent_refresh=250`). No crashes, `normal_end=1.00` and
+`safety_cap=0` throughout. Final ages u763 / u650 / u625.
+
+**Every gate in every arm read IMPROVING.** The ladder rises monotonically
+through u100-300, the window where T1 went flat for 1,622 updates. Taken alone
+that looks like the free-MOVE fix cured the blocker.
+
+**It does not survive a proper comparison.** `runs/crossarm/ffa_u625_32.json`:
+`snap_u625` from all three arms plus `ctrl763`, 8,192 games, 32 matched
+setup/chance replicates, all four seats rotated, all completed normally.
+Rotated one-seat utility against four-player chance utility (0.25):
+
+| candidate | vs 3x ctrl625 | vs 3x anneal625 | vs 3x refresh625 | vs 3x ctrl763 | mixed |
+|---|---|---|---|---|---|
+| ctrl625 | — | 0.279 [0.215, 0.337] | 0.244 [0.177, 0.306] | 0.266 [0.211, 0.319] | 0.239 [0.221, 0.254] |
+| anneal625 | 0.309 [0.244, 0.377] | — | 0.207 [0.155, 0.262] | 0.291 [0.250, 0.344] | 0.263 [0.248, 0.279] |
+| refresh625 | 0.277 [0.213, 0.338] | 0.270 [0.213, 0.339] | — | 0.248 [0.175, 0.314] | 0.241 [0.226, 0.256] |
+| ctrl763 | 0.305 [0.243, 0.366] | 0.244 [0.173, 0.319] | 0.301 [0.236, 0.367] | — | 0.255 [0.233, 0.273] |
+
+**Not one pairing clears 0.25.** `utility_clears_chance` is false in all twelve
+homogeneous matchups and all four mixed lineups. AlphaRank seat-average mass is
+flat — ctrl625 0.238, anneal625 0.271, refresh625 0.216, ctrl763 0.275, every CI
+containing 0.25, and the top profile holds 0.031 of the mass against 0.0039 for
+uniform. Compare the recovery pilot, where AlphaRank put essentially all mass on
+the all-`main` profile.
+
+Three things follow:
+
+1. **Neither variable did anything.** LR decay and faster league rotation are
+   indistinguishable from the control and from each other. Both suspects from
+   the observation audit are now measured, not merely unstarted.
+2. **138 extra updates bought nothing measurable.** `ctrl763` vs 3x `ctrl625` is
+   0.305 [0.243, 0.366] — it does not clear chance against a snapshot of its own
+   run from 138 updates earlier. This is the plateau, measured directly.
+3. **The gate verdict is structurally misleading and should be distrusted.**
+   `prune_roster.py --keep` always pins the oldest snapshot, so every gate
+   includes `snap_u25`. IMPROVING only ever means "beats a 25-update policy",
+   which stays true forever while recent progress is zero. The deceleration was
+   visible in the gates (u275→u525 gains of +0.086 / +0.061 / +0.111 against
+   u25→u275 gains of +0.29 to +0.37) but the verdict line does not read it.
+
+So the free-MOVE fix removed the *crash* and made the measurement honest, but
+the learning plateau is NOT fixed — it is now measured at u625-763 with 8,192
+games instead of inferred from 24-game ladder pairs. This supersedes the
+optimistic reading recorded earlier in the day.
+
+**Do not run another long arm against the gate verdict.** The cheapest next step
+is to make the gate able to fail: drop `snap_u25` from the tournament, or add a
+verdict that compares the newest snapshot against the previous one rather than
+the oldest. Until then a run cannot report its own plateau.
+
 ## Still open, none of it gating
 
 - **The entropy-band diagnostic arm is dropped (decided 2026-09-19).** `runs/diag_entband`
