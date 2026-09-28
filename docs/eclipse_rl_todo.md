@@ -33,6 +33,10 @@ regresses.** Headline:
 learning". Do not start a long run until that is understood**: at either setting
 most of the hours buy nothing, and at ue=1 they actively cost rating.
 
+**Resolved 2026-09-27:** on the post-free-MOVE engine, `main_v3` improves CI-clear
+through u763 (see "2026-09-20/27" below). The blocker on a long run is lifted; resume
+`main_v3` under the fixed RECENT gate.
+
 ### 2026-09-19: a likely cause of "stops learning after update 100"
 
 **The MOVE action was free, and greedy play looped on it for ever.**
@@ -950,7 +954,7 @@ phase-sum-derived.**
 
 ---
 
-## 2026-09-20: three arms on the fixed engine — the gates say IMPROVING and an 8,192-game FFA says nothing is happening
+## 2026-09-20/27: three arms on the fixed engine — still learning at u763, no plateau
 
 Three arms ran ~18h on the post-free-MOVE engine (commit `0c32d7c7`), same seed,
 one variable each: `runs/main_v3` (production control), `runs/lr_anneal`
@@ -958,53 +962,37 @@ one variable each: `runs/main_v3` (production control), `runs/lr_anneal`
 (`--live_opponent_refresh=250`). No crashes, `normal_end=1.00` and
 `safety_cap=0` throughout. Final ages u763 / u650 / u625.
 
-**Every gate in every arm read IMPROVING.** The ladder rises monotonically
-through u100-300, the window where T1 went flat for 1,622 updates. Taken alone
-that looks like the free-MOVE fix cured the blocker.
+**The run is still improving at u763.** `runs/crossarm/lineage_256.json`: one
+lineage (`main_v3` u375 / u525 / u625 / u763), 65,536 greedy games, 256 matched
+setup/chance replicates, all seats rotated, all ended normally. Symmetric
+one-vs-three edge, `(A vs 3xB − B vs 3xA) / 2`, which cancels the protocol's
+odd-one-out bonus (the singleton averages ~0.26, not 0.25):
 
-**It does not survive a proper comparison.** `runs/crossarm/ffa_u625_32.json`:
-`snap_u625` from all three arms plus `ctrl763`, 8,192 games, 32 matched
-setup/chance replicates, all four seats rotated, all completed normally.
-Rotated one-seat utility against four-player chance utility (0.25):
+| later over earlier | edge | 95% CI | per 100 updates |
+|---|---|---|---|
+| u525 over u375 | +0.039 | [+0.022, +0.055] | +0.026 |
+| u625 over u525 | +0.073 | [+0.055, +0.091] | +0.073 |
+| u763 over u625 | +0.033 | [+0.017, +0.050] | +0.024 |
 
-| candidate | vs 3x ctrl625 | vs 3x anneal625 | vs 3x refresh625 | vs 3x ctrl763 | mixed |
-|---|---|---|---|---|---|
-| ctrl625 | — | 0.279 [0.215, 0.337] | 0.244 [0.177, 0.306] | 0.266 [0.211, 0.319] | 0.239 [0.221, 0.254] |
-| anneal625 | 0.309 [0.244, 0.377] | — | 0.207 [0.155, 0.262] | 0.291 [0.250, 0.344] | 0.263 [0.248, 0.279] |
-| refresh625 | 0.277 [0.213, 0.338] | 0.270 [0.213, 0.339] | — | 0.248 [0.175, 0.314] | 0.241 [0.226, 0.256] |
-| ctrl763 | 0.305 [0.243, 0.366] | 0.244 [0.173, 0.319] | 0.301 [0.236, 0.367] | — | 0.255 [0.233, 0.273] |
+Every later snapshot beats every earlier one CI-clear. The order is strictly
+transitive (no 3-cycles in the 2v2 head-to-heads), and AlphaRank puts 0.57 of the
+mass on u763 and 0.43 on u625. The rate is uneven but has not fallen toward zero:
+the last interval matches the first.
 
-**Not one pairing clears 0.25.** `utility_clears_chance` is false in all twelve
-homogeneous matchups and all four mixed lineups. AlphaRank seat-average mass is
-flat — ctrl625 0.238, anneal625 0.271, refresh625 0.216, ctrl763 0.275, every CI
-containing 0.25, and the top profile holds 0.031 of the mass against 0.0039 for
-uniform. Compare the recovery pilot, where AlphaRank put essentially all mass on
-the all-`main` profile.
+**This overturns the 2026-09-20 plateau reading.** The earlier 32-replicate
+cross-arm FFA (`ffa_u625_32.json`) had `ctrl763` vs 3x `ctrl625` at 0.305
+[0.243, 0.366]. That is the same point estimate as the powered 0.298
+[0.274, 0.322]: it was underpowered, not flat. The same caveat covers its other
+reading, "LR anneal and league refresh did nothing". It only rules out arm
+differences larger than about ±0.06 at u625, and one pair came close
+(anneal625 over refresh625, 2v2 +0.059 [−0.007, +0.128]). The same FFA shows no
+intransitivity among the three u625s either, but they are too alike to test it.
 
-Three things follow:
-
-1. **Neither variable did anything.** LR decay and faster league rotation are
-   indistinguishable from the control and from each other. Both suspects from
-   the observation audit are now measured, not merely unstarted.
-2. **138 extra updates bought nothing measurable.** `ctrl763` vs 3x `ctrl625` is
-   0.305 [0.243, 0.366] — it does not clear chance against a snapshot of its own
-   run from 138 updates earlier. This is the plateau, measured directly.
-3. **The gate verdict is structurally misleading and should be distrusted.**
-   `prune_roster.py --keep` always pins the oldest snapshot, so every gate
-   includes `snap_u25`. IMPROVING only ever means "beats a 25-update policy",
-   which stays true forever while recent progress is zero. The deceleration was
-   visible in the gates (u275→u525 gains of +0.086 / +0.061 / +0.111 against
-   u25→u275 gains of +0.29 to +0.37) but the verdict line does not read it.
-
-So the free-MOVE fix removed the *crash* and made the measurement honest, but
-the learning plateau is NOT fixed — it is now measured at u625-763 with 8,192
-games instead of inferred from 24-game ladder pairs. This supersedes the
-optimistic reading recorded earlier in the day.
-
-**Do not run another long arm against the gate verdict.** The cheapest next step
-is to make the gate able to fail: drop `snap_u25` from the tournament, or add a
-verdict that compares the newest snapshot against the previous one rather than
-the oldest. Until then a run cannot report its own plateau.
+**Budgeting.** One chunk's gain (~+0.03) is below what a 32-replicate FFA
+resolves; 256 replicates gives CIs of about ±0.017. The gate was likewise too
+coarse at 24 games/pair: re-scored newest-vs-previous, 11 of 12 gates read FLAT.
+The fixed gate (`run_long.sh`, 2026-09-27) pins the previous gate's `main` into
+each tournament, headlines a RECENT verdict against it, and plays 96 games/pair.
 
 ## Still open, none of it gating
 
@@ -1020,9 +1008,9 @@ the oldest. Until then a run cannot report its own plateau.
   In any case the thing the arm was built to probe — "stops learning after
   u100" — now has a much likelier explanation (the free-MOVE loop, fixed in
   66ac89ea; every ladder number past ~u100 was rated on games that never
-  finished). Re-measure the plateau on the fixed engine first. If it survives,
-  the arm is worth rebuilding with both edges set from the *then*-observed
-  entropy, tight enough that one of them actually binds. Second arm runs as a seed replicate (`SEED=2`, no `EXTRA`)
+  finished). Re-measured on the fixed engine (2026-09-27): there is no plateau
+  through u763, so the arm stays dropped. If a later stall appears, rebuild it
+  with both edges set from the entropy observed then, tight enough that one binds. Second arm runs as a seed replicate (`SEED=2`, no `EXTRA`)
   instead, which at least buys a variance estimate.
 
 - **`learn`'s remaining 35%.** `elementwise / copy` is the largest bucket now.

@@ -196,103 +196,39 @@ game is now captured at 900 moves while it still exists. The largest find is the
 free MOVE action — see `eclipse_rl_todo.md`, "a likely cause of stops learning
 after update 100".
 
-**2026-09-20 — the late-regime blocker is now MEASURED, and it is not fixed.**
-The step above ("one medium diagnostic run carried past update 100") was run, as
-three arms rather than one, on the post-free-MOVE engine (`0c32d7c7`). Same seed,
-one variable each, ~18h, no crashes, `normal_end=1.00` and `safety_cap=0`
-throughout:
+**2026-09-20/27 — the late regime is measured: still learning at u763.**
+The "one medium diagnostic run carried past update 100" was run on the post-free-MOVE
+engine (`0c32d7c7`) as three arms: `runs/main_v3` (control, to u763), `runs/lr_anneal`
+(`--lr_schedule=anneal`, u650) and `runs/league_refresh` (`--live_opponent_refresh=250`,
+u625). About 18h, no crashes, `normal_end=1.00`, `safety_cap=0` throughout.
 
-| arm | variable | final age |
-|---|---|---|
-| `runs/main_v3` | production control | u763 |
-| `runs/lr_anneal` | `--lr_schedule=anneal` on a real 1,400-update horizon | u650 |
-| `runs/league_refresh` | `--live_opponent_refresh=250` | u625 |
+A 256-replicate FFA along one lineage (65,536 games) finds each later snapshot
+CI-clear above each earlier one, with a strictly transitive order. u763 over u625 is
++0.033 [+0.017, +0.050] on the symmetric one-vs-three edge. The full table is in
+`eclipse_rl_todo.md`. Conclusions:
 
-Every chunk gate in every arm read IMPROVING, with the ladder rising
-monotonically through u100-300 — the window where T1 went flat. **That reading
-was wrong.** `runs/crossarm/ffa_u625_32.json` compares `snap_u625` from all three
-arms plus `ctrl763` at a common age, 8,192 games, 32 matched setup/chance
-replicates, all four seats rotated, all completed normally. Rotated one-seat
-utility against four-player chance utility (0.25):
+1. **The late-regime blocker is closed.** On the fixed engine this stack keeps
+   improving past u100 through u763, which the T1 runs never did. The free-MOVE fix
+   is the likeliest cause of the difference.
+2. **The 32-replicate FFA was underpowered, not flat.** One chunk's gain (~+0.03)
+   sits inside its ±0.06 CIs. The same limit applies to its reading that LR anneal
+   and league refresh made no difference: that is only established to within ~±0.06.
+3. **No intransitivity was found.** It isn't in the lineage, and the three u625s
+   are too alike to show any. There is no case yet for PSRO over plain self-play.
+4. **Entropy collapse is moot for now.** The run isn't stalled, and measured entropy
+   sat at 0.79-0.86.
 
-| candidate | vs 3x ctrl625 | vs 3x anneal625 | vs 3x refresh625 | vs 3x ctrl763 | mixed |
-|---|---|---|---|---|---|
-| ctrl625 | — | 0.279 [0.215, 0.337] | 0.244 [0.177, 0.306] | 0.266 [0.211, 0.319] | 0.239 [0.221, 0.254] |
-| anneal625 | 0.309 [0.244, 0.377] | — | 0.207 [0.155, 0.262] | 0.291 [0.250, 0.344] | 0.263 [0.248, 0.279] |
-| refresh625 | 0.277 [0.213, 0.338] | 0.270 [0.213, 0.339] | — | 0.248 [0.175, 0.314] | 0.241 [0.226, 0.256] |
-| ctrl763 | 0.305 [0.243, 0.366] | 0.244 [0.173, 0.319] | 0.301 [0.236, 0.367] | — | 0.255 [0.233, 0.273] |
+**Chunk gate.** It used to compare newest vs oldest, and `prune_roster.py` pins
+`snap_u25`, so IMPROVING only meant "beats a 25-update policy". At 24 games/pair
+it also lacked the resolution to see one chunk's gain: re-scored newest-vs-previous,
+11 of the 12 gates read FLAT. Fixed 2026-09-27. `run_long.sh` pins the previous
+gate's `main` (`prune_roster.py --pin_birth`), `gate_report.py --baseline_age` makes
+RECENT newest-vs-one-chunk-ago the headline, and `GATE_GAMES` defaults to 96.
 
-**Not one of the sixteen clears 0.25.** AlphaRank seat-average mass is flat
-(0.216-0.275, every CI containing 0.25; top profile 0.031 against 0.0039 for
-uniform) — contrast the recovery pilot above, where AlphaRank put essentially
-all mass on the all-`main` profile. Conclusions:
-
-1. **Two of the three documented suspects are eliminated.** `--lr_schedule=fixed`
-   with no decay and league overfitting to the bounded live set were both tested
-   directly; neither arm is distinguishable from the control or from the other.
-   The third suspect (entropy collapse) was not tested — the entropy-band arm
-   never bound, see `eclipse_rl_todo.md`.
-2. **No improvement is DETECTABLE past ~u625 — which is not the same as none
-   happening.** `ctrl763` does not clear chance against 3x `ctrl625`
-   (0.305 [0.243, 0.366]) on 8,192 games. But read the width: CIs here are
-   about ±0.06, so any true gain smaller than that is invisible to this suite,
-   and resolving a +0.02 effect would need roughly 9x the games. Two details
-   argue against calling the plateau proven: `ctrl763` holds the highest point
-   estimate in all three of its matchups (0.305 / 0.244 / 0.301) and the highest
-   AlphaRank mass (0.275). Not significant — but not the shape pure noise
-   usually takes either. **"Improvement continues below our noise floor" and
-   "improvement has stopped" both fit this data, and they call for opposite
-   responses.** Distinguishing them is the open question, and it needs no
-   training: the snapshots are already on disk.
-3. **The free-MOVE fix removed the crash and made measurement honest. It did not
-   fix learning.** The optimistic earlier reading of that fix is superseded.
-
-**The chunk gate cannot report a plateau, by construction — distrust it.**
-`tools/prune_roster.py` pins the endpoints of the birth-update range, so every
-gate tournament contains `snap_u25`. The IMPROVING verdict compares newest
-against *oldest*, so it only ever means "still beats a 25-update policy", which
-stays true indefinitely while recent progress is zero. The deceleration was
-present in the gate numbers (u275→u525 gains of +0.086 / +0.061 / +0.111 against
-u25→u275 gains of +0.29 to +0.37) but no verdict line reads it. **Before
-spending another multi-day arm, make the gate able to fail:** drop the oldest
-snapshot from the tournament, or add a verdict comparing newest against the
-previous snapshot. 18h of GPU on three arms produced a confidently wrong
-IMPROVING story that only an 8,192-game FFA caught.
-
-**Next three steps, in this order. None needs a training run.** All three are
-cheap, and together they decide whether this stack is sufficient or whether
-something structural is required — do them before spending another multi-day arm
-or changing the network.
-
-1. **Make the gate able to fail** (detail above): drop the oldest snapshot from
-   the tournament, or add a newest-vs-previous verdict. Until this lands, every
-   future run reports IMPROVING regardless of what it did, which is how 18h on
-   three arms produced a confidently wrong story.
-2. **Power the comparison.** Re-run the FFA newest-vs-previous on the snapshots
-   already on disk at a much higher `--metagame_replicates` (32 gave ±0.06; a
-   few hundred is affordable — the full 8,192-game suite took 17 min on one
-   idle GPU, measured 6.6 games/s at width 256). This answers conclusion 2
-   above: real plateau, or improvement below the noise floor. Everything else
-   depends on the answer, so do it first of the two measurements.
-3. **Test the metagame for intransitivity** using the per-profile utilities
-   already in `runs/crossarm/ffa_u625_32.npz` — no new games needed. If the
-   population is cyclic (A beats B beats C beats A), flat AlphaRank mass is the
-   EXPECTED outcome rather than evidence of no learning, and plain self-play
-   cannot produce a dominant policy however long it runs.
-
-Decision rule these feed: if (2) shows improvement continuing below the noise,
-this is an instrumentation and throughput problem and the existing stack is
-adequate — see the two uncommitted-to-remote throughput patches `cf6fa5d9` and
-`527ed459`, neither yet measured on a GPU. If (2) confirms a true plateau AND
-(3) shows intransitivity, that is the case for population-based methods (PSRO)
-or play-time search — the actor-only MCTS plan in `eclipse_rl_todo.md` — rather
-than more self-play. Nothing measured so far points at the network architecture
-being the limit, so change it last, not first.
-
-Still untested from the original suspect list: **entropy collapse**. Measured
-entropy sat at 0.79-0.86 and never fell toward zero, which argues against it,
-but the entropy-band arm built to probe it never bound (see
-`eclipse_rl_todo.md`) so it has not been tested directly.
+**Next.** The stack is adequate, so the lever is throughput and hours. Measure the
+unmeasured throughput patches `cf6fa5d9` and `527ed459` on GPU, then resume
+`main_v3` from u763 under the fixed gate. Pick a peak with a powered lineage FFA,
+not the gate. For sizing, 256 replicates of a 4-policy suite took 2h07m on GPU 3.
 
 **Where the evidence lives** (all remote on `behemoth`, under
 `~/mihai/open_spiel_eclipse`; `runs/` is gitignored, so none of this is in git):
@@ -305,8 +241,11 @@ but the entropy-band arm built to probe it never bound (see
 - `runs/{...}/gate_N.json` — machine-readable ladder results per gate.
 - `runs/{...}/snap_u*.pt` — full snapshot history at `--snapshot_every=25`,
   nothing pruned (34 snapshots for `main_v3`).
-- `runs/crossarm/ffa_u625_32.{json,npz}` — the cross-arm FFA above; the `.json`
-  holds `one_vs_three` and `alpharank`, the `.npz` the raw per-profile utilities.
+- `runs/crossarm/lineage_256.{json,npz}` — the powered `main_v3` lineage FFA
+  (u375/u525/u625/u763, 256 replicates); the `.json` holds `one_vs_three` and
+  `alpharank`, the `.npz` the raw per-profile utilities.
+- `runs/crossarm/ffa_u625_32.{json,npz}` — the underpowered 32-replicate cross-arm
+  FFA (three arms at u625 plus `ctrl763`).
 - `runs/crossarm/roster.json` — built by `tools/stage_crossarm_roster.py`, which
   indexes policies across separate run dirs without copying weights (the FFA
   collector takes four ids from ONE roster dir, so cross-arm needs this).
