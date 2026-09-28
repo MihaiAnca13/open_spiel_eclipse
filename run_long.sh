@@ -10,7 +10,8 @@
 #   and mean_episode_return sat at 17. Every training-side metric said the run
 #   was fine. Only a ladder saw it. So this script does not run for days and
 #   then look: it stops on a cadence, rates recent snapshots against older ones
-#   in ONE tournament, and prints IMPROVING / FLAT / REGRESSING.
+#   in ONE tournament, and prints IMPROVING / FLAT / REGRESSING against the
+#   policy one chunk older.
 #
 #   Chunking is also why the run is safe to leave alone. --resume restores the
 #   optimizer moments, the step/update counters and the roster, so a chunk
@@ -112,7 +113,11 @@ CHUNK1="${CHUNK1:-7200}"       # first chunk short: an early read on the bet
 CHUNK="${CHUNK:-21600}"        # 6h thereafter; the gate is ~4% on top
 CHUNKS="${CHUNKS:-13}"         # 2h + 12x6h = 74h of training
 GATE_KEEP="${GATE_KEEP:-3}"    # snapshots subsampled per gate (+ main)
-GATE_GAMES="${GATE_GAMES:-24}" # per pair per seat direction
+# per pair per seat direction. 24 gave rating CIs of about +/-0.06, too wide to
+# resolve one chunk's gain: re-scored newest-vs-previous, 11 of the 12 gates of
+# the 2026-09-20 arms read FLAT, u275->u525's +0.086 included. 96 halves the
+# width, for ~10 min a gate (~4K games at ~7 games/s).
+GATE_GAMES="${GATE_GAMES:-96}"
 SEED="${SEED:-1}"
 
 ENVS=1024; STEPS=128; UE=4; K=4
@@ -147,6 +152,7 @@ say "chunks=$CHUNKS (first ${CHUNK1}s, then ${CHUNK}s)  gate: keep=$GATE_KEEP ga
 say "commit $(git rev-parse --short HEAD)"
 say ""
 
+PREV_AGE=""   # the previous gate's main, pinned into the next tournament
 for i in $(seq 1 "$CHUNKS"); do
   if [ -f "$RUN/STOP" ]; then
     say "[chunk $i] STOP file present — exiting cleanly."
@@ -212,11 +218,14 @@ for i in $(seq 1 "$CHUNKS"); do
   # not comparable across ladder runs, so each gate is read on its internal
   # ordering only -- never by diffing a number against the previous gate.
   # prune_roster writes a roster.json pointing at the ORIGINAL .pt files, so
-  # this copies nothing.
+  # this copies nothing. The previous gate's main is pinned in, because the
+  # subsample's endpoints alone only measure newest vs u25 -- see gate_report.
   GDIR="$RUN/gate_$i"
   rm -rf "$GDIR"
+  PIN=(); [ -n "$PREV_AGE" ] && PIN=(--pin_birth="$PREV_AGE")
+  BASE=(); [ -n "$PREV_AGE" ] && BASE=(--baseline_age="$PREV_AGE")
   .venv/bin/python tools/prune_roster.py "$RUN" "$GDIR" --keep="$GATE_KEEP" \
-    >> "$RUN/gate.log" 2>&1
+    "${PIN[@]}" >> "$RUN/gate.log" 2>&1
   .venv/bin/python -m open_spiel.python.eclipse.roster_ladder \
     --game='eclipse(players=4)' --cuda --seed="$SEED" \
     --ladder_roster_dir="$GDIR" \
@@ -232,8 +241,10 @@ for i in $(seq 1 "$CHUNKS"); do
     say "          is unjudged. Check $RUN/gate.log."
   else
     say "[gate $i] $(date +%F' '%H:%M:%S)"
-    .venv/bin/python tools/gate_report.py "$RUN/gate_$i.json" | tee -a "$GATES"
+    .venv/bin/python tools/gate_report.py "$RUN/gate_$i.json" "${BASE[@]}" \
+      | tee -a "$GATES"
   fi
+  PREV_AGE="$AGE"
   say ""
 done
 

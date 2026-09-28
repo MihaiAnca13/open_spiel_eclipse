@@ -42,12 +42,31 @@ def pick(entries, keep):
   return [snaps[i] for i in sorted(set(idx))]
 
 
+def pin(entries, chosen, birth):
+  """Adds the snapshot born nearest `birth` to `chosen`, unless already there.
+
+  The gate pins the previous gate's `main` here so each tournament holds the
+  policy from one chunk ago: newest-vs-oldest (the endpoints `pick` keeps) only
+  ever says "still beats u25", which stays true long after progress stops.
+  """
+  snaps = [e for e in entries if e["role"] == "snapshot"]
+  if not snaps:
+    return chosen
+  near = min(snaps, key=lambda e: abs(e["birth_update"] - birth))
+  if any(e["policy_id"] == near["policy_id"] for e in chosen):
+    return chosen
+  return sorted(chosen + [near], key=lambda e: e["birth_update"])
+
+
 def main():
   ap = argparse.ArgumentParser()
   ap.add_argument("src")
   ap.add_argument("dst")
   ap.add_argument("--keep", type=int, default=4,
                   help="snapshots to keep per roster (main is always kept)")
+  ap.add_argument("--pin_birth", type=int, default=None,
+                  help="also keep the snapshot born nearest this update, on "
+                       "top of the --keep budget")
   args = ap.parse_args()
 
   with open(os.path.join(args.src, "roster.json")) as f:
@@ -65,6 +84,8 @@ def main():
                         and e["birth_update"] in main_births)]
   dropped = len(entries) - len(candidates)
   chosen = pick(candidates, args.keep)
+  if args.pin_birth is not None:
+    chosen = pin(candidates, chosen, args.pin_birth)
 
   os.makedirs(args.dst, exist_ok=True)
   arch = os.path.join(args.src, "arch.json")

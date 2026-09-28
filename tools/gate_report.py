@@ -13,10 +13,29 @@ neither of which any training-side metric showed:
   FLAT       -- no snapshot clears any other's CI. 200M steps bought nothing.
   REGRESSING -- a later snapshot rates CI-clear BELOW an earlier one.
 
-Usage:  gate_report.py <ladder.json>
+The headline verdict is RECENT: newest against the snapshot nearest
+--baseline_age, which run_long.sh sets to the previous gate's `main`, i.e. what
+the last chunk bought. The newest-vs-oldest line is kept as an anchor, but it
+cannot detect a plateau: prune_roster pins the oldest snapshot (u25), so it
+reads IMPROVING for as long as the run still beats a 25-update policy, whether
+or not the last chunk bought anything.
+
+Usage:  gate_report.py <ladder.json> [--baseline_age N]
 """
+import argparse
 import json
 import sys
+
+
+def _compare(new, old):
+  """IMPROVING / REGRESSING / FLAT for `new` against `old`, by CI clearance."""
+  if new["rating_ci"][0] > old["rating_ci"][1]:
+    return "IMPROVING", (f"{new['rating_ci'][0]:.3f} > "
+                         f"{old['rating_ci'][1]:.3f}")
+  if new["rating_ci"][1] < old["rating_ci"][0]:
+    return "REGRESSING", (f"{new['rating_ci'][1]:.3f} < "
+                          f"{old['rating_ci'][0]:.3f}")
+  return "FLAT", "CIs overlap"
 
 
 def _age(pid):
@@ -31,10 +50,13 @@ def _age(pid):
 
 
 def main():
-  if len(sys.argv) != 2:
-    print(__doc__.strip().splitlines()[-1])
-    return 2
-  with open(sys.argv[1]) as f:
+  ap = argparse.ArgumentParser(usage=__doc__.strip().splitlines()[-1])
+  ap.add_argument("ladder_json")
+  ap.add_argument("--baseline_age", type=int, default=None,
+                  help="age of the previous gate's main; the RECENT verdict "
+                       "compares newest against the net nearest it")
+  args = ap.parse_args()
+  with open(args.ladder_json) as f:
     d = json.load(f)
 
   pols = d["policies"]
@@ -65,10 +87,6 @@ def main():
   first, last = nets[0], nets[-1]
   best = max(nets, key=lambda p: p["rating"])
 
-  # CI-clear in either direction, against the OLDEST net in the tournament.
-  gained = last["rating_ci"][0] > first["rating_ci"][1]
-  lost = last["rating_ci"][1] < first["rating_ci"][0]
-
   # Any CI-clear regression from an earlier peak to the newest policy is the
   # shape that matters most: it is what makes the final policy the wrong one to
   # ship, and it is invisible in vp_all / mean_episode_return / vs-Greedy.
@@ -76,20 +94,20 @@ def main():
                and last["rating_ci"][1] < best["rating_ci"][0])
 
   print()
-  if gained:
-    verdict = "IMPROVING"
-    why = (f"newest ({last['id']}) clears oldest ({first['id']}) CI: "
-           f"{last['rating_ci'][0]:.3f} > {first['rating_ci'][1]:.3f}")
-  elif lost:
-    verdict = "REGRESSING"
-    why = (f"newest ({last['id']}) rates CI-clear BELOW oldest "
-           f"({first['id']}): {last['rating_ci'][1]:.3f} < "
-           f"{first['rating_ci'][0]:.3f}")
+  if args.baseline_age is None:
+    print("  GATE: RECENT n/a — no previous gate to compare against")
   else:
-    verdict = "FLAT"
-    why = (f"newest ({last['id']}) and oldest ({first['id']}) CIs overlap — "
-           f"no measurable gain over this span")
-  print(f"  GATE: {verdict} — {why}")
+    base = min(nets[:-1], key=lambda p: abs(sort_key(p) - args.baseline_age))
+    verdict, why = _compare(last, base)
+    print(f"  GATE: RECENT {verdict} — newest ({last['id']}) vs one chunk ago "
+          f"({base['id']}): {why}")
+    if sort_key(base) != args.baseline_age:
+      print(f"  GATE: WARNING — no net aged {args.baseline_age} in this "
+            f"tournament; RECENT used the nearest, age {sort_key(base)}")
+
+  verdict, why = _compare(last, first)
+  print(f"  GATE: vs anchor {verdict} — newest vs oldest ({first['id']}): "
+        f"{why}  (cannot detect a plateau; read RECENT)")
 
   if peak_drop:
     print(f"  GATE: PAST PEAK — best is {best['id']} "
