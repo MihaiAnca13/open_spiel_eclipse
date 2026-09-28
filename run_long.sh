@@ -152,8 +152,19 @@ say "chunks=$CHUNKS (first ${CHUNK1}s, then ${CHUNK}s)  gate: keep=$GATE_KEEP ga
 say "commit $(git rev-parse --short HEAD)"
 say ""
 
+# A restart must continue the gate numbering: the gate block rm -rf's gate_$i,
+# so counting from 1 again would delete the earlier gates' results. It also
+# picks up the last gate's main as the RECENT baseline, which otherwise only
+# lives inside one invocation.
+LAST_GATE=$(ls "$RUN"/gate_*.json 2>/dev/null | sed 's/.*gate_//;s/\.json$//' \
+            | sort -n | tail -1)
+FIRST=$(( ${LAST_GATE:-0} + 1 ))
 PREV_AGE=""   # the previous gate's main, pinned into the next tournament
-for i in $(seq 1 "$CHUNKS"); do
+if [ -n "$LAST_GATE" ]; then
+  PREV_AGE=$(.venv/bin/python -c "import json, sys; print(next(p['birth_update'] for p in json.load(open(sys.argv[1]))['policies'] if p['id'].endswith(':main')))" "$RUN/gate_$LAST_GATE.json")
+  say "resuming after gate $LAST_GATE (main u$PREV_AGE): gates continue at $FIRST"
+fi
+for i in $(seq "$FIRST" $(( FIRST + CHUNKS - 1 ))); do
   if [ -f "$RUN/STOP" ]; then
     say "[chunk $i] STOP file present — exiting cleanly."
     break
@@ -168,7 +179,7 @@ for i in $(seq 1 "$CHUNKS"); do
   RESUME=()
   [ -f "$RUN/main.pt" ] && RESUME=(--resume=main)
 
-  say "[chunk $i/$CHUNKS] train ${SECS}s  $(date +%F' '%H:%M:%S)  ${RESUME[*]:-fresh}"
+  say "[chunk $i/$(( FIRST + CHUNKS - 1 ))] train ${SECS}s  $(date +%F' '%H:%M:%S)  ${RESUME[*]:-fresh}"
   .venv/bin/python -m open_spiel.python.examples.ppo_eclipse \
     --game='eclipse(players=4)' --seed="$SEED" --cuda \
     --encoder=spatial --nn_activation=tanh \
