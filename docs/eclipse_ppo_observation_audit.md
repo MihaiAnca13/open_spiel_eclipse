@@ -225,8 +225,24 @@ it also lacked the resolution to see one chunk's gain: re-scored newest-vs-previ
 gate's `main` (`prune_roster.py --pin_birth`), `gate_report.py --baseline_age` makes
 RECENT newest-vs-one-chunk-ago the headline, and `GATE_GAMES` defaults to 96.
 
-**Next.** The stack is adequate, so the lever is throughput and hours. Measure the
-unmeasured throughput patches `cf6fa5d9` and `527ed459` on GPU, then resume
+**Throughput patches measured (2026-09-28): 1.9x.** `cf6fa5d9` (skip the discarded
+breakdown encode) and `527ed459` (route every encoder entry point through the
+compiled body) were A/B'd on GPU 3 from identical fresh starts with production
+flags, 25 min per arm, median of u3+:
+
+| arm | act ms/env | rollout s | learn s | update s | sps |
+|---|---|---|---|---|---|
+| pre (`a8ef4860`) | 122.8 | 22.83 | 100.57 | 123.37 | 1,062 |
+| + `cf6fa5d9` | 121.9 | 22.71 | 83.49 | 106.19 | 1,234 |
+| + `527ed459` (HEAD) | 64.8 | 15.38 | 49.16 | 64.65 | 2,028 |
+
+Per-update spread was under ±1 s in every arm. There were no compile fallbacks or
+recompiles, and the cold compile did not lengthen u0 (118.5 s vs 128.2 s). Loss,
+entropy and KL track across arms at matched steps. These are fresh-start numbers.
+`main_v3` ran pre-patch at ~93 s/update late in the run, so confirm the late-regime
+ratio from the resumed run's `[timing]` lines rather than assuming 1.9x.
+
+**Next.** The stack is adequate, so the lever is throughput and hours. Resume
 `main_v3` from u763 under the fixed gate. Pick a peak with a powered lineage FFA,
 not the gate. For sizing, 256 replicates of a 4-policy suite took 2h07m on GPU 3.
 

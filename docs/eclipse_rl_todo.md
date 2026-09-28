@@ -35,7 +35,9 @@ most of the hours buy nothing, and at ue=1 they actively cost rating.
 
 **Resolved 2026-09-27:** on the post-free-MOVE engine, `main_v3` improves CI-clear
 through u763 (see "2026-09-20/27" below). The blocker on a long run is lifted; resume
-`main_v3` under the fixed RECENT gate.
+`main_v3` under the fixed RECENT gate. The two 2026-09-20 throughput patches
+measure 1.9x from a fresh start (123.4 → 64.7 s/update; table in
+`eclipse_ppo_observation_audit.md`).
 
 ### 2026-09-19: a likely cause of "stops learning after update 100"
 
