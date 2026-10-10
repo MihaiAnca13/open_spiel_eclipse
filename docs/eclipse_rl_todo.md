@@ -33,11 +33,27 @@ regresses.** Headline:
 learning". Do not start a long run until that is understood**: at either setting
 most of the hours buy nothing, and at ue=1 they actively cost rating.
 
-**Resolved 2026-09-27:** on the post-free-MOVE engine, `main_v3` improves CI-clear
-through u763 (see "2026-09-20/27" below). The blocker on a long run is lifted; resume
-`main_v3` under the fixed RECENT gate. The two 2026-09-20 throughput patches
-measure 1.9x from a fresh start (123.4 → 64.7 s/update; table in
+**`main_v3` is the production run** (GPU 3, commit `44192abf`). It was resumed from
+u763 on 2026-10-08 and stopped by request on 2026-10-10 during chunk 12 of 17. Gates
+5–11 read FLAT under the RECENT rule, and gate 5 was only marginally improving.
+Since gate 5 the best-in-tournament rating has stayed in 1.17–1.21. The newest policy
+at u3602 rates 1.192 [1.166, 1.222]. Read this as a plateau, not as proof of one: the
+gate cannot separate a plateau from slow gain. No training error, OOM, or stall in 12
+chunks. GPU 3 peaked at 95.5 GB, which is the headroom to watch. The two 2026-09-20
+throughput patches measure 1.9x from a fresh start (123.4 → 64.7 s/update; table in
 `eclipse_ppo_observation_audit.md`).
+
+**Score breakdown, post hoc** (512 greedy self-play games, roster `main` at the time of
+the replay, reported birth 2150; not yet cross-checked against the checkpoint lineage).
+Mean VP per seat is 24.5: sectors 10.5, discovery 4.8, reputation 4.4, ambassadors 1.8,
+species 1.8, minor species 1.5, traitor −0.3. Monoliths and tech tracks are 0.
+Open questions, neither verified:
+- No seat ever holds more than one tech on any track, and no monolith is built. This
+  may be real, or the research masks may be misread.
+- 24.5 does not match the logged `vp_all` (≈20.5) or `mean_term_return` (≈21.5).
+  Candidate explanation: the replay acts greedily while training samples. Untested.
+- Ancient clears and galactic-center defeats are not recorded anywhere. The engine has
+  the state to count them, but nothing emits a counter.
 
 ### 2026-09-19: a likely cause of "stops learning after update 100"
 
